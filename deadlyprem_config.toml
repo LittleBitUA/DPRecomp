@@ -1,0 +1,317 @@
+# deadlyprem - ReXGlue codegen config
+#
+# Add named functions (indirect-call targets), midasm hooks, switch tables,
+# and CRT addresses here as codegen and runtime surface issues.
+#
+# Cheat sheet for each section:
+#
+#   [functions]
+#   # Force-register a function at ADDR (auto-discovery missed it). Optionally
+#   # pin its end, parent (for nested splits), or give a custom name.
+#   "0x82XXXXXX" = { name = "sub_82XXXXXX" }
+#   "0x82XXXXXX" = { end = 0x82XXXXXX }
+#   "0x82XXXXXX" = { end = 0x82XXXXXX, parent = 0x82XXXXXX }
+#
+#   [[switch_tables]]
+#   # When codegen can't auto-detect a jump table, describe it manually.
+#   address = 0x82XXXXXX
+#   register = "r3"
+#   labels = [0x82XXXXXX, 0x82XXXXXX]
+#
+#   [[midasm_hook]]
+#   # Inject host code mid-instruction. Implement in src/deadlyprem_hooks.cpp.
+#   #
+#   # Variants:
+#   #   - skip-an-instruction: set `jump_address` to the next-after-bad insn
+#   #   - conditional skip: hook returns bool, with `jump_address_on_true`
+#   #   - read/modify regs: list them in `registers = ["r3","r4"]`
+#   #   - drop-in callable: `return = true` (codegen will RET from the hook)
+#   address = 0x82XXXXXX
+#   name = "DeadlypremExampleHook"
+#   registers = ["r3"]
+#   return = true
+#
+#   [rexcrt]
+#   # If the game ships a static CRT, point rexglue at its memcpy/memset/etc so
+#   # the runtime can substitute native vectorised versions.
+#   memcpy  = 0x82XXXXXX
+#   memset  = 0x82XXXXXX
+#   memmove = 0x82XXXXXX
+
+[functions]
+
+# Tail-branch targets that GapFill did not register as standalone functions.
+# Same SDK pattern as ESR's Workaround #2 (unconditional `b` to undiscovered target).
+# Discovered on first codegen of DP PAL (media ID 7DE95D93).
+"0x8236BE50" = { name = "sub_8236BE50" }  # tail target from 0x82472D6C
+"0x825814F8" = { name = "sub_825814F8" }  # tail target from 0x8275C148
+"0x825D2E18" = { name = "sub_825D2E18" }  # tail target from 0x825D2E24
+"0x82627480" = { name = "sub_82627480" }  # tail target from 0x826326D0
+
+# Runtime-discovered bctr/vtable thunks not seen by auto-discovery (no RTTI).
+# Same pattern as ESR Workaround #1 — add as runtime crashes surface each one.
+"0x82500920" = { name = "sub_82500920" }  # crash run-1, after SetInterruptCallback
+"0x825E0278" = { name = "sub_825E0278" }  # crash run-2, in audio/XMA path
+"0x825D6658" = { name = "sub_825D6658" }  # crash run-3
+"0x8278CCB8" = { name = "sub_8278CCB8" }  # crash on "New Game" from main menu
+"0x821FBEA8" = { name = "sub_821FBEA8" }  # crash during loading screen
+
+
+# Batch-discovered missing functions (sp00nznet/360tools find_missing_vtable_funcs.py)
+"0x8226CEC0" = { name = "sub_8226CEC0" }
+"0x8227EAA8" = { name = "sub_8227EAA8" }
+"0x823920C8" = { name = "sub_823920C8" }
+"0x82392140" = { name = "sub_82392140" }
+"0x82500930" = { name = "sub_82500930" }
+"0x825688E8" = { name = "sub_825688E8" }
+"0x8256C0B0" = { name = "sub_8256C0B0" }
+"0x82573D28" = { name = "sub_82573D28" }
+"0x825A63C0" = { name = "sub_825A63C0" }
+"0x825A6420" = { name = "sub_825A6420" }
+"0x825B0884" = { name = "sub_825B0884" }
+"0x825B0934" = { name = "sub_825B0934" }
+"0x825B137C" = { name = "sub_825B137C" }
+"0x825B1388" = { name = "sub_825B1388" }
+"0x825B1690" = { name = "sub_825B1690" }
+"0x825B16E0" = { name = "sub_825B16E0" }
+"0x825B1800" = { name = "sub_825B1800" }
+"0x825B1908" = { name = "sub_825B1908" }
+"0x825B2244" = { name = "sub_825B2244" }
+"0x825B225C" = { name = "sub_825B225C" }
+"0x825B2760" = { name = "sub_825B2760" }
+"0x825B277C" = { name = "sub_825B277C" }
+"0x825B3448" = { name = "sub_825B3448" }
+"0x825B3484" = { name = "sub_825B3484" }
+"0x825B481C" = { name = "sub_825B481C" }
+"0x825B4828" = { name = "sub_825B4828" }
+"0x825B49F4" = { name = "sub_825B49F4" }
+"0x825B4A08" = { name = "sub_825B4A08" }
+"0x825B4E44" = { name = "sub_825B4E44" }
+"0x825B4E74" = { name = "sub_825B4E74" }
+"0x825B5040" = { name = "sub_825B5040" }
+"0x825B5094" = { name = "sub_825B5094" }
+"0x825B50F4" = { name = "sub_825B50F4" }
+"0x825B510C" = { name = "sub_825B510C" }
+"0x825B5250" = { name = "sub_825B5250" }
+"0x825B525C" = { name = "sub_825B525C" }
+"0x825B5780" = { name = "sub_825B5780" }
+"0x825B57A0" = { name = "sub_825B57A0" }
+"0x825B57AC" = { name = "sub_825B57AC" }
+"0x825B6E40" = { name = "sub_825B6E40" }
+"0x825B6F54" = { name = "sub_825B6F54" }
+"0x825B75D4" = { name = "sub_825B75D4" }
+"0x825B760C" = { name = "sub_825B760C" }
+"0x825B9378" = { name = "sub_825B9378" }
+"0x825B94C4" = { name = "sub_825B94C4" }
+"0x825B97C4" = { name = "sub_825B97C4" }
+"0x825B9848" = { name = "sub_825B9848" }
+"0x825B9A28" = { name = "sub_825B9A28" }
+"0x825B9A74" = { name = "sub_825B9A74" }
+"0x825B9E6C" = { name = "sub_825B9E6C" }
+"0x825B9EB8" = { name = "sub_825B9EB8" }
+"0x825BB554" = { name = "sub_825BB554" }
+"0x825BB59C" = { name = "sub_825BB59C" }
+"0x825BBB44" = { name = "sub_825BBB44" }
+"0x825BBB90" = { name = "sub_825BBB90" }
+"0x825BBDA8" = { name = "sub_825BBDA8" }
+"0x825BBE38" = { name = "sub_825BBE38" }
+"0x825BBFD4" = { name = "sub_825BBFD4" }
+"0x825BC034" = { name = "sub_825BC034" }
+"0x825BC0D8" = { name = "sub_825BC0D8" }
+"0x825BC134" = { name = "sub_825BC134" }
+"0x825BC468" = { name = "sub_825BC468" }
+"0x825BC4A4" = { name = "sub_825BC4A4" }
+"0x825BC4E0" = { name = "sub_825BC4E0" }
+"0x825BC4F0" = { name = "sub_825BC4F0" }
+"0x825BC50C" = { name = "sub_825BC50C" }
+"0x825BC64C" = { name = "sub_825BC64C" }
+"0x825BC658" = { name = "sub_825BC658" }
+"0x825BC668" = { name = "sub_825BC668" }
+"0x825BC7E0" = { name = "sub_825BC7E0" }
+"0x825BC9C4" = { name = "sub_825BC9C4" }
+"0x825BC9D4" = { name = "sub_825BC9D4" }
+"0x825BCA40" = { name = "sub_825BCA40" }
+"0x825BCB04" = { name = "sub_825BCB04" }
+"0x825BCB14" = { name = "sub_825BCB14" }
+"0x825BD1B8" = { name = "sub_825BD1B8" }
+"0x825BD1C4" = { name = "sub_825BD1C4" }
+"0x825BD1D4" = { name = "sub_825BD1D4" }
+"0x825BD2D4" = { name = "sub_825BD2D4" }
+"0x825BD2DC" = { name = "sub_825BD2DC" }
+"0x825BD2E8" = { name = "sub_825BD2E8" }
+"0x825BD334" = { name = "sub_825BD334" }
+"0x825BD33C" = { name = "sub_825BD33C" }
+"0x825BD348" = { name = "sub_825BD348" }
+"0x825BD8D0" = { name = "sub_825BD8D0" }
+"0x825BD8DC" = { name = "sub_825BD8DC" }
+"0x825BD8EC" = { name = "sub_825BD8EC" }
+"0x825BDCCC" = { name = "sub_825BDCCC" }
+"0x825BDD00" = { name = "sub_825BDD00" }
+"0x825BDDEC" = { name = "sub_825BDDEC" }
+"0x825BDE54" = { name = "sub_825BDE54" }
+"0x825BDE88" = { name = "sub_825BDE88" }
+"0x825BDFA4" = { name = "sub_825BDFA4" }
+"0x825BE1CC" = { name = "sub_825BE1CC" }
+"0x825BE214" = { name = "sub_825BE214" }
+"0x825BEA24" = { name = "sub_825BEA24" }
+"0x825BEA44" = { name = "sub_825BEA44" }
+"0x825C356C" = { name = "sub_825C356C" }
+"0x825C36F8" = { name = "sub_825C36F8" }
+"0x825C3704" = { name = "sub_825C3704" }
+"0x825C5C90" = { name = "sub_825C5C90" }
+"0x825C5CB0" = { name = "sub_825C5CB0" }
+"0x825C5CC0" = { name = "sub_825C5CC0" }
+"0x825C6290" = { name = "sub_825C6290" }
+"0x825C6A2C" = { name = "sub_825C6A2C" }
+"0x825C6B44" = { name = "sub_825C6B44" }
+"0x825C6D24" = { name = "sub_825C6D24" }
+"0x825C6EAC" = { name = "sub_825C6EAC" }
+"0x825C6ED4" = { name = "sub_825C6ED4" }
+"0x825C7434" = { name = "sub_825C7434" }
+"0x825C7454" = { name = "sub_825C7454" }
+"0x825C7464" = { name = "sub_825C7464" }
+"0x825C75CC" = { name = "sub_825C75CC" }
+"0x825C75DC" = { name = "sub_825C75DC" }
+"0x825C75E8" = { name = "sub_825C75E8" }
+"0x825CA2A8" = { name = "sub_825CA2A8" }
+"0x825CA2C8" = { name = "sub_825CA2C8" }
+"0x825CA2D4" = { name = "sub_825CA2D4" }
+"0x825D0A90" = { name = "sub_825D0A90" }
+"0x825D0A98" = { name = "sub_825D0A98" }
+"0x825D0AA8" = { name = "sub_825D0AA8" }
+"0x825D6640" = { name = "sub_825D6640" }
+"0x825D6648" = { name = "sub_825D6648" }
+"0x825D6650" = { name = "sub_825D6650" }
+"0x825DB5E8" = { name = "sub_825DB5E8" }
+"0x825DB5F0" = { name = "sub_825DB5F0" }
+"0x825DB5F8" = { name = "sub_825DB5F8" }
+"0x825DB600" = { name = "sub_825DB600" }
+"0x825DB608" = { name = "sub_825DB608" }
+"0x825DB610" = { name = "sub_825DB610" }
+"0x825DB620" = { name = "sub_825DB620" }
+"0x825DB628" = { name = "sub_825DB628" }
+"0x825DB630" = { name = "sub_825DB630" }
+"0x825DB638" = { name = "sub_825DB638" }
+"0x825DB8B8" = { name = "sub_825DB8B8" }
+"0x825DB8C0" = { name = "sub_825DB8C0" }
+"0x825DB8C8" = { name = "sub_825DB8C8" }
+"0x825DBF78" = { name = "sub_825DBF78" }
+"0x825DEC80" = { name = "sub_825DEC80" }
+"0x825E0F88" = { name = "sub_825E0F88" }
+"0x825E90E4" = { name = "sub_825E90E4" }
+"0x825E9100" = { name = "sub_825E9100" }
+"0x825FCAA8" = { name = "sub_825FCAA8" }
+"0x825FCAB0" = { name = "sub_825FCAB0" }
+"0x825FCAC8" = { name = "sub_825FCAC8" }
+"0x825FF568" = { name = "sub_825FF568" }
+"0x8261B8B0" = { name = "sub_8261B8B0" }
+"0x826217A0" = { name = "sub_826217A0" }
+"0x82631D90" = { name = "sub_82631D90" }
+"0x8267EF30" = { name = "sub_8267EF30" }
+"0x8267EF34" = { name = "sub_8267EF34" }
+"0x8267EF44" = { name = "sub_8267EF44" }
+"0x8267F008" = { name = "sub_8267F008" }
+"0x8267F250" = { name = "sub_8267F250" }
+"0x8267F260" = { name = "sub_8267F260" }
+"0x8267F2C0" = { name = "sub_8267F2C0" }
+"0x8267F2F4" = { name = "sub_8267F2F4" }
+"0x8267F304" = { name = "sub_8267F304" }
+"0x8267F3C0" = { name = "sub_8267F3C0" }
+"0x8267F55C" = { name = "sub_8267F55C" }
+"0x8267F56C" = { name = "sub_8267F56C" }
+"0x8267F7E0" = { name = "sub_8267F7E0" }
+"0x8267F804" = { name = "sub_8267F804" }
+"0x8267F814" = { name = "sub_8267F814" }
+"0x8267F9DC" = { name = "sub_8267F9DC" }
+"0x8267FD64" = { name = "sub_8267FD64" }
+"0x8267FD74" = { name = "sub_8267FD74" }
+"0x82680014" = { name = "sub_82680014" }
+"0x826802B4" = { name = "sub_826802B4" }
+"0x826802C4" = { name = "sub_826802C4" }
+"0x82680320" = { name = "sub_82680320" }
+"0x82680324" = { name = "sub_82680324" }
+"0x82680334" = { name = "sub_82680334" }
+"0x82680414" = { name = "sub_82680414" }
+"0x82680454" = { name = "sub_82680454" }
+"0x82680464" = { name = "sub_82680464" }
+"0x826804D4" = { name = "sub_826804D4" }
+"0x826806F4" = { name = "sub_826806F4" }
+"0x82680704" = { name = "sub_82680704" }
+"0x82680948" = { name = "sub_82680948" }
+"0x82680A60" = { name = "sub_82680A60" }
+"0x82680A70" = { name = "sub_82680A70" }
+"0x82688A20" = { name = "sub_82688A20" }
+"0x82688A38" = { name = "sub_82688A38" }
+"0x82688A58" = { name = "sub_82688A58" }
+"0x82688BF0" = { name = "sub_82688BF0" }
+"0x82688C10" = { name = "sub_82688C10" }
+"0x82688C30" = { name = "sub_82688C30" }
+"0x82688C50" = { name = "sub_82688C50" }
+"0x82688C70" = { name = "sub_82688C70" }
+"0x82688C90" = { name = "sub_82688C90" }
+"0x82688CB0" = { name = "sub_82688CB0" }
+"0x82688CD0" = { name = "sub_82688CD0" }
+"0x82688CF0" = { name = "sub_82688CF0" }
+"0x82688D10" = { name = "sub_82688D10" }
+"0x8268FD70" = { name = "sub_8268FD70" }
+"0x82699064" = { name = "sub_82699064" }
+"0x82699080" = { name = "sub_82699080" }
+"0x827567B8" = { name = "sub_827567B8" }
+"0x82756818" = { name = "sub_82756818" }
+"0x82756848" = { name = "sub_82756848" }
+"0x82756868" = { name = "sub_82756868" }
+"0x82756870" = { name = "sub_82756870" }
+"0x82756878" = { name = "sub_82756878" }
+"0x82756880" = { name = "sub_82756880" }
+"0x82756890" = { name = "sub_82756890" }
+"0x827568A0" = { name = "sub_827568A0" }
+"0x827568B0" = { name = "sub_827568B0" }
+"0x827568C0" = { name = "sub_827568C0" }
+"0x827568D0" = { name = "sub_827568D0" }
+"0x827568E0" = { name = "sub_827568E0" }
+"0x827568F0" = { name = "sub_827568F0" }
+"0x82756900" = { name = "sub_82756900" }
+"0x82756940" = { name = "sub_82756940" }
+"0x82756948" = { name = "sub_82756948" }
+"0x82756950" = { name = "sub_82756950" }
+"0x82756958" = { name = "sub_82756958" }
+"0x82756980" = { name = "sub_82756980" }
+"0x827569D0" = { name = "sub_827569D0" }
+"0x827569E8" = { name = "sub_827569E8" }
+"0x82756A20" = { name = "sub_82756A20" }
+"0x82756A50" = { name = "sub_82756A50" }
+"0x82756A68" = { name = "sub_82756A68" }
+"0x82756A80" = { name = "sub_82756A80" }
+"0x82756AB8" = { name = "sub_82756AB8" }
+"0x8277A150" = { name = "sub_8277A150" }
+"0x8278D118" = { name = "sub_8278D118" }
+"0x827A8348" = { name = "sub_827A8348" }
+"0x827B32D8" = { name = "sub_827B32D8" }
+"0x827B3B10" = { name = "sub_827B3B10" }
+"0x827CA5D8" = { name = "sub_827CA5D8" }
+"0x827F9A00" = { name = "sub_827F9A00" }
+"0x827F9A60" = { name = "sub_827F9A60" }
+"0x827FE5E0" = { name = "sub_827FE5E0" }
+"0x827FE730" = { name = "sub_827FE730" }
+"0x828010A0" = { name = "sub_828010A0" }
+"0x828010C0" = { name = "sub_828010C0" }
+"0x82801210" = { name = "sub_82801210" }
+"0x82801240" = { name = "sub_82801240" }
+"0x82801270" = { name = "sub_82801270" }
+"0x828606C0" = { name = "sub_828606C0" }
+"0x828606C8" = { name = "sub_828606C8" }
+"0x828606D0" = { name = "sub_828606D0" }
+"0x828606D8" = { name = "sub_828606D8" }
+"0x828A83B0" = { name = "sub_828A83B0" }
+"0x828A85B4" = { name = "sub_828A85B4" }
+"0x828A9EDC" = { name = "sub_828A9EDC" }
+"0x828A9F30" = { name = "sub_828A9F30" }
+"0x828A9F64" = { name = "sub_828A9F64" }
+"0x828A9F7C" = { name = "sub_828A9F7C" }
+
+
+# [[switch_tables]]
+
+# [[midasm_hook]]
+
+# [rexcrt]
