@@ -13,6 +13,8 @@ executable — no emulator required.
 
 ## Status
 
+![Red Room - Prologue, after the GPU artifact fix](docs/screenshots/red_room.png)
+
 In-game playable through the Prologue cutscene with dialogue, **now with clean
 rendering** on hair, foliage, statue billboards, and door carvings — the
 long-standing rainbow-noise artifact on alpha-tested geometry has been
