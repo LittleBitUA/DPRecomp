@@ -16,11 +16,86 @@ executable — no emulator required.
 In-game playable through the Prologue cutscene with dialogue. Main menu navigates,
 audio plays, controllers (DualSense tested) work, English subtitles render.
 
-Known visual artifacts on alpha-blended mip-mapped textures (hair, foliage) are
+Known visual artifacts on hair, foliage, and other alpha-tested geometry are
 inherited from the upstream Xenia GPU backend that ReXGlue currently uses. CPU-side
 behaviour (dialogue advance, script timing, threading) runs natively — *not* via
 Xenia's JIT — so logic bugs that affect DP in Xenia (chapter-1 hardlocks, broken
 dialogue advance reported by the community) do not apply here.
+
+## GPU artifact investigation log (rainbow noise on hair/foliage)
+
+This section records what's been ruled out for the foliage/hair rainbow-noise
+artifact, so future investigators don't repeat the same dead ends.
+
+### What we know
+
+- DP renders the main scene to an EDRAM render target at tile 720 in
+  **`k_2_10_10_10_FLOAT` (Xenos 7e3 HDR)** format. RenderDoc's `RT @ 720t`
+  view interpreted as `k_2_10_10_10_FLOAT` shows a clean HDR scene; interpreted
+  as `k_8_8_8_8` shows the same rainbow noise visible in the final frame. So
+  the bytes really are 7e3 — the noise is a *misinterpretation* artifact.
+- The game renders at **1xMSAA** (verified — see disproved hypothesis below).
+- The corruption is already present in EDRAM before any resolve runs; texture
+  cache and gamma passes faithfully propagate it.
+- Noise is bounded to **alpha-tested/blended geometry**: hair strands, leaves,
+  outlines of alpha-cut billboards. Solid skin, clothing, walls and floors
+  are clean. This makes a generic "wrong format conversion" diagnosis suspect
+  on its own — see below.
+
+### Disproved hypotheses
+
+1. **Fast vs full resolve copy path.** Patched `IsColorResolveFormatBitwiseEquivalent`
+   in `rexglue-sdk/include/rex/graphics/xenos.h` to always return false, forcing
+   every 32bpp resolve through `resolve_full_32bpp_cs` instead of
+   `resolve_fast_32bpp_1x2xmsaa_cs`. No visual change. Reason: the FULL shader
+   also reads `format` from push constants and skips conversion when source and
+   destination formats match (both `k_8_8_8_8` in our case).
+2. **MSAA misidentification.** Forced `color_edram_info.msaa_samples =
+   MsaaSamples::k4X` in `rexglue-sdk/src/graphics/util/draw.cpp`. Result: full-
+   screen cyan/green/red garbage. Confirms the game really is 1xMSAA — forcing
+   4xMSAA causes the resolve to read from non-existent samples.
+3. **Plain 7e3→8888 conversion in resolve.** Forced `color_edram_info.format`
+   to `k_2_10_10_10_FLOAT` for all non-64bpp color resolves. Result: scene
+   becomes all white (with only UI text faintly visible). This *does* confirm
+   the EDRAM bytes are 7e3 and that the resolve shader is capable of decoding
+   them — but the decoded values exceed 1.0 across most pixels, so they clip
+   to white when written into the 8888 destination. The game must therefore
+   either pass a non-zero `RB_COPY_DEST_INFO.copy_dest_exp_bias` (which scales
+   the values during resolve), tone-map in the pixel shader before writing to
+   EDRAM, or resolve to a higher-precision intermediate and tone-map separately.
+   None of those paths are currently being followed correctly.
+
+### Confirmed-fine pieces (don't rebisect)
+
+- `texture_load_32bpb_cs` is innocent. Verified byte-for-byte that the shader
+  reads `Buffer 317` (guest memory) at the correct tiled addresses, applies the
+  expected 8-in-32 endian swap, and writes `Buffer 4403` (host staging) exactly
+  as the source dictates. The noise is already in `Buffer 317` because the
+  resolve upstream of it put noise there. Original "Pipeline State 388 / hash
+  `247b7771-…`" lead was correct identification of the shader but wrong
+  identification of the buggy stage.
+- The GPU CVars `use_fuzzy_alpha_epsilon`, `native_2x_msaa=false`,
+  `gpu_allow_invalid_fetch_constants`, `depth_float24_round`,
+  `gamma_render_target_as_unorm16=false`, `readback_resolve=full`,
+  `d3d12_readback_resolve=true`, `d3d12_readback_memexport=true` were all
+  tested empirically (singly and in combinations). None affect this bug.
+
+### Open hypotheses
+
+- DP's foliage/hair pixel shader is written for Xenos and uses an instruction
+  (alpha-to-coverage on 1xMSAA, dithered alpha output, or a `KILL_*` variant)
+  that the Xenos→DXBC translator under `rexglue-sdk/src/graphics/shaders/
+  dxbc_translator_*.cpp` lowers incorrectly. The noise enters EDRAM during
+  rasterization, not at resolve time.
+- The resolve path doesn't honour `copy_dest_exp_bias` (or honours it
+  incorrectly), and the game expects the resolve itself to scale the 7e3
+  values to 0..1 during the EDRAM→system-memory copy. Worth dumping the raw
+  `RB_COPY_DEST_INFO` value the game passes during the buggy resolve and
+  comparing with what the resolve shader actually uses.
+- Tone-mapping is a separate compute pass that's silently failing or running
+  on the wrong buffer; need to trace `apply_gamma_pwl_cs` / `apply_gamma_table_cs`
+  inputs/outputs end-to-end and confirm they receive a properly scaled HDR
+  buffer rather than raw 7e3 bytes.
 
 ## Building
 
