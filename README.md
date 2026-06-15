@@ -56,14 +56,22 @@ artifact, so future investigators don't repeat the same dead ends.
    4xMSAA causes the resolve to read from non-existent samples.
 3. **Plain 7e3→8888 conversion in resolve.** Forced `color_edram_info.format`
    to `k_2_10_10_10_FLOAT` for all non-64bpp color resolves. Result: scene
-   becomes all white (with only UI text faintly visible). This *does* confirm
-   the EDRAM bytes are 7e3 and that the resolve shader is capable of decoding
-   them — but the decoded values exceed 1.0 across most pixels, so they clip
-   to white when written into the 8888 destination. The game must therefore
-   either pass a non-zero `RB_COPY_DEST_INFO.copy_dest_exp_bias` (which scales
-   the values during resolve), tone-map in the pixel shader before writing to
-   EDRAM, or resolve to a higher-precision intermediate and tone-map separately.
-   None of those paths are currently being followed correctly.
+   becomes all white (with only UI text faintly visible). The decoded 7e3
+   values cover 0..32, so without scaling they clip against the 8888 0..1
+   destination.
+4. **7e3 source + exp_bias = -5 (1/32 scale).** Combined hack: force
+   `color_edram_info.format = k_2_10_10_10_FLOAT` *and* hard-code `exp_bias = -5`
+   for any 32bpp colour resolve. Result is the most informative test of the
+   series: the game scene stays recognisable but heavily darkened, the
+   *disclaimer* and *title* screens come out green-tinted, and crucially —
+   **the rainbow-noise pattern on hair/foliage edges is still present**,
+   visible as bright red speckles on the now-dark scene. This is a definitive
+   ruling: if the noise survived a `×1/32` scale unchanged, it isn't a
+   resolve-side format/exp_bias issue. It's intrinsic to the EDRAM bytes that
+   the pixel shader produced. (The green-tinted UI screens additionally prove
+   that not every 32bpp resolve is 7e3 — UI and disclaimer screens are
+   genuinely `k_8_8_8_8`, so blanket format remapping at the resolve is the
+   wrong shape of fix even if it had worked.)
 
 ### Confirmed-fine pieces (don't rebisect)
 
@@ -80,22 +88,35 @@ artifact, so future investigators don't repeat the same dead ends.
   `d3d12_readback_resolve=true`, `d3d12_readback_memexport=true` were all
   tested empirically (singly and in combinations). None affect this bug.
 
-### Open hypotheses
+### Where the bug actually lives
 
-- DP's foliage/hair pixel shader is written for Xenos and uses an instruction
-  (alpha-to-coverage on 1xMSAA, dithered alpha output, or a `KILL_*` variant)
-  that the Xenos→DXBC translator under `rexglue-sdk/src/graphics/shaders/
-  dxbc_translator_*.cpp` lowers incorrectly. The noise enters EDRAM during
-  rasterization, not at resolve time.
-- The resolve path doesn't honour `copy_dest_exp_bias` (or honours it
-  incorrectly), and the game expects the resolve itself to scale the 7e3
-  values to 0..1 during the EDRAM→system-memory copy. Worth dumping the raw
-  `RB_COPY_DEST_INFO` value the game passes during the buggy resolve and
-  comparing with what the resolve shader actually uses.
-- Tone-mapping is a separate compute pass that's silently failing or running
-  on the wrong buffer; need to trace `apply_gamma_pwl_cs` / `apply_gamma_table_cs`
-  inputs/outputs end-to-end and confirm they receive a properly scaled HDR
-  buffer rather than raw 7e3 bytes.
+After ruling out the four resolve-side options above, the noise can only be
+coming from earlier in the pipeline — the bytes are *already* corrupt by the
+time the resolve runs. The remaining viable hypotheses all live upstream of
+resolve:
+
+- **Pixel-shader translation bug.** DP's foliage/hair pixel shader is
+  presumably a Xenos shader that uses some instruction (alpha-to-coverage on
+  1xMSAA, dithered alpha output, a `KILL_*` variant, or per-pixel exp_bias
+  output) that `rexglue-sdk/src/graphics/shaders/dxbc_translator_*.cpp`
+  lowers incorrectly. The translated DXBC then writes garbage on the
+  alpha-edge fragments that should produce smooth coverage.
+- **Per-pixel exp_bias output bug.** Xenos pixel shaders can write an
+  `oColor.a` that the EDRAM ROP interprets as a per-pixel exp_bias for 7e3.
+  If the translator isn't routing that channel correctly, alpha-edge pixels
+  end up with arbitrary exponent bits.
+- **A `discard`/`KILL_*` lowering that leaves the destination undefined**
+  rather than writing the alpha-blended sample value. Edge pixels of
+  alpha-tested geometry that *should* be opaque end up untouched and
+  showing whatever junk is in EDRAM.
+
+The shape of the bug — only at alpha-tested geometry edges, only on this
+specific render target, surviving every conceivable resolve-side
+transformation — points squarely at one of the above. Diagnosing further
+requires extracting the actual Xenos pixel-shader bytecode DP uses for hair
+and foliage (via the `dump_shaders` CVar or a RenderDoc capture of the
+pre-resolve draw calls), comparing it against the translated DXBC, and
+looking for the instruction or output channel that goes wrong.
 
 ## Building
 
