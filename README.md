@@ -72,6 +72,15 @@ artifact, so future investigators don't repeat the same dead ends.
    that not every 32bpp resolve is 7e3 — UI and disclaimer screens are
    genuinely `k_8_8_8_8`, so blanket format remapping at the resolve is the
    wrong shape of fix even if it had worked.)
+5. **Alpha-to-coverage emulation disabled.** Dumped every translated pixel
+   shader via `--dump_shaders shader_dump`, found that the translator expands
+   Xenos alpha-to-coverage into a screen-space dither pattern + `oMask`
+   coverage at the end of each fragment shader. The 1xMSAA fallback in that
+   block is a hard checkerboard that *should* average out at 4xMSAA — exactly
+   the shape of the rainbow noise we see. Patched `command_processor.cpp` to
+   force `system_constants_.alpha_to_mask = 0`, killing that whole codepath.
+   No visible change in-game: DP never sets `RB_COLORCONTROL.alpha_to_mask_enable`,
+   so the value was already 0 in practice and the patch is a no-op.
 
 ### Confirmed-fine pieces (don't rebisect)
 
@@ -90,33 +99,35 @@ artifact, so future investigators don't repeat the same dead ends.
 
 ### Where the bug actually lives
 
-After ruling out the four resolve-side options above, the noise can only be
-coming from earlier in the pipeline — the bytes are *already* corrupt by the
-time the resolve runs. The remaining viable hypotheses all live upstream of
-resolve:
+After ruling out the five options above, the noise can only be coming from
+earlier in the pipeline — the bytes are *already* corrupt by the time the
+resolve runs, and the most obvious alpha-edge mechanism (Xenos
+alpha-to-coverage) isn't even being used by DP. The remaining viable
+hypotheses all live in the pixel-shader / texture-fetch translation:
 
-- **Pixel-shader translation bug.** DP's foliage/hair pixel shader is
-  presumably a Xenos shader that uses some instruction (alpha-to-coverage on
-  1xMSAA, dithered alpha output, a `KILL_*` variant, or per-pixel exp_bias
-  output) that `rexglue-sdk/src/graphics/shaders/dxbc_translator_*.cpp`
-  lowers incorrectly. The translated DXBC then writes garbage on the
-  alpha-edge fragments that should produce smooth coverage.
-- **Per-pixel exp_bias output bug.** Xenos pixel shaders can write an
-  `oColor.a` that the EDRAM ROP interprets as a per-pixel exp_bias for 7e3.
-  If the translator isn't routing that channel correctly, alpha-edge pixels
-  end up with arbitrary exponent bits.
-- **A `discard`/`KILL_*` lowering that leaves the destination undefined**
-  rather than writing the alpha-blended sample value. Edge pixels of
-  alpha-tested geometry that *should* be opaque end up untouched and
-  showing whatever junk is in EDRAM.
+- **Texture LOD / derivative translation.** Every translated pixel shader
+  computes its sample LOD as `exp2(extracted_bits(fetch_constant) / 32) *
+  deriv_*_coarse(uv)`. The `ibfe` extraction depends on which bits of the
+  Xenos texture fetch constant rexglue interprets as the LOD-bias field;
+  if any of those bit positions are off, the LOD is wrong, the sampler
+  picks the wrong mip level, and the pixel shader reads inconsistent
+  texels from frame to frame and across the alpha edge. The shape of the
+  noise — only on high-frequency mip-mapped textures (hair strands,
+  foliage), absent on solid surfaces — fits exactly.
+- **Format-unpack switch on `r13`.** Each `sample_d` in the translated
+  shader is followed by a big switch on extracted format bits (cases 2 and
+  3 in the dumps), with `mul ... 261120.0` and `round_z` and `mad` and
+  custom signed-int re-encoding. If those bits decode the wrong field of
+  the fetch constant, the texel comes out of the sampler correctly but
+  gets mangled into garbage by the unpack step.
 
-The shape of the bug — only at alpha-tested geometry edges, only on this
-specific render target, surviving every conceivable resolve-side
-transformation — points squarely at one of the above. Diagnosing further
-requires extracting the actual Xenos pixel-shader bytecode DP uses for hair
-and foliage (via the `dump_shaders` CVar or a RenderDoc capture of the
-pre-resolve draw calls), comparing it against the translated DXBC, and
-looking for the instruction or output channel that goes wrong.
+The shape of the bug — only at alpha-tested mip-mapped geometry, surviving
+every conceivable resolve-side transformation — points squarely at one of
+the above. Diagnosing further requires a RenderDoc capture isolated to a
+single problematic *draw call* (not a frame): pull out the bound texture's
+mip chain, the fetch-constant values, the sampler state, and the shader,
+then walk the translation through those exact inputs and find the bit that
+goes the wrong way.
 
 ## Building
 
