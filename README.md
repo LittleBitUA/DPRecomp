@@ -13,19 +13,32 @@ executable — no emulator required.
 
 ## Status
 
-In-game playable through the Prologue cutscene with dialogue. Main menu navigates,
+In-game playable through the Prologue cutscene with dialogue, **now with clean
+rendering** on hair, foliage, statue billboards, and door carvings — the
+long-standing rainbow-noise artifact on alpha-tested geometry has been
+diagnosed and fixed at the SDK level (see GPU log below). Main menu navigates,
 audio plays, controllers (DualSense tested) work, English subtitles render.
 
-Known visual artifacts on hair, foliage, and other alpha-tested geometry are
-inherited from the upstream Xenia GPU backend that ReXGlue currently uses. CPU-side
-behaviour (dialogue advance, script timing, threading) runs natively — *not* via
-Xenia's JIT — so logic bugs that affect DP in Xenia (chapter-1 hardlocks, broken
-dialogue advance reported by the community) do not apply here.
+CPU-side behaviour (dialogue advance, script timing, threading) runs
+natively — *not* via Xenia's JIT — so logic bugs that affect DP in Xenia
+(chapter-1 hardlocks, broken dialogue advance reported by the community)
+do not apply here.
 
-## GPU artifact investigation log (rainbow noise on hair/foliage)
+## GPU artifact investigation log (rainbow noise on hair/foliage) — RESOLVED
 
-This section records what's been ruled out for the foliage/hair rainbow-noise
-artifact, so future investigators don't repeat the same dead ends.
+The rainbow-noise artifact on alpha-tested geometry has been **fixed** in the
+ReXGlue SDK: it was an EDRAM ownership-transfer behaviour in
+`src/graphics/d3d12/render_target_cache.cpp` that preserved 7e3 bit patterns
+when reinterpreting an EDRAM tile from HDR to UNORM8 format. Bit preservation
+is Xenos-faithful, but on the host side it surfaces as colourful garbage at
+any pixel that subsequent draws don't fully overwrite — exactly what happens
+to alpha-test discarded fragments and SrcAlpha-blended pixels with `src.a == 0`.
+Saturating the source HDR floats to [0, 1] and writing them directly as UNORM8
+leaves clipped-LDR-looking residue at those pixels instead of rainbow noise,
+which is visually indistinguishable from the surrounding tonemap output.
+
+The full investigation is kept below as a reference for similar bugs in other
+ports — the discarded hypotheses are useful as "do not re-bisect" notes.
 
 ### What we know
 
@@ -81,6 +94,34 @@ artifact, so future investigators don't repeat the same dead ends.
    force `system_constants_.alpha_to_mask = 0`, killing that whole codepath.
    No visible change in-game: DP never sets `RB_COLORCONTROL.alpha_to_mask_enable`,
    so the value was already 0 in practice and the patch is a no-op.
+6. **Resolve format-tracking override for HDR-host destinations.** Added a
+   per-resolve diagnostic log at `draw.cpp:1057` capturing
+   `(base_tiles, pitch_tiles, msaa, src_fmt, dest_fmt, exp_bias, dest_base)`
+   for every 32bpp color resolve. The log identifies exactly five unique tuples
+   across an entire run (disclaimer → title → in-game scene). For the in-game
+   tile (`base=720 pitch=13 msaa=1x`), the HDR scene resolve correctly tracks
+   `src_fmt=12` (`k_2_10_10_10_FLOAT_AS_16_16_16_16` — DP's HDR mode) into
+   `dest_fmt=32` (`k_16_16_16_16_FLOAT` host texture). One rare frame showed a
+   stray `src_fmt=0 dest_fmt=32` for the SAME `dest_base=0x1BE4E000` — an HDR
+   host texture momentarily mis-tracked as 8888 source. Patched: when
+   `src=k_8_8_8_8 && dest=k_16_16_16_16_FLOAT`, override source to
+   `k_2_10_10_10_FLOAT_AS_16_16_16_16`. The rare mistrack went away in the next
+   log capture, but no visible change in-game — that resolve must not actually
+   feed any pixels the player sees.
+7. **State-based "in-game HDR mode" override.** Stronger hypothesis: once the
+   game has done an HDR `format=12` resolve at the scene tile, EDRAM at that
+   tile holds 7e3 bits, so every subsequent `src=0 dest=6` resolve at the same
+   tile is reading 7e3 bits and mis-interpreting them as 8888 → rainbow noise.
+   Patched: a static `dp1_in_game_mode` flag latches once we observe
+   `src=12, base=720, pitch=13, msaa=1x`; from then on, every
+   `src=0, base=720, pitch=13, msaa=1x` resolve gets re-tagged as `src=12`
+   with `exp_bias=-5`. Result: full-screen wavy blue/purple garbage with UI
+   text crisp on top. This **disproves** the hypothesis — most
+   `pitch=13 src=0 dest=6` resolves are genuinely 8888 (tonemap output, UI,
+   intermediate post-process), and forcing 7e3 decode on them mangles
+   everything. The fact that pre-hack scene rendered *correctly* on solid
+   surfaces and only had rainbow on alpha-tested edges is the giveaway:
+   resolve format-tracking is fine.
 
 ### Confirmed-fine pieces (don't rebisect)
 
@@ -97,37 +138,57 @@ artifact, so future investigators don't repeat the same dead ends.
   `d3d12_readback_resolve=true`, `d3d12_readback_memexport=true` were all
   tested empirically (singly and in combinations). None affect this bug.
 
-### Where the bug actually lives
+### Where the bug actually lived (resolved)
 
-After ruling out the five options above, the noise can only be coming from
-earlier in the pipeline — the bytes are *already* corrupt by the time the
-resolve runs, and the most obvious alpha-edge mechanism (Xenos
-alpha-to-coverage) isn't even being used by DP. The remaining viable
-hypotheses all live in the pixel-shader / texture-fetch translation:
+Pinned to the EDRAM **ownership-transfer** pass between two views of the same
+tile. DP's frame structure for the Red Room scene is:
 
-- **Texture LOD / derivative translation.** Every translated pixel shader
-  computes its sample LOD as `exp2(extracted_bits(fetch_constant) / 32) *
-  deriv_*_coarse(uv)`. The `ibfe` extraction depends on which bits of the
-  Xenos texture fetch constant rexglue interprets as the LOD-bias field;
-  if any of those bit positions are off, the LOD is wrong, the sampler
-  picks the wrong mip level, and the pixel shader reads inconsistent
-  texels from frame to frame and across the alpha edge. The shape of the
-  noise — only on high-frequency mip-mapped textures (hair strands,
-  foliage), absent on solid surfaces — fits exactly.
-- **Format-unpack switch on `r13`.** Each `sample_d` in the translated
-  shader is followed by a big switch on extracted format bits (cases 2 and
-  3 in the dumps), with `mul ... 261120.0` and `round_z` and `mad` and
-  custom signed-int re-encoding. If those bits decode the wrong field of
-  the fetch constant, the texel comes out of the sampler correctly but
-  gets mangled into garbage by the unpack step.
+1. Render HDR scene → EDRAM tile 720 in `k_2_10_10_10_FLOAT` (7e3) — clean.
+2. Switch `RB_COLOR_INFO` to `k_8_8_8_8`. ReXGlue inserts an
+   `xe_transfer_color` pixel-shader pass (EID 8378 in the reference capture)
+   that re-encodes float values from the 7e3 live representation back into
+   7e3 bits and unpacks the same bits as UNORM8 — *bit-preserving* ownership
+   transfer. EDRAM tile 720 now contains the original 7e3 byte pattern
+   reinterpreted as 8888 garbage everywhere.
+3. Game's tonemap pixel shader (EID 8432, hash `EDFBF3009908B2BA`) blends
+   HDR + bloom + LUT and writes `oC0`. `oC0.w` is taken from the previous
+   G-buffer's alpha (Tex 860, read via `tf0`). At alpha-test hair, foliage,
+   statue billboards, and door-carving edges, that alpha is 0.
+4. The OM blend state is standard SrcAlpha/InvSrcAlpha — at `src.a == 0`,
+   `dest` is unchanged. So the tonemap pass overwrites *solid* pixels with
+   the proper LDR scene, but every alpha-test edge keeps the
+   ownership-transfer garbage from step 2.
+5. EID 8639's resolve compute shader copies EDRAM tile 720 to `Tex 865`,
+   which becomes the on-screen frame. Rainbow noise lands exactly on every
+   alpha-tested silhouette.
 
-The shape of the bug — only at alpha-tested mip-mapped geometry, surviving
-every conceivable resolve-side transformation — points squarely at one of
-the above. Diagnosing further requires a RenderDoc capture isolated to a
-single problematic *draw call* (not a frame): pull out the bound texture's
-mip chain, the fetch-constant values, the sampler state, and the shader,
-then walk the translation through those exact inputs and find the bit that
-goes the wrong way.
+Verified end-to-end against the reference frame:
+- EDRAM `RT @ 720t, <13t>, 1xMSAA, k_2_10_10_10_FLOAT` at end-of-frame: clean
+  HDR scene.
+- Same bytes viewed as `k_8_8_8_8`: the rainbow noise pattern seen in-game.
+- EDRAM `k_8_8_8_8` view stepped through EIDs 8378 → 8432 → 8448 → 8631:
+  fully noisy after 8378, mostly clean after 8432 with noise only on
+  alpha-test geometry, unchanged through 8448/8631.
+- EID 8432 OM alpha channel: 0 exactly at the noisy regions, 1 everywhere
+  else.
+- EID 8432's pixel shader contains no explicit `discard` — the "don't write"
+  behaviour is purely the blend math with `src.a == 0`.
+
+**Fix:** patch `src/graphics/d3d12/render_target_cache.cpp` so that the
+`xe_transfer_color` pass, when source is `k_2_10_10_10_FLOAT(_AS_16_16_16_16)`
+and destination is `k_8_8_8_8` (or `k_8_8_8_8_GAMMA`), saturates the source
+floats to `[0, 1]` and writes them directly as UNORM8 instead of
+bit-preserving. Other dest formats (16_16, 16_16_16_16, 32_FLOAT, etc.)
+keep the original Xenos-faithful bit-preserving path. At "don't write"
+pixels the residue is now a clipped-LDR version of the HDR scene rather
+than rainbow noise — visually indistinguishable from the tonemap output
+sitting beside it.
+
+### What `texture_load_32bpb_cs` looked like
+... that lead came from a bisection that correctly identified the shader
+hash `247b7771-…` reading and writing tiled bytes, but the noise was
+already in `Buffer 317` upstream of that copy. The shader is innocent;
+it just propagates whatever the resolve put there.
 
 ## Building
 
