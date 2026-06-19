@@ -295,6 +295,8 @@ fix (`0X` → `0x`).
 - [`sp00nznet/360tools`](https://github.com/sp00nznet/360tools) — Python scanners
   for batch vtable/switch-table/import discovery.
 - Xenia project — the upstream GPU stack that ReXGlue's `src/graphics/` ports in.
+- [Weighted Coils](https://www.youtube.com/@WeightedCoils) — testing and
+  end-to-end playthrough validation.
 
 ## Legal
 
