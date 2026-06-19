@@ -19,14 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This license applies only to the host-side source in `src/`, build scripts,
-CMake files, TOML configuration, and documentation in this repository.
-
-The recompiled game code produced at build time (`generated/default/`) is
-derived from the copyrighted Deadly Premonition binary and is NOT covered
-by this license. It must not be redistributed. Do not share `default.xex`,
-the `generated/default/` directory, or any built binary that links against
-the recompiled code.

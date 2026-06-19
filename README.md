@@ -5,7 +5,7 @@
 **Deadly Premonition** (Xbox 360, 2010) — natively recompiled for Windows.
 
 [![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
-[![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
+[![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/latest/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
 [![License](https://img.shields.io/github/license/LittleBitUA/DPRecomp?style=for-the-badge&color=lightgrey)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
@@ -22,12 +22,28 @@
 
 DPRecomp is a **static recompilation** of *Deadly Premonition*'s Xbox 360 executable to native Windows. The PowerPC code in the original `default.xex` is translated to C++ at build time, then linked against a host runtime that emulates the Xbox 360 ABI (CPU registers, kernel objects, threading, GPU command processor + EDRAM). The result is a regular Windows process — **no emulator, no JIT, no per-frame instruction dispatch overhead**.
 
-Because the game logic runs natively, CPU-side behaviour (dialogue advance, script timing, threading) is unaffected by the bugs that plague Deadly Premonition under Xenia (chapter-1 hardlocks, broken dialogue advance). And because the renderer is the upstream Xenia D3D12 stack, GPU output matches xenia-canary visually — with the rainbow-noise artifact on hair/foliage **fixed at the SDK level**.
+### Why this exists
+
+The official PC port of *Deadly Premonition* (the so-called "Director's Cut" on Steam) is famously broken — it ships with a 720p resolution cap, a hard 30 FPS lock that can't be unlocked without third-party patchers, broken mouse-look, broken save/load behaviour, and a long tail of crashes that the publisher never fixed. The Xbox 360 release, by contrast, was *the* stable version of the game.
+
+DPRecomp takes that stable Xbox 360 binary and runs it natively on Windows. **In practice the game does not crash and runs more stably than the official PC port** — full playthroughs have been completed end-to-end by external testers (driving, walking, cutscenes, save/load) with no crashes reported. Because the game logic runs natively, CPU-side behaviour (dialogue advance, script timing, threading) is also unaffected by the bugs that plague *Deadly Premonition* under Xenia (chapter-1 hardlocks, broken dialogue advance).
+
+GPU output is the upstream Xenia D3D12 stack ported into ReXGlue, so visuals match xenia-canary — with the rainbow-noise artifact on hair/foliage **fixed at the SDK level** ([investigation log](docs/gpu-rainbow-noise.md)).
 
 Built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
+### What you need
+
+The download itself is playable, but **you must supply your own Xbox 360 disc dump**. The release archive ships only the recompiled application shell and host runtime; no game code, no game data, no assets. Specifically:
+
+1. A legally-owned copy of *Deadly Premonition* for Xbox 360.
+2. Your `default.xex` extracted from that disc (or your account's digital download).
+3. The full `assets/` tree from the disc — `nxeart`, `updata/`, and the rest of the game's data files. The game streams its content from disk at runtime, so the XEX alone is not enough.
+
+Drop those into the `assets/` folder next to `deadlyprem.exe` ([layout below](#quick-start)) and you're playing.
+
 > [!IMPORTANT]
-> This repository contains **no game code, data, or assets**. You must own a legal copy of *Deadly Premonition* (Xbox 360) and provide your own dumped `default.xex` and game data tree.
+> This repository contains **no game code, data, or assets**, and the release archive does not either. Do not ask where to obtain the XEX — bring your own.
 
 ---
 
