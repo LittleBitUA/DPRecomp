@@ -1,198 +1,108 @@
+<div align="center">
+
 # DPRecomp
 
-Static recompilation of **Deadly Premonition** (Xbox 360, 2010) for native Windows,
-built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
+**Deadly Premonition** (Xbox 360, 2010) — natively recompiled for Windows.
 
-This project converts the Xbox 360 PowerPC `default.xex` into native x86_64 code
-at build time, then wraps it with a small host runtime (FP exception guard,
-hooks, future renderer patches) so the game runs natively as a real Windows
-executable — no emulator required.
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+[![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
+[![License](https://img.shields.io/github/license/LittleBitUA/DPRecomp?style=for-the-badge&color=lightgrey)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+[![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
-> **You must own the game.** This project does **not** ship any Deadly Premonition
-> code, data, or assets. You provide your own legally dumped disc.
+![Red Room — Prologue, after the GPU artifact fix](docs/screenshots/red_room.png)
+
+### [⬇  Download the latest release](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+
+</div>
+
+---
+
+## What is this
+
+DPRecomp is a **static recompilation** of *Deadly Premonition*'s Xbox 360 executable to native Windows. The PowerPC code in the original `default.xex` is translated to C++ at build time, then linked against a host runtime that emulates the Xbox 360 ABI (CPU registers, kernel objects, threading, GPU command processor + EDRAM). The result is a regular Windows process — **no emulator, no JIT, no per-frame instruction dispatch overhead**.
+
+Because the game logic runs natively, CPU-side behaviour (dialogue advance, script timing, threading) is unaffected by the bugs that plague Deadly Premonition under Xenia (chapter-1 hardlocks, broken dialogue advance). And because the renderer is the upstream Xenia D3D12 stack, GPU output matches xenia-canary visually — with the rainbow-noise artifact on hair/foliage **fixed at the SDK level**.
+
+Built on the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
+
+> [!IMPORTANT]
+> This repository contains **no game code, data, or assets**. You must own a legal copy of *Deadly Premonition* (Xbox 360) and provide your own dumped `default.xex` and game data tree.
+
+---
 
 ## Status
 
-![Red Room - Prologue, after the GPU artifact fix](docs/screenshots/red_room.png)
+| Subsystem | State |
+| --- | --- |
+| CPU recompilation | **Stable** — full playthrough verified by external testers (driving, walking, cutscenes) |
+| GPU — D3D12 | **Working** — rainbow-noise artifact fixed ([investigation log](docs/gpu-rainbow-noise.md)) |
+| Audio (XAudio2) | Working |
+| Input — keyboard + mouse | Working (PC-style Director's Cut bindings preconfigured) |
+| Input — gamepad | Working (DualSense tested) |
+| Save / load | Working |
+| Subtitles / dialogue | Working — English |
 
-In-game playable through the Prologue cutscene with dialogue, **now with clean
-rendering** on hair, foliage, statue billboards, and door carvings — the
-long-standing rainbow-noise artifact on alpha-tested geometry has been
-diagnosed and fixed at the SDK level (see GPU log below). Main menu navigates,
-audio plays, controllers (DualSense tested) work, English subtitles render.
+Externally confirmed **2026-06-18**: people are completing the game end-to-end and enjoying it. The project is in maintenance mode — patches go in when something surfaces.
 
-CPU-side behaviour (dialogue advance, script timing, threading) runs
-natively — *not* via Xenia's JIT — so logic bugs that affect DP in Xenia
-(chapter-1 hardlocks, broken dialogue advance reported by the community)
-do not apply here.
+---
 
-## GPU artifact investigation log (rainbow noise on hair/foliage) — RESOLVED
+## Quick start
 
-The rainbow-noise artifact on alpha-tested geometry has been **fixed** in the
-ReXGlue SDK: it was an EDRAM ownership-transfer behaviour in
-`src/graphics/d3d12/render_target_cache.cpp` that preserved 7e3 bit patterns
-when reinterpreting an EDRAM tile from HDR to UNORM8 format. Bit preservation
-is Xenos-faithful, but on the host side it surfaces as colourful garbage at
-any pixel that subsequent draws don't fully overwrite — exactly what happens
-to alpha-test discarded fragments and SrcAlpha-blended pixels with `src.a == 0`.
-Saturating the source HDR floats to [0, 1] and writing them directly as UNORM8
-leaves clipped-LDR-looking residue at those pixels instead of rainbow noise,
-which is visually indistinguishable from the surrounding tonemap output.
+1. **Download** the latest release zip: [v0.1.1 →](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+2. **Extract** it somewhere with read/write access.
+3. **Drop your legally-owned game files** into the `assets/` folder next to `deadlyprem.exe`. The expected layout:
 
-The full investigation is kept below as a reference for similar bugs in other
-ports — the discarded hypotheses are useful as "do not re-bisect" notes.
+   ```
+   deadlyprem.exe
+   rexruntimerd.dll
+   deadlyprem.toml      ← rename from deadlyprem.toml.sample
+   assets/
+     default.xex
+     nxeart
+     updata/
+     ...
+   ```
 
-### What we know
+4. **Rename** `deadlyprem.toml.sample` → `deadlyprem.toml`. It already enables mouse mode and ships PC-style Director's Cut bindings.
+5. **Launch** via `start.bat`, or:
 
-- DP renders the main scene to an EDRAM render target at tile 720 in
-  **`k_2_10_10_10_FLOAT` (Xenos 7e3 HDR)** format. RenderDoc's `RT @ 720t`
-  view interpreted as `k_2_10_10_10_FLOAT` shows a clean HDR scene; interpreted
-  as `k_8_8_8_8` shows the same rainbow noise visible in the final frame. So
-  the bytes really are 7e3 — the noise is a *misinterpretation* artifact.
-- The game renders at **1xMSAA** (verified — see disproved hypothesis below).
-- The corruption is already present in EDRAM before any resolve runs; texture
-  cache and gamma passes faithfully propagate it.
-- Noise is bounded to **alpha-tested/blended geometry**: hair strands, leaves,
-  outlines of alpha-cut billboards. Solid skin, clothing, walls and floors
-  are clean. This makes a generic "wrong format conversion" diagnosis suspect
-  on its own — see below.
+   ```powershell
+   deadlyprem.exe --game_data_root assets
+   ```
 
-### Disproved hypotheses
+Press `F4` in-game for the settings overlay (cvars, key binds, sensitivity).
+Press `` ` `` (backtick) for the console.
 
-1. **Fast vs full resolve copy path.** Patched `IsColorResolveFormatBitwiseEquivalent`
-   in `rexglue-sdk/include/rex/graphics/xenos.h` to always return false, forcing
-   every 32bpp resolve through `resolve_full_32bpp_cs` instead of
-   `resolve_fast_32bpp_1x2xmsaa_cs`. No visual change. Reason: the FULL shader
-   also reads `format` from push constants and skips conversion when source and
-   destination formats match (both `k_8_8_8_8` in our case).
-2. **MSAA misidentification.** Forced `color_edram_info.msaa_samples =
-   MsaaSamples::k4X` in `rexglue-sdk/src/graphics/util/draw.cpp`. Result: full-
-   screen cyan/green/red garbage. Confirms the game really is 1xMSAA — forcing
-   4xMSAA causes the resolve to read from non-existent samples.
-3. **Plain 7e3→8888 conversion in resolve.** Forced `color_edram_info.format`
-   to `k_2_10_10_10_FLOAT` for all non-64bpp color resolves. Result: scene
-   becomes all white (with only UI text faintly visible). The decoded 7e3
-   values cover 0..32, so without scaling they clip against the 8888 0..1
-   destination.
-4. **7e3 source + exp_bias = -5 (1/32 scale).** Combined hack: force
-   `color_edram_info.format = k_2_10_10_10_FLOAT` *and* hard-code `exp_bias = -5`
-   for any 32bpp colour resolve. Result is the most informative test of the
-   series: the game scene stays recognisable but heavily darkened, the
-   *disclaimer* and *title* screens come out green-tinted, and crucially —
-   **the rainbow-noise pattern on hair/foliage edges is still present**,
-   visible as bright red speckles on the now-dark scene. This is a definitive
-   ruling: if the noise survived a `×1/32` scale unchanged, it isn't a
-   resolve-side format/exp_bias issue. It's intrinsic to the EDRAM bytes that
-   the pixel shader produced. (The green-tinted UI screens additionally prove
-   that not every 32bpp resolve is 7e3 — UI and disclaimer screens are
-   genuinely `k_8_8_8_8`, so blanket format remapping at the resolve is the
-   wrong shape of fix even if it had worked.)
-5. **Alpha-to-coverage emulation disabled.** Dumped every translated pixel
-   shader via `--dump_shaders shader_dump`, found that the translator expands
-   Xenos alpha-to-coverage into a screen-space dither pattern + `oMask`
-   coverage at the end of each fragment shader. The 1xMSAA fallback in that
-   block is a hard checkerboard that *should* average out at 4xMSAA — exactly
-   the shape of the rainbow noise we see. Patched `command_processor.cpp` to
-   force `system_constants_.alpha_to_mask = 0`, killing that whole codepath.
-   No visible change in-game: DP never sets `RB_COLORCONTROL.alpha_to_mask_enable`,
-   so the value was already 0 in practice and the patch is a no-op.
-6. **Resolve format-tracking override for HDR-host destinations.** Added a
-   per-resolve diagnostic log at `draw.cpp:1057` capturing
-   `(base_tiles, pitch_tiles, msaa, src_fmt, dest_fmt, exp_bias, dest_base)`
-   for every 32bpp color resolve. The log identifies exactly five unique tuples
-   across an entire run (disclaimer → title → in-game scene). For the in-game
-   tile (`base=720 pitch=13 msaa=1x`), the HDR scene resolve correctly tracks
-   `src_fmt=12` (`k_2_10_10_10_FLOAT_AS_16_16_16_16` — DP's HDR mode) into
-   `dest_fmt=32` (`k_16_16_16_16_FLOAT` host texture). One rare frame showed a
-   stray `src_fmt=0 dest_fmt=32` for the SAME `dest_base=0x1BE4E000` — an HDR
-   host texture momentarily mis-tracked as 8888 source. Patched: when
-   `src=k_8_8_8_8 && dest=k_16_16_16_16_FLOAT`, override source to
-   `k_2_10_10_10_FLOAT_AS_16_16_16_16`. The rare mistrack went away in the next
-   log capture, but no visible change in-game — that resolve must not actually
-   feed any pixels the player sees.
-7. **State-based "in-game HDR mode" override.** Stronger hypothesis: once the
-   game has done an HDR `format=12` resolve at the scene tile, EDRAM at that
-   tile holds 7e3 bits, so every subsequent `src=0 dest=6` resolve at the same
-   tile is reading 7e3 bits and mis-interpreting them as 8888 → rainbow noise.
-   Patched: a static `dp1_in_game_mode` flag latches once we observe
-   `src=12, base=720, pitch=13, msaa=1x`; from then on, every
-   `src=0, base=720, pitch=13, msaa=1x` resolve gets re-tagged as `src=12`
-   with `exp_bias=-5`. Result: full-screen wavy blue/purple garbage with UI
-   text crisp on top. This **disproves** the hypothesis — most
-   `pitch=13 src=0 dest=6` resolves are genuinely 8888 (tonemap output, UI,
-   intermediate post-process), and forcing 7e3 decode on them mangles
-   everything. The fact that pre-hack scene rendered *correctly* on solid
-   surfaces and only had rainbow on alpha-tested edges is the giveaway:
-   resolve format-tracking is fine.
+---
 
-### Confirmed-fine pieces (don't rebisect)
+## Default controls (PC Director's Cut style)
 
-- `texture_load_32bpb_cs` is innocent. Verified byte-for-byte that the shader
-  reads `Buffer 317` (guest memory) at the correct tiled addresses, applies the
-  expected 8-in-32 endian swap, and writes `Buffer 4403` (host staging) exactly
-  as the source dictates. The noise is already in `Buffer 317` because the
-  resolve upstream of it put noise there. Original "Pipeline State 388 / hash
-  `247b7771-…`" lead was correct identification of the shader but wrong
-  identification of the buggy stage.
-- The GPU CVars `use_fuzzy_alpha_epsilon`, `native_2x_msaa=false`,
-  `gpu_allow_invalid_fetch_constants`, `depth_float24_round`,
-  `gamma_render_target_as_unorm16=false`, `readback_resolve=full`,
-  `d3d12_readback_resolve=true`, `d3d12_readback_memexport=true` were all
-  tested empirically (singly and in combinations). None affect this bug.
+| Action | Key |
+| --- | --- |
+| Move | `W` `A` `S` `D` |
+| Camera | Mouse |
+| Interact / fire | `E` / `LMB` |
+| Run | `Shift` |
+| Light on/off | `F` |
+| Strafe left / right | `Z` / `X` |
+| Hold breath / lock on | `Ctrl` |
+| Look / draw weapon | `Space` |
+| Reload / cancel | `R` |
+| Map | `M` |
+| Pause | `Enter` |
+| Switch weapon | Mouse wheel |
+| Settings overlay | `F4` |
+| Console | `` ` `` |
 
-### Where the bug actually lived (resolved)
+See [`CONTROLS_EN.txt`](https://github.com/LittleBitUA/DPRecomp/releases/latest) inside the release zip for the full list.
 
-Pinned to the EDRAM **ownership-transfer** pass between two views of the same
-tile. DP's frame structure for the Red Room scene is:
+---
 
-1. Render HDR scene → EDRAM tile 720 in `k_2_10_10_10_FLOAT` (7e3) — clean.
-2. Switch `RB_COLOR_INFO` to `k_8_8_8_8`. ReXGlue inserts an
-   `xe_transfer_color` pixel-shader pass (EID 8378 in the reference capture)
-   that re-encodes float values from the 7e3 live representation back into
-   7e3 bits and unpacks the same bits as UNORM8 — *bit-preserving* ownership
-   transfer. EDRAM tile 720 now contains the original 7e3 byte pattern
-   reinterpreted as 8888 garbage everywhere.
-3. Game's tonemap pixel shader (EID 8432, hash `EDFBF3009908B2BA`) blends
-   HDR + bloom + LUT and writes `oC0`. `oC0.w` is taken from the previous
-   G-buffer's alpha (Tex 860, read via `tf0`). At alpha-test hair, foliage,
-   statue billboards, and door-carving edges, that alpha is 0.
-4. The OM blend state is standard SrcAlpha/InvSrcAlpha — at `src.a == 0`,
-   `dest` is unchanged. So the tonemap pass overwrites *solid* pixels with
-   the proper LDR scene, but every alpha-test edge keeps the
-   ownership-transfer garbage from step 2.
-5. EID 8639's resolve compute shader copies EDRAM tile 720 to `Tex 865`,
-   which becomes the on-screen frame. Rainbow noise lands exactly on every
-   alpha-tested silhouette.
+## Building from source
 
-Verified end-to-end against the reference frame:
-- EDRAM `RT @ 720t, <13t>, 1xMSAA, k_2_10_10_10_FLOAT` at end-of-frame: clean
-  HDR scene.
-- Same bytes viewed as `k_8_8_8_8`: the rainbow noise pattern seen in-game.
-- EDRAM `k_8_8_8_8` view stepped through EIDs 8378 → 8432 → 8448 → 8631:
-  fully noisy after 8378, mostly clean after 8432 with noise only on
-  alpha-test geometry, unchanged through 8448/8631.
-- EID 8432 OM alpha channel: 0 exactly at the noisy regions, 1 everywhere
-  else.
-- EID 8432's pixel shader contains no explicit `discard` — the "don't write"
-  behaviour is purely the blend math with `src.a == 0`.
-
-**Fix:** patch `src/graphics/d3d12/render_target_cache.cpp` so that the
-`xe_transfer_color` pass, when source is `k_2_10_10_10_FLOAT(_AS_16_16_16_16)`
-and destination is `k_8_8_8_8` (or `k_8_8_8_8_GAMMA`), saturates the source
-floats to `[0, 1]` and writes them directly as UNORM8 instead of
-bit-preserving. Other dest formats (16_16, 16_16_16_16, 32_FLOAT, etc.)
-keep the original Xenos-faithful bit-preserving path. At "don't write"
-pixels the residue is now a clipped-LDR version of the HDR scene rather
-than rainbow noise — visually indistinguishable from the tonemap output
-sitting beside it.
-
-### What `texture_load_32bpb_cs` looked like
-... that lead came from a bisection that correctly identified the shader
-hash `247b7771-…` reading and writing tiled bytes, but the noise was
-already in `Buffer 317` upstream of that copy. The shader is innocent;
-it just propagates whatever the resolve put there.
-
-## Building
+<details>
+<summary><b>Click to expand — full build instructions</b></summary>
 
 ### Prerequisites
 
@@ -201,14 +111,11 @@ it just propagates whatever the resolve put there.
 - LLVM/Clang 20 or newer
 - CMake 3.25 or newer
 - Ninja 1.11 or newer
-- A built and installed ReXGlue SDK (https://github.com/rexglue/rexglue-sdk),
-  registered in CMake's user package registry. The SDK must be built in the same
-  configuration the consumer project uses (Debug or RelWithDebInfo).
+- A built and installed [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk), registered in CMake's user package registry. The SDK must be built in the same configuration the consumer project uses (Debug or RelWithDebInfo).
 
 ### Provide the game
 
-Drop the contents of your Xbox 360 disc dump into `assets/`. The build expects
-`assets/default.xex` to exist before codegen runs:
+Drop the contents of your Xbox 360 disc dump into `assets/`:
 
 ```
 assets/
@@ -232,9 +139,7 @@ cmake --build --preset win-amd64-relwithdebinfo --target deadlyprem_codegen
 cmake --build --preset win-amd64-relwithdebinfo --parallel 6
 ```
 
-Codegen produces ~4.45M lines of recompiled C++ in `generated/default/`. First
-build takes 20-30 minutes; incremental builds after config tweaks are much
-faster.
+Codegen produces ~4.45M lines of recompiled C++ in `generated/default/`. First build takes 20-30 minutes; incremental builds after config tweaks are much faster.
 
 ### Run
 
@@ -250,26 +155,9 @@ New-Item -ItemType Junction -Path out\build\win-amd64-relwithdebinfo\assets `
   -Target (Resolve-Path .\assets)
 ```
 
-## Project structure
+### Discovering missing functions
 
-- `deadlyprem_manifest.toml` — top-level ReXGlue manifest; points at the XEX
-  and pulls in `deadlyprem_config.toml`.
-- `deadlyprem_config.toml` — codegen hints: manually-registered functions that
-  ReXGlue's auto-discovery missed (vtable forwarders, tail-branch targets), and
-  templates for switch tables and midasm hooks.
-- `src/deadlyprem_app.h` — `rex::ReXApp` subclass; installs the FP exception
-  guard at start, removes it at shutdown.
-- `src/deadlyprem_fp_guard.h` — VEH (Windows) / SIGFPE (POSIX) handler that
-  masks SSE FP exceptions raised by the recompiled guest code.
-- `src/deadlyprem_hooks.cpp` — bodies for any named functions and midasm hooks
-  declared in the TOML.
-- `src/main.cpp` — `REX_DEFINE_APP` entry point.
-- `scripts/build.py` — wraps codegen + configure + build into one command.
-
-## Discovering missing functions
-
-When the runtime fatals with `Call to invalid or unregistered function at guest
-address 0xADDR`, add an entry under `[functions]` in `deadlyprem_config.toml`:
+When the runtime fatals with `Call to invalid or unregistered function at guest address 0xADDR`, add an entry under `[functions]` in `deadlyprem_config.toml`:
 
 ```toml
 "0xADDR" = { name = "sub_ADDR" }
@@ -282,28 +170,42 @@ python tools/extract_pe.py assets/default.xex generated/dp_pe.bin
 python tools/find_missing_vtable_funcs.py generated/dp_pe.bin generated/default/deadlyprem_init.cpp
 ```
 
-The scanner output is paste-compatible with `[functions]` after a trivial case
-fix (`0X` → `0x`).
+The scanner output is paste-compatible with `[functions]` after a trivial case fix (`0X` → `0x`).
+
+</details>
+
+---
+
+## Project structure
+
+- `deadlyprem_manifest.toml` — top-level ReXGlue manifest; points at the XEX and pulls in `deadlyprem_config.toml`.
+- `deadlyprem_config.toml` — codegen hints: manually-registered functions, templates for switch tables and midasm hooks.
+- `src/deadlyprem_app.h` — `rex::ReXApp` subclass; installs the FP exception guard at start, removes it at shutdown.
+- `src/deadlyprem_fp_guard.h` — VEH (Windows) / SIGFPE (POSIX) handler that masks SSE FP exceptions raised by the recompiled guest code.
+- `src/deadlyprem_hooks.cpp` — bodies for any named functions and midasm hooks declared in the TOML.
+- `src/main.cpp` — `REX_DEFINE_APP` entry point.
+- `scripts/build.py` — wraps codegen + configure + build into one command.
+
+---
+
+## Technical deep-dives
+
+- 📜 [GPU rainbow-noise investigation log](docs/gpu-rainbow-noise.md) — the full forensic trail of how the EDRAM ownership-transfer artifact was found and fixed, including 7 disproved hypotheses kept as "do not re-bisect" notes.
+
+---
 
 ## Credits
 
-- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) — the recompilation
-  toolkit.
-- [EternalSonataReprise](https://github.com/birabittoh/EternalSonataReprise) —
-  the host-glue template that this project's `src/` follows, including the FP
-  exception guard pattern.
-- [`sp00nznet/360tools`](https://github.com/sp00nznet/360tools) — Python scanners
-  for batch vtable/switch-table/import discovery.
-- Xenia project — the upstream GPU stack that ReXGlue's `src/graphics/` ports in.
-- [Weighted Coils](https://www.youtube.com/@WeightedCoils) — testing and
-  end-to-end playthrough validation.
+- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) — the recompilation toolkit.
+- [EternalSonataReprise](https://github.com/birabittoh/EternalSonataReprise) — the host-glue template that this project's `src/` follows, including the FP exception guard pattern.
+- [`sp00nznet/360tools`](https://github.com/sp00nznet/360tools) — Python scanners for batch vtable / switch-table / import discovery.
+- [Xenia project](https://github.com/xenia-canary/xenia-canary) — the upstream GPU stack that ReXGlue's `src/graphics/` ports in.
+- [Weighted Coils](https://www.youtube.com/@WeightedCoils) — testing and end-to-end playthrough validation.
+
+---
 
 ## Legal
 
-The host-side source under `src/`, build scripts, CMake files, TOML configs,
-and documentation are released under the MIT License (see `LICENSE`).
+The host-side source under `src/`, build scripts, CMake files, TOML configs, and documentation are released under the **MIT License** — see [LICENSE](LICENSE).
 
-The recompiled game code produced at build time contains symbols and logic
-from Deadly Premonition and is **not** redistributable. Do not share
-`assets/default.xex`, the `generated/default/` directory, or any built binary
-that links against them.
+The recompiled game code produced at build time contains symbols and logic from *Deadly Premonition* and is **not** redistributable. Do not share `assets/default.xex`, the `generated/default/` directory, or any built binary that links against them.
