@@ -21,7 +21,7 @@ SETTINGS
   PlayDeadlyPremonition.exe -> Settings: graphics (internal resolution, FSR 3,
   FXAA, 60 FPS), mouse (direct camera control, sensitivity), controls (every
   key, DualSense adaptive triggers), advanced, debug. Inside the game: F4 =
-  live settings overlay, F3 = performance overlay.
+  live settings overlay, F3 = performance overlay, F7 = achievements.
 
 DEFAULT CONTROLS (see CONTROLS_EN.txt for the full list)
   WASD move, mouse look, wheel = weapon, E interact, R cancel/reload,

@@ -124,7 +124,7 @@ Saves are stored in `userdata\` next to the game. To move or back up your progre
 - writes `deadlyprem.toml` next to the game and repairs keys that the in-game overlay may drop;
 - checks GitHub for a newer release on start and installs it in place with one click, keeping your config and saves.
 
-Inside the game, **F4** opens the runtime settings overlay (live changes, `Save to config` writes them back), **F3** shows the performance overlay.
+Inside the game, **F4** opens the runtime settings overlay (live changes, `Save to config` writes them back), **F3** shows the performance overlay, **F7** shows your achievements.
 
 ---
 
@@ -203,7 +203,7 @@ Open an issue with: your GPU and driver, whether the render path is ROV or RTV, 
 
 - At 2× internal resolution some low-resolution post-process effects (glow, depth of field) can show a fine grid on bright edges; 1× does not have it. Being investigated.
 - Clouds in some outdoor scenes render as flat blotches (issue #10).
-- Achievements are tracked locally by the runtime overlay; there is no Xbox Live.
+- Achievements are tracked locally (list and unlock toasts on **F7**); there is no Xbox Live.
 - Linux is not supported yet.
 
 ---

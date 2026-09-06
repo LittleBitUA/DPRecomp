@@ -20,10 +20,11 @@ A complete restart of the project on the current ReXGlue 0.10 nightly. Everythin
 - **Launcher** with every setting, English / Ukrainian UI, config self-healing and **auto-update from GitHub**.
 - **Built-in installer**: press PLAY with no game data and pick your `.iso` — it extracts itself and starts the right regional build (installer by Alexbeav, from the Downpour project).
 - Portable: unzip anywhere, nothing written to your profile.
+- **Achievements overlay** (F7) with unlock notifications, saved locally.
 - Runs on older CPUs (SSE4.1 baseline, no AVX2 requirement).
 
 ### 🚫 What this does NOT include
-- Achievements on Xbox Live (tracked locally by the overlay only).
+- Xbox Live. Achievements are tracked locally and unlock in-game (press **F7** for the list), but nothing is sent anywhere.
 - Linux.
 - A fix for the flat clouds in some outdoor scenes (#10) — still open.
 - At 2× internal resolution some low-res post effects (glow, depth of field) can show a fine grid on bright edges; 1× is clean. Being investigated.
