@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="Deadly Premonition" width="720">
+
 # Deadly Premonition Recompilation
 
 ### Play *Deadly Premonition* natively on Windows: 60 FPS, real mouse look, a launcher, DualSense triggers, FSR 3 — no emulator required.
