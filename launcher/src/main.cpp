@@ -1867,9 +1867,9 @@ static bool WriteUpdateScript(const std::wstring& script_path,
   script += L"      L \"skip: $f (not in zip)\"\r\n";
   script += L"    }\r\n";
   script += L"  }\r\n";
-  script += L"  $shareable_src = Join-Path $root 'userdata\cache\\shaders\\shareable'\r\n";
+  script += L"  $shareable_src = Join-Path $root 'userdata\\cache\\shaders\\shareable'\r\n";
   script += L"  if (Test-Path $shareable_src) {\r\n";
-  script += L"    $shareable_dst = Join-Path $dest 'userdata\cache\\shaders\\shareable'\r\n";
+  script += L"    $shareable_dst = Join-Path $dest 'userdata\\cache\\shaders\\shareable'\r\n";
   script += L"    New-Item -ItemType Directory -Force -Path $shareable_dst | Out-Null\r\n";
   script += L"    L 'copy: cache/shaders/shareable/*'\r\n";
   script += L"    Copy-Item -Recurse -Force \"$shareable_src\\*\" $shareable_dst\r\n";
