@@ -43,8 +43,54 @@ index cd7693a..9eec523 100644
  };
  
  }  // namespace rex::graphics::d3d12
+diff --git a/include/rex/graphics/d3d12/texture_cache.h b/include/rex/graphics/d3d12/texture_cache.h
+index 4d845c7..7435042 100644
+--- a/include/rex/graphics/d3d12/texture_cache.h
++++ b/include/rex/graphics/d3d12/texture_cache.h
+@@ -22,6 +22,7 @@
+ #include <rex/graphics/d3d12/shader.h>
+ #include <rex/graphics/d3d12/shared_memory.h>
+ #include <rex/graphics/pipeline/texture/cache.h>
++#include <rex/graphics/pipeline/texture/replacement.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/xenos.h>
+@@ -268,6 +269,18 @@ class D3D12TextureCache final : public TextureCache {
+       srv_descriptors_.emplace(descriptor_key, descriptor_index);
+     }
+ 
++    // Texture replacement (see pipeline/texture/replacement.h): when set,
++    // the resource is R8G8B8A8_UNORM with the image dimensions and
++    // replacement_mip_count() mips, filled from the image instead of guest
++    // memory.
++    const texture_replacement::Image* replacement() const { return replacement_; }
++    uint32_t replacement_mip_count() const { return replacement_mip_count_; }
++    void SetReplacement(const texture_replacement::Image* image, uint32_t mip_count) {
++      replacement_ = image;
++      replacement_mip_count_ = mip_count;
++    }
++    Microsoft::WRL::ComPtr<ID3D12Resource>& replacement_upload() { return replacement_upload_; }
++
+    private:
+     Microsoft::WRL::ComPtr<ID3D12Resource> resource_;
+     D3D12_RESOURCE_STATES resource_state_;
+@@ -278,8 +291,14 @@ class D3D12TextureCache final : public TextureCache {
+     // according to profiling, was often a bottleneck in many games).
+     // For bindless - indices in the global shader-visible descriptor heap.
+     std::unordered_map<SRVDescriptorKey, uint32_t, SRVDescriptorKey::Hasher> srv_descriptors_;
++
++    const texture_replacement::Image* replacement_ = nullptr;
++    uint32_t replacement_mip_count_ = 0;
++    Microsoft::WRL::ComPtr<ID3D12Resource> replacement_upload_;
+   };
+ 
++  bool UploadReplacementTexture(D3D12Texture& texture);
++
+   static constexpr uint32_t kSRVDescriptorCachePageSize = 65536;
+ 
+   struct SRVDescriptorCachePage {
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
-index 2cf24c4..9dfd653 100644
+index 2cf24c4..e52c177 100644
 --- a/include/rex/graphics/flags.h
 +++ b/include/rex/graphics/flags.h
 @@ -18,6 +18,10 @@ REXCVAR_DECLARE(bool, vsync);
@@ -58,6 +104,17 @@ index 2cf24c4..9dfd653 100644
  
  // GPU Resolution / Readback / Queries
  REXCVAR_DECLARE(int32_t, resolution_scale);
+@@ -46,6 +50,10 @@ REXCVAR_DECLARE(bool, direct_host_resolve);
+ 
+ // GPU Textures
+ REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
++REXCVAR_DECLARE(bool, texture_dump);
++REXCVAR_DECLARE(bool, texture_replacement);
++REXCVAR_DECLARE(std::string, texture_path);
++REXCVAR_DECLARE(std::string, texture_trace_hash);
+ REXCVAR_DECLARE(bool, gpu_3d_to_2d_texture);
+ REXCVAR_DECLARE(int32_t, anisotropic_override);
+ REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_render_to_texture);
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
 index 3bbd52e..0017c1b 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
@@ -101,11 +158,74 @@ index 3bbd52e..0017c1b 100644
    // Render targets actually used by the draw call with the last successful
    // update. 0 is depth, color starting from 1, nullptr if not bound.
    // Only valid for non-pixel-shader-interlock paths.
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index d26cd4f..e457db7 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -19,6 +19,7 @@
+ #include <vector>
+ 
+ #include <rex/assert.h>
++#include <rex/graphics/pipeline/texture/replacement.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/shared_memory.h>
+@@ -214,6 +215,11 @@ class TextureCache {
+ 
+     uint64_t GetHostMemoryUsage() const { return host_memory_usage_; }
+ 
++    // Hash of the guest base level at creation time (0 when the texture
++    // dump/replacement registry is inactive). See texture/replacement.h.
++    uint64_t data_hash() const { return data_hash_; }
++    void SetDataHash(uint64_t hash) { data_hash_ = hash; }
++
+     uint64_t last_usage_submission_index() const { return last_usage_submission_index_; }
+     uint64_t last_usage_time() const { return last_usage_time_; }
+     static constexpr uint32_t kOutdatedBitBase = UINT32_C(1) << 0;
+@@ -255,6 +261,7 @@ class TextureCache {
+     texture_util::TextureGuestLayout guest_layout_;
+ 
+     uint64_t host_memory_usage_ = 0;
++    uint64_t data_hash_ = 0;
+ 
+     uint64_t last_usage_submission_index_;
+     uint64_t last_usage_time_;
+@@ -582,6 +589,16 @@ class TextureCache {
+ 
+   const RegisterFile& register_file_;
+   SharedMemory& shared_memory_;
++
++ protected:
++  // Set by FindOrCreateTexture right before CreateTexture so the backend
++  // can pick a replacement image for the texture being created.
++  uint64_t creating_data_hash_ = 0;
++  texture_replacement::GuestBaseView creating_view_;
++  // Computes the base-level hash (and dumps the texture if enabled).
++  uint64_t HashGuestTexture(const TextureKey& key, texture_replacement::GuestBaseView& view_out) const;
++
++ private:
+   uint32_t draw_resolution_scale_x_;
+   uint32_t draw_resolution_scale_y_;
+ 
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..df951d7 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -95,6 +95,9 @@ class SharedMemory {
+   // regions in those pages.
+   void RangeWrittenByGpu(uint32_t start, uint32_t length);
+ 
++  // Guest memory (for CPU-side reads of texture data, e.g. hashing).
++  memory::Memory& guest_memory() const { return memory_; }
++
+  protected:
+   SharedMemory(memory::Memory& memory);
+   // Call in implementation-specific initialization.
 diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
-index c8751b7..ca35353 100644
+index c8751b7..d5a4e75 100644
 --- a/include/rex/input/mnk/mnk_input_driver.h
 +++ b/include/rex/input/mnk/mnk_input_driver.h
-@@ -24,6 +24,20 @@ namespace rex::input::mnk {
+@@ -24,6 +24,25 @@ namespace rex::input::mnk {
  
  void SetMouseLookActive(bool active);
  bool IsMouseLookActive();
@@ -116,6 +236,11 @@ index c8751b7..ca35353 100644
 +void SetMouseCameraHookActive(bool active);
 +bool IsMouseCameraHookActive();
 +void TakeMouseCameraDelta(float& dx_out, float& dy_out);
++// DP1 v1.1.1: true while the camera hook has drained the delta within the
++// last ~200 ms, i.e. a gameplay camera is running. In menus / the map the
++// camera routines do not run, so the mouse falls back to the right stick
++// (map zoom and the like) instead of banking a camera snap.
++bool IsMouseCameraHookRecent();
 +// DP1 v1.1 (DPRecomp #11): the aim camera of the game (PAL sub_8233B3C0) is
 +// driven by the LEFT stick and keeps its own velocity model, so the camera
 +// hook cannot steer it. A game hook calls NoteMouseAimFrame() every frame the
@@ -126,7 +251,7 @@ index c8751b7..ca35353 100644
  
  class MnkInputDriver final : public InputDriver,
                               public rex::ui::WindowInputListener,
-@@ -50,6 +64,8 @@ class MnkInputDriver final : public InputDriver,
+@@ -50,6 +69,8 @@ class MnkInputDriver final : public InputDriver,
    void OnMouseDown(rex::ui::MouseEvent& e) override;
    void OnMouseUp(rex::ui::MouseEvent& e) override;
    void OnMouseMove(rex::ui::MouseEvent& e) override;
@@ -135,7 +260,17 @@ index c8751b7..ca35353 100644
  
    // WindowListener
    void OnClosing(rex::ui::UIEvent& e) override;
-@@ -82,6 +98,14 @@ class MnkInputDriver final : public InputDriver,
+@@ -75,6 +96,9 @@ class MnkInputDriver final : public InputDriver,
+ 
+   std::mutex state_mutex_;
+   bool key_down_[256] = {};
++  // Keys that went down since the last GetState poll (a tap shorter than a
++  // poll interval is otherwise invisible). Cleared by GetState.
++  bool key_pressed_since_poll_[256] = {};
+ 
+   // Mouse delta tracking. Fractional because relative motion arrives in
+   // fractions of a pixel, and truncating each event drops slow movement.
+@@ -82,6 +106,14 @@ class MnkInputDriver final : public InputDriver,
    float mouse_dx_ = 0.0f;
    float mouse_dy_ = 0.0f;
  
@@ -281,6 +416,26 @@ index 896dfec..123c093 100644
  }
  
  SleepResult AlertableSleep(std::chrono::microseconds duration) {
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 0d8f8af..e2f9b5e 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -25,6 +25,7 @@ set(REXGPU_XENOS_SOURCES
+     pipeline/render_target/cache.cpp
+     shared_memory.cpp
+     pipeline/texture/cache.cpp
++    pipeline/texture/replacement.cpp
+     pipeline/shader/interpreter.cpp
+     pipeline/shader/translator.cpp
+     pipeline/shader/translator_disasm.cpp
+@@ -107,6 +108,7 @@ set_target_properties(rexgpu-xenos PROPERTIES
+ 
+ target_include_directories(rexgpu-xenos PRIVATE
+     ${REXGLUE_ROOT}/thirdparty/renderdoc
++    ${REXGLUE_ROOT}/thirdparty/stb  # stb_image.h for texture replacement PNGs
+     ${REXGLUE_ROOT}  # For thirdparty/dxbc/DXBCChecksum.h include
+ )
+ 
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 index 19874a5..81706d6 100644
 --- a/src/graphics/d3d12/command_processor.cpp
@@ -862,6 +1017,214 @@ index dd321a5..4e3076c 100644
            } else {
              color_packed_in_r1x = true;
              // Float16 has a wider range for both color and alpha, also NaNs -
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 2be0e8e..a7016ea 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -15,6 +15,8 @@
+ #include <cstddef>
+ #include <cstring>
+ #include <memory>
++#include <mutex>
++#include <set>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -988,6 +990,27 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
+   }
+   parameters.mip_base_map = mip_base_map;
+ 
++  // DP1 diagnostics (texture_dump = true): every sampler that is not fully
++  // linear is logged once per (texture, parameters) so point-filtered
++  // textures can be matched with the dumped PNGs by guest address.
++  if (REXCVAR_GET(texture_dump) && !(parameters.mag_linear && parameters.min_linear)) {
++    static std::mutex seen_mutex;
++    static std::set<uint64_t> seen;
++    const uint64_t seen_key = (uint64_t(fetch.base_address) << 32) | parameters.value;
++    std::lock_guard<std::mutex> lock(seen_mutex);
++    if (seen.insert(seen_key).second) {
++      uint32_t w1 = 0, h1 = 0, d1 = 0, bp = 0, mp = 0;
++      texture_util::GetSubresourcesFromFetchConstant(fetch, &w1, &h1, &d1, &bp, &mp, nullptr, nullptr);
++      const FormatInfo* fi = FormatInfo::Get(fetch.format);
++      REXGPU_INFO("Sampler non-linear: fetch#{} base {:08X} {}x{} {} mag={} min={} mip={} "
++                  "(shader mag={} min={} mip={}) aniso={} mips {}..{}",
++                  binding.fetch_constant, bp << 12, w1 + 1, h1 + 1, fi ? fi->name : "?",
++                  uint32_t(mag_filter), uint32_t(min_filter), uint32_t(mip_filter),
++                  uint32_t(binding.mag_filter), uint32_t(binding.min_filter),
++                  uint32_t(binding.mip_filter), uint32_t(aniso_filter), mip_min_level, mip_max_level);
++    }
++  }
++
+   return parameters;
+ }
+ 
+@@ -1523,6 +1546,16 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+     unsupported_format_features_used_[uint32_t(key.format)] |= kUnsupportedResourceBit;
+     return nullptr;
+   }
++  // Texture replacement: a host PNG stands in for the guest texture.
++  const texture_replacement::Image* replacement = nullptr;
++  uint32_t replacement_mip_count = 0;
++  if (creating_data_hash_ && key.dimension == xenos::DataDimension::k2DOrStacked &&
++      key.GetDepthOrArraySize() == 1 && !key.scaled_resolve && !key.signed_separate) {
++    replacement = texture_replacement::Registry::Get().Find(creating_data_hash_, &creating_view_);
++    if (replacement) {
++      replacement_mip_count = std::min(uint32_t(replacement->levels.size()), uint32_t(key.mip_max_level + 1));
++    }
++  }
+   if (key.dimension == xenos::DataDimension::k3D) {
+     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+   } else {
+@@ -1538,6 +1571,12 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+   }
+   desc.DepthOrArraySize = key.GetDepthOrArraySize();
+   desc.MipLevels = key.mip_max_level + 1;
++  if (replacement) {
++    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    desc.Width = replacement->width;
++    desc.Height = replacement->height;
++    desc.MipLevels = replacement_mip_count;
++  }
+   desc.SampleDesc.Count = 1;
+   desc.SampleDesc.Quality = 0;
+   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+@@ -1554,13 +1593,103 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+                                              resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
+     return nullptr;
+   }
+-  return std::unique_ptr<Texture>(new D3D12Texture(*this, key, resource.Get(), resource_state));
++  D3D12Texture* texture = new D3D12Texture(*this, key, resource.Get(), resource_state);
++  if (replacement) {
++    texture->SetReplacement(replacement, replacement_mip_count);
++    REXGPU_INFO("Texture replacement: {:016X} {}x{} -> host {}x{} ({} mips)", creating_data_hash_,
++                key.GetWidth(), key.GetHeight(), replacement->width, replacement->height,
++                replacement_mip_count);
++  }
++  return std::unique_ptr<Texture>(texture);
++}
++
++bool D3D12TextureCache::UploadReplacementTexture(D3D12Texture& texture) {
++  const texture_replacement::Image& image = *texture.replacement();
++  uint32_t mip_count = texture.replacement_mip_count();
++  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++
++  // Placed footprints for every level in one upload buffer.
++  std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mip_count);
++  UINT64 total = 0;
++  for (uint32_t level = 0; level < mip_count; ++level) {
++    uint32_t w = image.LevelWidth(level), h = image.LevelHeight(level);
++    D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp = footprints[level];
++    fp.Offset = total;
++    fp.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    fp.Footprint.Width = w;
++    fp.Footprint.Height = h;
++    fp.Footprint.Depth = 1;
++    fp.Footprint.RowPitch = rex::align(w * 4, uint32_t(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT));
++    total += rex::align(UINT64(fp.Footprint.RowPitch) * h,
++                        UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT));
++  }
++
++  // The upload buffer is created once per texture and kept (small UI
++  // textures; the contents never change).
++  Microsoft::WRL::ComPtr<ID3D12Resource>& upload = texture.replacement_upload();
++  if (!upload) {
++    D3D12_HEAP_PROPERTIES heap = {};
++    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
++    D3D12_RESOURCE_DESC desc = {};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    desc.Width = total;
++    desc.Height = 1;
++    desc.DepthOrArraySize = 1;
++    desc.MipLevels = 1;
++    desc.Format = DXGI_FORMAT_UNKNOWN;
++    desc.SampleDesc.Count = 1;
++    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
++                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
++                                               IID_PPV_ARGS(&upload)))) {
++      REXGPU_ERROR("Texture replacement: failed to create the upload buffer");
++      return false;
++    }
++    void* mapped = nullptr;
++    D3D12_RANGE read_range = {0, 0};
++    if (FAILED(upload->Map(0, &read_range, &mapped))) {
++      upload.Reset();
++      return false;
++    }
++    for (uint32_t level = 0; level < mip_count; ++level) {
++      uint32_t w = image.LevelWidth(level), h = image.LevelHeight(level);
++      const std::vector<uint8_t>& src = image.levels[level];
++      uint8_t* dst = static_cast<uint8_t*>(mapped) + footprints[level].Offset;
++      for (uint32_t y = 0; y < h; ++y) {
++        std::memcpy(dst + size_t(y) * footprints[level].Footprint.RowPitch,
++                    src.data() + size_t(y) * w * 4, size_t(w) * 4);
++      }
++    }
++    upload->Unmap(0, nullptr);
++  }
++
++  texture.MarkAsUsed();
++  ID3D12Resource* resource = texture.resource();
++  command_processor_.PushTransitionBarrier(
++      resource, texture.SetResourceState(D3D12_RESOURCE_STATE_COPY_DEST),
++      D3D12_RESOURCE_STATE_COPY_DEST);
++  command_processor_.SubmitBarriers();
++  D3D12_TEXTURE_COPY_LOCATION location_source, location_dest;
++  location_source.pResource = upload.Get();
++  location_source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++  location_dest.pResource = resource;
++  location_dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  for (uint32_t level = 0; level < mip_count; ++level) {
++    location_source.PlacedFootprint = footprints[level];
++    location_dest.SubresourceIndex = level;
++    command_list.D3DCopyTextureRegion(&location_dest, 0, 0, 0, &location_source, nullptr);
++  }
++  return true;
+ }
+ 
+ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                               bool load_mips) {
+   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
+   TextureKey texture_key = d3d12_texture.key();
++  if (d3d12_texture.replacement()) {
++    return UploadReplacementTexture(d3d12_texture);
++  }
+ 
+   DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
+   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+@@ -2075,6 +2204,10 @@ uint32_t D3D12TextureCache::FindOrCreateTextureDescriptor(D3D12Texture& texture,
+   }
+ 
+   uint32_t mip_levels = texture_key.mip_max_level + 1;
++  if (texture.replacement()) {
++    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    mip_levels = texture.replacement_mip_count();
++  }
+   ID3D12Resource* resource_for_view = texture.resource();
+   switch (dimension) {
+     case xenos::DataDimension::k3D:
+diff --git a/src/graphics/flags.cpp b/src/graphics/flags.cpp
+index e2983a4..268a851 100644
+--- a/src/graphics/flags.cpp
++++ b/src/graphics/flags.cpp
+@@ -15,6 +15,16 @@
+ 
+ REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
+                     "Allow invalid fetch constants");
++// DP1 (2026-09-06): guest texture dump / host texture replacement.
++REXCVAR_DEFINE_BOOL(texture_dump, false, "GPU",
++                    "Write every 2D texture the game loads as PNG into <texture_path>/dump");
++REXCVAR_DEFINE_BOOL(texture_replacement, true, "GPU",
++                    "Replace guest textures with <texture_path>/<hash>.png when present");
++REXCVAR_DEFINE_STRING(texture_trace_hash, "", "GPU",
++                      "Diagnostics: 16-hex texture hash; every draw binding it logs the blend / alpha "
++                      "test / colour mask registers once per distinct state");
++REXCVAR_DEFINE_STRING(texture_path, "", "GPU",
++                      "Texture dump/replacement folder (empty = \"textures\" next to the executable)");
+ REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
+ REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
+ REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
 index 953c5fd..82740ec 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
@@ -1074,20 +1437,31 @@ index 31de175..6775922 100644
        case xenos::FetchOpDimension::k1D:
          // Pad to 2D array coordinates.
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..18f0702 100644
+index 76f5600..f27602c 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
-@@ -10,6 +10,9 @@
+@@ -10,7 +10,12 @@
   */
  
  #include <algorithm>
 +#include <array>
 +#include <mutex>
++#include <set>
 +#include <vector>
  #include <cstdint>
++#include <cstdlib>
  #include <utility>
  
-@@ -246,6 +249,8 @@ bool TextureCache::GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out
+ #include <rex/assert.h>
+@@ -20,6 +25,7 @@
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/texture/cache.h>
+ #include <rex/graphics/pipeline/texture/info.h>
++#include <rex/graphics/pipeline/texture/replacement.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/xenos.h>
+@@ -246,6 +252,8 @@ bool TextureCache::GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out
    uint32_t clamped_y = std::min(kMaxDrawResolutionScaleAlongAxis, config_y);
    x_out = clamped_x;
    y_out = clamped_y;
@@ -1096,7 +1470,104 @@ index 76f5600..18f0702 100644
    return clamped_x == config_x && clamped_y == config_y;
  }
  
-@@ -914,11 +919,28 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
+@@ -591,6 +599,41 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+   if (bindings_changed) {
+     UpdateTextureBindingsImpl(bindings_changed);
+   }
++  // DP1 diagnostics: texture_trace_hash = <16 hex> logs the raster/blend state
++  // of every draw that binds that texture (once per distinct state).
++  {
++    static uint64_t trace_hash = 0;
++    static bool trace_parsed = false;
++    if (!trace_parsed) {
++      trace_parsed = true;
++      const std::string h = REXCVAR_GET(texture_trace_hash);
++      if (h.size() >= 16) trace_hash = std::strtoull(h.substr(0, 16).c_str(), nullptr, 16);
++    }
++    if (trace_hash) {
++      for (uint32_t i = 0; i < 32; ++i) {
++        if (!(used_texture_mask & (uint32_t(1) << i))) continue;
++        const TextureBinding& b = texture_bindings_[i];
++        if (!b.texture || b.texture->data_hash() != trace_hash) continue;
++        const uint32_t blend0 = regs[XE_GPU_REG_RB_BLENDCONTROL0];
++        const uint32_t colorcontrol = regs[XE_GPU_REG_RB_COLORCONTROL];
++        const uint32_t colormask = regs[XE_GPU_REG_RB_COLOR_MASK];
++        const uint32_t depthcontrol = regs[XE_GPU_REG_RB_DEPTHCONTROL];
++        const uint32_t alpharef = regs[XE_GPU_REG_RB_ALPHA_REF];
++        const uint32_t colorinfo = regs[XE_GPU_REG_RB_COLOR_INFO];
++        const uint32_t modecontrol = regs[XE_GPU_REG_RB_MODECONTROL];
++        static std::mutex seen_mutex;
++        static std::set<std::array<uint32_t, 8>> seen;
++        std::array<uint32_t, 8> k = {i, blend0, colorcontrol, colormask, depthcontrol, alpharef, colorinfo, modecontrol};
++        std::lock_guard<std::mutex> lock(seen_mutex);
++        if (seen.insert(k).second) {
++          REXGPU_INFO("Texture trace {:016X}: fetch#{} blend0={:08X} colorcontrol={:08X} colormask={:08X} "
++                      "depthcontrol={:08X} alpharef={:08X} colorinfo={:08X} modecontrol={:08X}",
++                      trace_hash, i, blend0, colorcontrol, colormask, depthcontrol, alpharef, colorinfo,
++                      modecontrol);
++        }
++      }
++    }
++  }
+ }
+ 
+ const char* TextureCache::TextureKey::GetLogDimensionName(xenos::DataDimension dimension) {
+@@ -867,6 +910,7 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+   // Create the texture and add it to the map.
+   Texture* texture;
+   {
++    creating_data_hash_ = HashGuestTexture(key, creating_view_);
+     std::unique_ptr<Texture> new_texture = CreateTexture(key);
+     if (!new_texture) {
+       key.LogAction("Failed to create");
+@@ -874,12 +918,46 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+     }
+     assert_true(new_texture->key() == key);
+     texture = textures_.emplace(key, std::move(new_texture)).first->second.get();
++    texture->SetDataHash(creating_data_hash_);
++    creating_data_hash_ = 0;
+   }
+   COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
+   texture->LogAction("Created");
+   return texture;
+ }
+ 
++uint64_t TextureCache::HashGuestTexture(const TextureKey& key,
++                                        texture_replacement::GuestBaseView& view_out) const {
++  view_out = texture_replacement::GuestBaseView();
++  texture_replacement::Registry& registry = texture_replacement::Registry::Get();
++  if (!registry.active()) return 0;
++  if (!key.base_page || key.scaled_resolve || key.signed_separate ||
++      key.dimension != xenos::DataDimension::k2DOrStacked || key.GetDepthOrArraySize() != 1) {
++    return 0;
++  }
++  texture_util::TextureGuestLayout layout = key.GetGuestLayout();
++  // packed_level == 0 means the base itself lives inside the packed mip tail.
++  if (layout.packed_level == 0 || !layout.base.level_data_extent_bytes) return 0;
++  texture_replacement::GuestBaseView view;
++  view.data = shared_memory().guest_memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
++  view.size_bytes = layout.base.level_data_extent_bytes;
++  view.guest_address = key.base_page << 12;
++  view.width = key.GetWidth();
++  view.height = key.GetHeight();
++  view.format = key.format;
++  view.endian = key.endianness;
++  view.tiled = key.tiled != 0;
++  view.row_pitch_bytes = layout.base.row_pitch_bytes;
++  view.x_extent_blocks = layout.base.x_extent_blocks;
++  view.y_extent_blocks = layout.base.y_extent_blocks;
++  uint64_t hash = registry.Hash(view);
++  if (registry.dump_enabled()) {
++    registry.Dump(hash, view);
++  }
++  view_out = view;
++  return hash;
++}
++
+ bool TextureCache::LoadTextureData(Texture& texture) {
+   PendingTextureLoad pending_load;
+   PendingSharedMemoryRange pending_ranges[2];
+@@ -914,11 +992,28 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
        if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
          break;
        }
@@ -1127,7 +1598,7 @@ index 76f5600..18f0702 100644
        return;
      default:
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
-index 3f9422d..7e5a76b 100644
+index 3f9422d..6716044 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
 +++ b/src/input/mnk/mnk_input_driver.cpp
 @@ -1,3 +1,4 @@
@@ -1135,7 +1606,7 @@ index 3f9422d..7e5a76b 100644
  /**
   * @file        input/mnk/mnk_input_driver.cpp
   * @brief       Keyboard/mouse input driver implementation.
-@@ -29,6 +30,21 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
+@@ -29,6 +30,50 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
                      "from the keybind_rstick_* keys only");
  REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
      .range(0.01, 10.0);
@@ -1153,11 +1624,40 @@ index 3f9422d..7e5a76b 100644
 +                     "Minimum right-stick deflection for any nonzero mouse motion (XInput "
 +                     "canonical inner deadzone is 8689; 0 = no floor)")
 +    .range(0, 32767);
++REXCVAR_DEFINE_BOOL(mnk_auto_shake, false, "Input/MnK",
++                    "Hold the left and right movement keys together to shake the left stick "
++                    "automatically (stick-shake QTEs such as \"Get it off!\")")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(mnk_key_stick_ramp_ms, 60.0, "Input/MnK",
++                      "Keyboard left stick travel time from centre to full deflection (and back) "
++                      "in ms, like the PC port: tapping A/D alternately sweeps through the centre "
++                      "so stick-shake QTEs count every tap. 0 = instant (1.0 behaviour)")
++    .range(0.0, 300.0)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(mnk_tap_shake_window_ms, 250.0, "Input/MnK",
++                      "Tap-to-shake: two alternating left/right movement key presses closer "
++                      "than this (ms) start a full-amplitude left-stick shake (stick-shake "
++                      "QTEs such as \"Get it off!\", tap A > D > A > D like the PC port). 0 = off")
++    .range(0.0, 1000.0)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(mnk_tap_shake_hold_ms, 300.0, "Input/MnK",
++                      "Tap-to-shake: keep shaking this long (ms) after the last tap")
++    .range(0.0, 2000.0)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(mnk_wheel_rstick_ms, 120.0, "Input/MnK",
++                      "Outside gameplay cameras (menus, the map) each mouse wheel notch also holds "
++                      "the right stick up/down for this long (ms) - map zoom with the wheel. 0 = off")
++    .range(0.0, 1000.0)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(mnk_auto_shake_hz, 12.0, "Input/MnK",
++                      "Auto-shake oscillation rate in full left-right cycles per second")
++    .range(2.0, 30.0)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_BOOL(mnk_invert_y, false, "Input", "Invert mouse Y for the right stick");
  
  REXCVAR_DEFINE_STRING(keybind_a, "Semicolon,Space", "Input/Keybinds/Controller", "A button");
  REXCVAR_DEFINE_STRING(keybind_b, "Quote,Backspace", "Input/Keybinds/Controller", "B button");
-@@ -71,6 +87,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
+@@ -71,6 +116,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
  // it. That is what lets the D-pad share the arrow keys. A consequence is
  // that binding a bare modifier name ("Shift") can never fire, since holding it
  // makes the live mask non-zero while the bind wants zero.
@@ -1171,7 +1671,7 @@ index 3f9422d..7e5a76b 100644
  constexpr uint8_t kModShift = 1u << 0;
  constexpr uint8_t kModCtrl = 1u << 1;
  constexpr uint8_t kModAlt = 1u << 2;
-@@ -86,30 +109,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
+@@ -86,30 +138,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
    return mods;
  }
  
@@ -1213,7 +1713,7 @@ index 3f9422d..7e5a76b 100644
  }
  
  std::string_view TrimSpaces(std::string_view s) {
-@@ -122,17 +133,99 @@ std::string_view TrimSpaces(std::string_view s) {
+@@ -122,17 +162,99 @@ std::string_view TrimSpaces(std::string_view s) {
    return s;
  }
  
@@ -1320,7 +1820,7 @@ index 3f9422d..7e5a76b 100644
  }
  
  std::atomic<bool> mouse_look_active{true};
-@@ -147,6 +240,43 @@ bool IsMouseLookActive() {
+@@ -147,6 +269,56 @@ bool IsMouseLookActive() {
    return mouse_look_active.load(std::memory_order_relaxed);
  }
  
@@ -1337,9 +1837,22 @@ index 3f9422d..7e5a76b 100644
 +  return mouse_camera_hook_active.load(std::memory_order_relaxed);
 +}
 +
++std::atomic<int64_t> mouse_camera_hook_frame_ns{0};
++
 +void TakeMouseCameraDelta(float& dx_out, float& dy_out) {
 +  dx_out = mouse_camera_dx.exchange(0.0f, std::memory_order_relaxed);
 +  dy_out = mouse_camera_dy.exchange(0.0f, std::memory_order_relaxed);
++  const auto now = std::chrono::steady_clock::now().time_since_epoch();
++  mouse_camera_hook_frame_ns.store(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count(), std::memory_order_relaxed);
++}
++
++bool IsMouseCameraHookRecent() {
++  const int64_t last = mouse_camera_hook_frame_ns.load(std::memory_order_relaxed);
++  if (last == 0) return false;
++  const auto now = std::chrono::steady_clock::now().time_since_epoch();
++  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
++  return now_ns - last < 200'000'000;
 +}
 +
 +// DP1 v1.1: "aim camera ran this frame" stamp (steady clock, ns).
@@ -1364,7 +1877,7 @@ index 3f9422d..7e5a76b 100644
  using rex::ui::VirtualKey;
  
  MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order)
-@@ -212,7 +342,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+@@ -212,7 +384,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
        rest.remove_prefix(comma + 1);
      }
      token = TrimSpaces(token);
@@ -1374,7 +1887,7 @@ index 3f9422d..7e5a76b 100644
        return true;
      }
    }
-@@ -222,8 +353,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+@@ -222,8 +395,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
  void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
    // Disabled means no device at all, so it never occupies a guest user slot.
    if (!IsEnabled()) {
@@ -1393,7 +1906,7 @@ index 3f9422d..7e5a76b 100644
    DeviceInfo info;
    info.id = kMnkDevice;
    info.name = "Keyboard and Mouse";
-@@ -269,11 +410,49 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -269,11 +452,49 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
        std::memset(out_state, 0, sizeof(*out_state));
        out_state->packet_number = packet_number_;
      }
@@ -1443,9 +1956,111 @@ index 3f9422d..7e5a76b 100644
    uint16_t buttons = 0;
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
      buttons |= X_INPUT_GAMEPAD_A;
-@@ -331,11 +510,36 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -311,14 +532,82 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+ 
+   int32_t lx = 0;
+   int32_t ly = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
+-    lx -= INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
+-    lx += INT16_MAX;
++  const bool lstick_left_down = IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left));
++  const bool lstick_right_down = IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right));
++  // DP1 v1.1.1: tap-to-shake. Rapid alternating taps of the left/right
++  // movement keys (A > D > A > D, PC-port style) drive a full-amplitude
++  // oscillation for mnk_tap_shake_hold_ms after the last tap. The slew-rate
++  // ramp alone left short taps far from the extremes and "Get it off!" did
++  // not register. Press edges are taken from key_pressed_since_poll_ so a
++  // tap shorter than one poll still counts.
++  bool tap_shake = false;
++  {
++    static std::chrono::steady_clock::time_point last_edge{}, prev_edge{};
++    static int last_side = 0;
++    const auto now_tp = std::chrono::steady_clock::now();
++    const bool left_edge = IsBindPressed(key_pressed_since_poll_, REXCVAR_GET(keybind_lstick_left));
++    const bool right_edge = IsBindPressed(key_pressed_since_poll_, REXCVAR_GET(keybind_lstick_right));
++    const int side = left_edge ? -1 : (right_edge ? 1 : 0);
++    if (side != 0 && side != last_side) {
++      prev_edge = last_edge;
++      last_edge = now_tp;
++      last_side = side;
++    }
++    const double window_ms = REXCVAR_GET(mnk_tap_shake_window_ms);
++    if (window_ms > 0.0 && prev_edge.time_since_epoch().count() != 0) {
++      const double gap_ms = std::chrono::duration<double, std::milli>(last_edge - prev_edge).count();
++      const double since_ms = std::chrono::duration<double, std::milli>(now_tp - last_edge).count();
++      tap_shake = gap_ms <= window_ms && since_ms <= REXCVAR_GET(mnk_tap_shake_hold_ms);
++    }
++  }
++  std::memset(key_pressed_since_poll_, 0, sizeof(key_pressed_since_poll_));
++  if (tap_shake || (lstick_left_down && lstick_right_down && REXCVAR_GET(mnk_auto_shake))) {
++    // DP1 v1.1: "shake the left stick" QTEs (Get it off!) count stick sweeps;
++    // alternating A/D on a keyboard jumps between the extremes without a sweep
++    // and half the shakes are missed. Holding both keys makes the driver
++    // oscillate the stick left/right at mnk_auto_shake_hz, passing through
++    // the centre like a real stick.
++    const double hz = std::max(1.0, REXCVAR_GET(mnk_auto_shake_hz));
++    const double t = std::chrono::duration<double>(
++                         std::chrono::steady_clock::now().time_since_epoch())
++                         .count();
++    lx = static_cast<int32_t>(std::lround(std::sin(t * hz * 2.0 * 3.14159265358979) * INT16_MAX));
++  } else {
++    if (lstick_left_down) lx -= INT16_MAX;
++    if (lstick_right_down) lx += INT16_MAX;
++  }
+   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
+     ly += INT16_MAX;
+   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
+     ly -= INT16_MAX;
++  // DP1 v1.1: slew-rate limit the keyboard left stick (PC-port feel). The
++  // targets above are +-32767 / 0; the emitted value travels towards the
++  // target at full-scale / mnk_key_stick_ramp_ms, so A > D > A > D taps sweep
++  // through the centre instead of jumping between the extremes.
++  {
++    static double kb_lx = 0.0, kb_ly = 0.0;
++    static std::chrono::steady_clock::time_point kb_last{};
++    const auto now_tp = std::chrono::steady_clock::now();
++    const double ramp_ms = REXCVAR_GET(mnk_key_stick_ramp_ms);
++    if (ramp_ms <= 0.0 || kb_last.time_since_epoch().count() == 0) {
++      kb_lx = double(lx);
++      kb_ly = double(ly);
++    } else {
++      double dt_ms = std::chrono::duration<double, std::milli>(now_tp - kb_last).count();
++      dt_ms = std::clamp(dt_ms, 0.0, 100.0);
++      const double step = double(INT16_MAX) * dt_ms / ramp_ms;
++      auto approach = [step](double cur, double target) {
++        if (target > cur) return std::min(cur + step, target);
++        if (target < cur) return std::max(cur - step, target);
++        return cur;
++      };
++      kb_lx = tap_shake ? double(lx) : approach(kb_lx, double(lx));
++      kb_ly = approach(kb_ly, double(ly));
++    }
++    kb_last = now_tp;
++    lx = static_cast<int32_t>(std::lround(kb_lx));
++    ly = static_cast<int32_t>(std::lround(kb_ly));
++  }
+ 
+   int32_t rx = 0;
+   int32_t ry = 0;
+@@ -330,12 +619,62 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+     ry += INT16_MAX;
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
      ry -= INT16_MAX;
++  // DP1 v1.1.1: mouse wheel -> right stick Y while no gameplay camera runs
++  // (the map zooms with the right stick). The wheel keeps its D-pad binding.
++  {
++    static std::chrono::steady_clock::time_point wheel_up_until{}, wheel_down_until{};
++    const double hold_ms = REXCVAR_GET(mnk_wheel_rstick_ms);
++    const auto now_tp = std::chrono::steady_clock::now();
++    if (wheel_up_pulse) wheel_up_until = now_tp + std::chrono::milliseconds(int64_t(hold_ms));
++    if (wheel_down_pulse) wheel_down_until = now_tp + std::chrono::milliseconds(int64_t(hold_ms));
++    const bool camera_live = IsMouseCameraHookActive() && IsMouseCameraHookRecent();
++    if (hold_ms > 0.0 && !camera_live) {
++      if (now_tp < wheel_up_until) ry += INT16_MAX;
++      if (now_tp < wheel_down_until) ry -= INT16_MAX;
++    }
++  }
  
 -  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
 -    double sensitivity = REXCVAR_GET(mnk_sensitivity);
@@ -1454,12 +2069,23 @@ index 3f9422d..7e5a76b 100644
 -    ry += static_cast<int32_t>(double(-mouse_dy_) * sensitivity * kBaseScale);
 +  // DP1 v1.1: while the game's aim camera runs, the mouse becomes the LEFT
 +  // stick (the aim camera's native input); the camera hook path is bypassed.
-+  const bool aim_stick = IsMouseCameraHookActive() && IsMouseAimStickActive();
++  // v1.1 rev.2: the right trigger (aim) held is the primary signal - the game
++  // aims with the LEFT stick while RT is down, whatever camera routine runs;
++  // the aim-camera hook stamp stays as a secondary signal.
++  // DP1 v1.1.1: the camera hook only owns the mouse while a gameplay camera is
++  // actually running; in menus and the map the mouse is the right stick again.
++  const bool hook_live = IsMouseCameraHookActive() && IsMouseCameraHookRecent();
++  if (IsMouseCameraHookActive() && !hook_live) {
++    float drop_dx = 0.0f, drop_dy = 0.0f;
++    TakeMouseCameraDelta(drop_dx, drop_dy);  // keep the stamp fresh-free: no snap when the camera resumes
++    mouse_camera_hook_frame_ns.store(0, std::memory_order_relaxed);
++  }
++  const bool aim_stick = hook_live && (rt != 0 || IsMouseAimStickActive());
 +  if (aim_stick) {
 +    float drop_dx = 0.0f, drop_dy = 0.0f;
 +    TakeMouseCameraDelta(drop_dx, drop_dy);  // never replay aim motion as a camera snap later
 +  }
-+  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive() && (!IsMouseCameraHookActive() || aim_stick)) {
++  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive() && (!hook_live || aim_stick)) {
 +    // DP1 (rev. 2, 2026-09-06): VECTOR mapping. The deadzone floor is added to
 +    // the length of the mouse motion vector, not per axis - a per-axis floor
 +    // turned every small move into a 45-degree diagonal ("crooked"). The
@@ -1485,7 +2111,13 @@ index 3f9422d..7e5a76b 100644
    }
    // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
    // mouse is off, and toggling it on would otherwise dump the whole backlog
-@@ -481,10 +685,17 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
+@@ -476,15 +815,23 @@ void MnkInputDriver::RecenterCursorFromUIThread(int32_t x, int32_t y) {
+ 
+ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
+   if (vk < 256) {
++    if (down && !key_down_[vk]) key_pressed_since_poll_[vk] = true;
+     key_down_[vk] = down;
+   }
  }
  
  void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
@@ -1504,7 +2136,7 @@ index 3f9422d..7e5a76b 100644
    SetKeyState(vk, true);
  }
  
-@@ -549,6 +760,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -549,6 +896,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
        mouse_dx_ += float(x - prev_mouse_x_);
        mouse_dy_ += float(y - prev_mouse_y_);
      }
@@ -1520,7 +2152,7 @@ index 3f9422d..7e5a76b 100644
    }
    prev_mouse_x_ = x;
    prev_mouse_y_ = y;
-@@ -558,6 +778,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -558,6 +914,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
    }
  }
  
@@ -1538,7 +2170,7 @@ index 3f9422d..7e5a76b 100644
  void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
    has_focus_ = false;
    // Withdraw the request too, or an update queued before the focus loss grabs
-@@ -568,6 +799,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+@@ -568,6 +935,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
      std::memset(key_down_, 0, sizeof(key_down_));
      mouse_dx_ = 0.0f;
      mouse_dy_ = 0.0f;
@@ -1869,3 +2501,32 @@ index b94fe9e..5fb41ee 100644
    });
  }
  
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 2251429..cee7285 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -474,9 +474,24 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+       break;
+     }
+     case SDL_EVENT_WINDOW_FOCUS_GAINED:
++      // DP1 (2026-09-06): after Alt+Tab back into a borderless fullscreen
++      // window, the Windows shell sometimes keeps the taskbar above it (the
++      // "rude app" detection is not re-run on plain activation). Re-assert
++      // fullscreen so SDL issues a fresh SetWindowPos over the monitor rect.
++      // Re-entering fullscreen is a no-op inside SDL when the window is already
++      // fullscreen, so hold the window above the taskbar with always-on-top
++      // while it is focused and drop the flag when focus leaves (other apps
++      // must be able to cover the game after Alt+Tab).
++      if (IsFullscreen() && (SDL_GetWindowFlags(sdl_window_) & SDL_WINDOW_FULLSCREEN)) {
++        SDL_SetWindowAlwaysOnTop(sdl_window_, true);
++        SDL_RaiseWindow(sdl_window_);
++      }
+       OnFocusUpdate(true, destruction_receiver);
+       break;
+     case SDL_EVENT_WINDOW_FOCUS_LOST:
++      if (SDL_GetWindowFlags(sdl_window_) & SDL_WINDOW_ALWAYS_ON_TOP) {
++        SDL_SetWindowAlwaysOnTop(sdl_window_, false);
++      }
+       OnFocusUpdate(false, destruction_receiver);
+       break;
+     case SDL_EVENT_WINDOW_EXPOSED:

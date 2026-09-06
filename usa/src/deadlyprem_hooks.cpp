@@ -42,6 +42,12 @@ REXCVAR_DEFINE_BOOL(dp_60fps, true, "DP1",
                     "DPRecomp #3, tick fix #12). Needs a 60 Hz guest video mode "
                     "(video_mode_refresh_rate = 60).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(dp_60fps_tick_min, 0.5, "DP1",
+                      "Lower clamp of the real-time logic tick in 1/60 s units. 1.0 = never "
+                      "slower than one tick per frame (v1.1; frames shorter than 16.67 ms then "
+                      "ran the game ahead of the audio, #12), 0.5 = follow real time (v1.2)")
+    .range(0.1, 1.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(dp_60fps_tick_max, 4.0, "DP1",
                       "Upper clamp of the real-time logic tick in 1/60 s units (the game itself "
                       "clamps to [1, 4]); frames longer than this are treated as a hitch")
@@ -87,6 +93,7 @@ void DP60FpsTickHook(PPCRegister& f0) {
   last_frame = now;
   have_last = true;
   const double tick_max = REXCVAR_GET(dp_60fps_tick_max);
-  tick = std::clamp(tick, 1.0, tick_max);
+  const double tick_min = std::min(REXCVAR_GET(dp_60fps_tick_min), tick_max);
+  tick = std::clamp(tick, tick_min, tick_max);
   f0.f64 = tick;
 }

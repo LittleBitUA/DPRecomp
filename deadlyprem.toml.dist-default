@@ -79,7 +79,7 @@ keybind_lstick_right = "D"
 keybind_dpad_left = "Shift+Left"
 keybind_dpad_right = "Shift+Right"
 video_mode_refresh_rate = 60.0
-gpu_allow_invalid_fetch_constants = false
+gpu_allow_invalid_fetch_constants = true
 log_level = "info"
 readback_memexport = true
 occlusion_query_enable = true
@@ -90,3 +90,15 @@ d3d12_debug = false
 store_shaders = true
 log_max_files = 20
 log_max_file_size_mb = 5
+
+# Texture dump/replacement: PNGs named <hash>.png in textures\ next to the exe replace guest textures
+texture_dump = false
+texture_replacement = true
+texture_path = ""
+
+# v1.2 input: tap-to-shake (A > D > A > D) and wheel = right stick outside gameplay cameras (map zoom)
+mnk_tap_shake_window_ms = 250.0
+mnk_tap_shake_hold_ms = 300.0
+mnk_wheel_rstick_ms = 120.0
+# v1.2: lower clamp of the 60 FPS logic tick (1.0 = 1.1 behaviour)
+dp_60fps_tick_min = 0.5

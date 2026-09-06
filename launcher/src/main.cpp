@@ -55,6 +55,10 @@ extern std::unordered_map<std::string, std::string> g_launcher_ini;
 void WriteLauncherIni();
 void MaybeShareShaderCache();
 void ApplySteamDeckPresetIfDetected();
+void GenerateKeyPromptOverlay();
+void EnsureBundledAssets();
+std::string GetPromptStyle();
+bool IsKnownPromptStyle(const std::string& v);
 static void ReadLauncherIni();
 extern std::unordered_map<std::string, std::string> g_launcher_ini;
 
@@ -78,6 +82,7 @@ constexpr wchar_t kGameTomlName[] = L"deadlyprem.toml";
 // Resource IDs (must match resources.rc).
 #define IDR_BANNER 200
 #define IDR_LOGO   201
+#define IDR_FONT   203  // Cinema Calligraphy (the game's UI font) for the key prompts
 #define IDR_MUSIC  202
 
 ULONG_PTR g_gdiplus_token = 0;
@@ -147,7 +152,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Anisotropic Filtering",     L"Анізотропна фільтрація"},
       {"Game default",              L"Як у грі"},
       {"Off",                       L"Вимк."},
-      {"Post-process Anti-Aliasing", L"Згладжування (post-process)"},
+      {"Post-process Anti-Aliasing", L"Згладжування (FXAA)"},
       {"Off (sharp, more aliasing)", L"Вимкнено (чітко, видно aliasing)"},
       {"FXAA (recommended)",        L"FXAA (рекомендовано)"},
       {"FXAA Extreme (heavier blur, hides specks)",
@@ -165,7 +170,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Balanced",                  L"Збалансований"},
       {"Performance",               L"Швидкодія"},
       {"Ultra Performance",         L"Макс. швидкодія"},
-      {"FSR Softness (0 = sharpest)", L"М'якість FSR (0 = макс. різкість)"},
+      {"FSR Softness (0 = sharpest)", L"М'якість FSR (0 = різко)"},
       {"CAS Extra Sharpness",       L"CAS: додаткова різкість"},
       {"Preserve Aspect (Letterbox)", L"Зберегти пропорції"},
       {"60 FPS (ehw patch)",        L"60 FPS (патч ehw)"},
@@ -173,7 +178,8 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Fullscreen",                L"Повноекранний режим"},
       {"Window Width (0 = auto)",   L"Ширина вікна (0 = авто)"},
       {"Window Height (0 = auto)",  L"Висота вікна (0 = авто)"},
-      {"Monitor (0 = default)",     L"Монітор (0 = основний)"},
+      {"Monitor",                   L"Монітор"},
+      {"Default (primary)",         L"Типово (основний)"},
       {"Allow VRR / Tearing",       L"Дозволити VRR / tearing"},
       {"Output Dithering",          L"Дизеринг виводу"},
       // Advanced.
@@ -186,7 +192,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"XInput (Xbox controllers only)",
                                     L"XInput (лише Xbox-геймпади)"},
       {"Controller Mappings (SDL)",
-                                    L"Файл мапінгів геймпадів (SDL)"},
+                                    L"Мапінги геймпадів (SDL)"},
       {"Game Language",             L"Мова гри"},
       {"German (Deutsch)",          L"Німецька"},
       {"French (Francais)",         L"Французька"},
@@ -197,24 +203,24 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Adapter 0",                 L"Адаптер 0"},
       {"Adapter 1",                 L"Адаптер 1"},
       {"Adapter 2",                 L"Адаптер 2"},
-      {"Async Shader Compilation",  L"Асинхронна компіляція шейдерів"},
+      {"Async Shader Compilation",  L"Асинхронні шейдери"},
       {"Texture Cache Soft Limit (MB)",
-                                    L"Кеш текстур: м'який ліміт (МБ)"},
+                                    L"Кеш текстур: м'який (МБ)"},
       {"Texture Cache Hard Limit (MB)",
-                                    L"Кеш текстур: жорсткий ліміт (МБ)"},
+                                    L"Кеш текстур: жорсткий (МБ)"},
       {"Mute Game Audio",           L"Вимкнути звук гри"},
       // Mouse.
       {"Mouse & Keyboard Mode",     L"Миша + клавіатура"},
       {"Mouse Camera Hook (direct)",
-                                    L"Миша керує камерою напряму (хук)"},
-      {"Camera Hook Sensitivity",   L"Чутливість камери (хук)"},
-      {"Camera Hook Invert Y",      L"Інвертувати Y камери (хук)"},
+                                    L"Хук камери (миша)"},
+      {"Camera Hook Sensitivity",   L"Чутливість хука камери"},
+      {"Camera Hook Invert Y",      L"Хук: інверсія Y"},
       {"Mouse as Right Stick",
-                                    L"Миша керує камерою (правий стік)"},
+                                    L"Миша як правий стік"},
       {"Mouse Sensitivity",         L"Чутливість миші"},
-      {"Stick Scale (units per pixel)", L"Масштаб стіка (одиниць на піксель)"},
-      {"Deadzone Floor (stick units)", L"Підлога мертвої зони (одиниці стіка)"},
-      {"Invert Mouse Y",            L"Інвертувати мишу по Y"},
+      {"Stick Scale (units per pixel)", L"Масштаб стіка (од./піксель)"},
+      {"Deadzone Floor (stick units)", L"Мін. мертва зона (стік)"},
+      {"Invert Mouse Y",            L"Інверсія миші по Y"},
       // DualSense.
       {"DualSense Adaptive Triggers", L"DualSense: адаптивні курки"},
       {"Right Trigger Effect Mode", L"Правий курок: режим ефекту"},
@@ -223,8 +229,8 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Feedback (constant resistance)",
                                     L"Feedback (постійний опір)"},
       {"Weapon (click point — gun trigger feel)",
-                                    L"Weapon (клацання, як спусковий гачок)"},
-      {"Vibration (buzz on pull)",  L"Vibration (вібрація при натисканні)"},
+                                    L"Weapon (клацання спуску)"},
+      {"Vibration (buzz on pull)",  L"Vibration (вібрація)"},
       {"Right Trigger Start Position", L"Правий курок: початок"},
       {"Right Trigger End Position", L"Правий курок: кінець"},
       {"Right Trigger Strength",    L"Правий курок: сила"},
@@ -233,7 +239,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Left Trigger Strength",     L"Лівий курок: сила"},
       // Keybinds (Director's Cut layout).
       {"A button (action / fire)",
-                                    L"A (дія / постріл під час прицілювання)"},
+                                    L"A (дія / постріл)"},
       {"B button",                  L"B"},
       {"X button",                  L"X"},
       {"Y button",                  L"Y"},
@@ -261,22 +267,44 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Info (recommended)",        L"Info (рекомендовано)"},
       {"Debug (verbose)",           L"Debug (детально)"},
       {"Trace (very verbose)",      L"Trace (дуже детально)"},
-      {"Memexport Readback (keep on)", L"Memexport readback (не вимикати)"},
-      {"Occlusion Queries",         L"Occlusion-запити"},
-      {"PSO Missing Policy",        L"Політика відсутнього PSO"},
+      {"Memexport Readback (keep on)", L"Читання memexport (лишити)"},
+      {"Occlusion Queries",         L"Occlusion-запити (відсікання)"},
+      {"PSO Missing Policy",        L"Якщо шейдер ще не готовий"},
       {"Block (wait per draw, budgeted — recommended)",
-                                    L"Block (чекати на драв, з бюджетом — рекомендовано)"},
+                                    L"Чекати (рекомендовано)"},
       {"Skip (no block, pop-in on miss)",
-                                    L"Skip (не чекати, геометрія зникає)"},
+                                    L"Пропустити (об'єкт зникне)"},
       {"Sync (inline compile, longest stutter)",
-                                    L"Sync (компіляція в кадрі, найдовші фризи)"},
-      {"PSO Block Budget (ms)", L"Бюджет очікування PSO на драв (мс)"},
-      {"No PSO Wait At Frame End",  L"Не чекати PSO наприкінці кадру"},
-      {"D3D12 Debug Layer (slow)",  L"D3D12 debug layer (повільно)"},
-      {"Shader Storage Cache",      L"Кеш шейдерів на диску"},
-      {"Share Shader Cache",        L"Ділитися кешем шейдерів"},
+                                    L"Синхронно (найдовший фриз)"},
+      {"PSO Block Budget (ms)", L"Макс. очікування шейдера (мс)"},
+      {"No PSO Wait At Frame End",  L"Не чекати шейдери в кінці кадру"},
+      {"D3D12 Debug Layer (slow)",  L"Debug-шар D3D12 (повільно)"},
+      {"Shader Storage Cache",      L"Зберігати шейдери на диску"},
+      {"Share Shader Cache",        L"Надсилати кеш шейдерів"},
       {"Help other players?",       L"Допомогти іншим гравцям?"},
       {"Steam Deck preset",         L"Пресет Steam Deck"},
+      {"Steam Overlay",             L"Оверлей Steam"},
+      {"Button Prompts",            L"Підказки кнопок"},
+      {"Texture Dump (textures\\dump)", L"Дамп текстур (textures\\dump)"},
+      {"Keyboard (keys from your bindings)", L"Клавіатура (ваші клавіші)"},
+      {"Xbox (original icons)",     L"Xbox (рідні іконки)"},
+      {"PlayStation - solid (DualShock / DualSense)", L"PlayStation - суцільні (DualShock / DualSense)"},
+      {"PlayStation - solid with ring", L"PlayStation - суцільні з кільцем"},
+      {"PlayStation - outline",     L"PlayStation - контурні"},
+      {"On (Steam default)",        L"Увімк. (типово в Steam)"},
+      {"Off (fixes black screen / tinted quarter frame)",
+                                    L"Вимк. (лікує чорний екран)"},
+      {"On - send my shader cache (anonymous) to the project",
+                                    L"Увімк. (анонімно, після гри)"},
+      {"Shader Compile Indicator",  L"Індикатор компіляції PSO"},
+      {"Shader Indicator: Verbose", L"Індикатор: детально"},
+      {"PSO Library (disk cache)",  L"Бібліотека PSO (на диску)"},
+      {"Camera Hook: Direct Yaw",   L"Хук: прямий поворот"},
+      {"Camera Hook: Catch-up",     L"Хук: наздоганяння"},
+      {"Camera Auto-center Hold (ms)", L"Затримка автоцентру (мс)"},
+      {"Key Stick Ramp (ms)",       L"Розгін стіка з клавіш (мс)"},
+      {"Auto-shake (hold A + D)",   L"Автотряска (тримати A + D)"},
+      {"Auto-shake Rate (Hz)",      L"Частота автотряски (Гц)"},
       {"Steam Deck detected - the community-tested Deck preset was applied (RTV, 1x, 2x MSAA, 16x AF, FXAA + CAS, 30 FPS, VSync, fullscreen 1280x800). You can change anything in Settings; this will not be applied again.",
        L"Виявлено Steam Deck - застосовано перевірений спільнотою пресет (RTV, 1x, 2x MSAA, 16x AF, FXAA + CAS, 30 FPS, VSync, повний екран 1280x800). Усе можна змінити в Settings; повторно не застосовуватиметься."},
       {"Share your shader cache with the project?\n\nWhen enabled, the launcher sends the shader cache the game builds while you play (only shader microcode and pipeline descriptions - no personal data, no save games) to the developers. Merged caches ship with the next release, so people who play after you get fewer stutters in new scenes.\n\nYou can change this later in Settings -> Advanced -> Share Shader Cache.",
@@ -327,14 +355,14 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.1.0";
+constexpr const wchar_t* kLauncherVersion = L"v1.2.0";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
 // pipeline descriptions only, no personal data) and posts it to this Discord
 // webhook whenever the cache changed since the last upload. Empty = feature
 // hidden and disabled.
-constexpr const wchar_t* kShaderCacheWebhookUrl = L"";  // set your own Discord webhook here; the release build carries the project one
+constexpr const wchar_t* kShaderCacheWebhookUrl = L"";
 constexpr const char* kGithubReleaseUrl =
     "https://github.com/LittleBitUA/DPRecomp/releases/latest";
 
@@ -1008,6 +1036,45 @@ void AddCvar(const char* key, const char* display, CvarCategory cat,
 // doesn't mention carry the SDK's own default so seeding them is a no-op for
 // the game. The keybind layout is the Director's Cut PC keymap and must be
 // preserved as-is.
+std::string Narrow(const std::wstring& s);
+
+// v1.1.1: the "monitor" cvar is an SDL display index (1-based, 0 = let the
+// OS decide). SDL on Windows lists the primary display first and the rest in
+// EnumDisplayMonitors order, so we mirror that to build a drop-down instead
+// of a bare 0..16 slider.
+static std::vector<std::pair<std::string, std::string>> BuildMonitorOptions(
+    const std::string& current) {
+  struct Mon { bool primary; int w, h; std::wstring dev; };
+  std::vector<Mon> mons;
+  EnumDisplayMonitors(nullptr, nullptr,
+      [](HMONITOR hm, HDC, LPRECT, LPARAM lp) -> BOOL {
+        MONITORINFOEXW mi{}; mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(hm, &mi)) {
+          auto* v = reinterpret_cast<std::vector<Mon>*>(lp);
+          v->push_back({(mi.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                        mi.rcMonitor.right - mi.rcMonitor.left,
+                        mi.rcMonitor.bottom - mi.rcMonitor.top, mi.szDevice});
+        }
+        return TRUE;
+      }, reinterpret_cast<LPARAM>(&mons));
+  std::stable_partition(mons.begin(), mons.end(), [](const Mon& m) { return m.primary; });
+  std::vector<std::pair<std::string, std::string>> opts;
+  opts.push_back({"0", "Default (primary)"});
+  for (size_t i = 0; i < mons.size(); ++i) {
+    std::wstring dev = mons[i].dev;
+    const size_t slash = dev.find_last_of(L'\\');
+    if (slash != std::wstring::npos) dev = dev.substr(slash + 1);
+    std::string label = std::to_string(i + 1) + ": " + Narrow(dev.c_str()) + "  " +
+                        std::to_string(mons[i].w) + "x" + std::to_string(mons[i].h) +
+                        (mons[i].primary ? "  (primary)" : "");
+    opts.push_back({std::to_string(i + 1), label});
+  }
+  bool known = false;
+  for (const auto& o : opts) known = known || o.first == current;
+  if (!known && !current.empty()) opts.push_back({current, current + ": (not connected)"});
+  return opts;
+}
+
 void DefineCvars() {
   g_cvars.clear();
   using K = CvarRow;
@@ -1083,8 +1150,8 @@ void DefineCvars() {
           K::kInt, "0", {}, 0, 8192);
   AddCvar("window_height", "Window Height (0 = auto)", kCatGraphics,
           K::kInt, "0", {}, 0, 8192);
-  AddCvar("monitor", "Monitor (0 = default)", kCatGraphics,
-          K::kInt, "0", {}, 0, 16);
+  AddCvar("monitor", "Monitor", kCatGraphics, K::kEnum, "0",
+          BuildMonitorOptions("0"));
   // SDK default true. Downpour shipped false after an NVIDIA report where
   // vsync was ignored while tearing was allowed - flip here if that recurs.
   AddCvar("d3d12_allow_variable_refresh_rate_and_tearing",
@@ -1116,6 +1183,10 @@ void DefineCvars() {
           K::kEnum, "sdl",
           {{"sdl", "SDL (recommended, DualSense support)"},
            {"xinput", "XInput (Xbox controllers only)"}});
+  // v1.1.1: texture dump / replacement (rexglue-sdk texture/replacement.cpp).
+  AddCvar("texture_dump", "Texture Dump (textures\\dump)", kCatAdvanced, K::kBool, "false");
+  AddCvar("texture_replacement", "", kCatHidden, K::kBool, "true");
+  AddCvar("texture_path", "", kCatHidden, K::kString, "");
   AddCvar("hid_mappings_file", "Controller Mappings (SDL)", kCatAdvanced,
           K::kString, "gamecontrollerdb.txt");
   // Ported from the Downpour launcher (2026-09-05). Xbox 360 XLanguage IDs
@@ -1147,6 +1218,15 @@ void DefineCvars() {
 
   // ===== MOUSE =====
   AddCvar("mnk_mode", "Mouse & Keyboard Mode", kCatMouse, K::kBool, "true");
+  // v1.1.1: launcher-only (launcher.ini). Draws the bound keys onto the
+  // button-prompt atlas through the runtime texture overlay (see
+  // GenerateKeyPromptOverlay).
+  AddCvar("launcher_prompt_style", "Button Prompts", kCatControls, K::kEnum, "keyboard",
+          {{"keyboard", "Keyboard (keys from your bindings)"},
+           {"xbox", "Xbox (original icons)"},
+           {"ps_fullsolid", "PlayStation - solid (DualShock / DualSense)"},
+           {"ps_solid", "PlayStation - solid with ring"},
+           {"ps_outline", "PlayStation - outline"}});
   // DP1 2026-09-06: direct camera control via a game hook (no stick
   // emulation). When on, the stick mapping below is bypassed.
   AddCvar("dp_mouse_camera", "Mouse Camera Hook (direct)",
@@ -1867,6 +1947,16 @@ static bool WriteUpdateScript(const std::wstring& script_path,
   script += L"      L \"skip: $f (not in zip)\"\r\n";
   script += L"    }\r\n";
   script += L"  }\r\n";
+  // v1.2: whole folders shipped in the zip (icon sets, texture replacements).
+  script += L"  foreach ($d in @('prompts','textures')) {\r\n";
+  script += L"    $s = Join-Path $root $d\r\n";
+  script += L"    if (Test-Path $s) {\r\n";
+  script += L"      $t = Join-Path $dest $d\r\n";
+  script += L"      New-Item -ItemType Directory -Force -Path $t | Out-Null\r\n";
+  script += L"      L \"copy: $d/*\"\r\n";
+  script += L"      Copy-Item -Recurse -Force \"$s\\*\" $t\r\n";
+  script += L"    }\r\n";
+  script += L"  }\r\n";
   script += L"  $shareable_src = Join-Path $root 'userdata\\cache\\shaders\\shareable'\r\n";
   script += L"  if (Test-Path $shareable_src) {\r\n";
   script += L"    $shareable_dst = Join-Path $dest 'userdata\\cache\\shaders\\shareable'\r\n";
@@ -2145,6 +2235,7 @@ void EnsurePerfDefaultsInToml() {
       "launcher_language",
       "launcher_steam_overlay",
       "launcher_share_shader_cache",
+      "launcher_prompt_style",
   };
   for (const auto& c : g_cvars) {
     if (kNoAutoSeed.count(c.key)) continue;
@@ -2224,6 +2315,10 @@ void LoadTomlValues(const std::wstring& toml_path) {
       g_unknown_toml_lines.push_back(line);
     }
   }
+  // Rebuild the monitor drop-down around the loaded value so an index of a
+  // display that is not connected right now is kept, not silently reset.
+  for (auto& c : g_cvars)
+    if (c.key == "monitor") c.options = BuildMonitorOptions(c.value);
 }
 
 bool LooksNumeric(const std::string& s) {
@@ -2263,7 +2358,7 @@ void SaveToml(const std::wstring& toml_path) {
     // Launcher-only settings live in launcher.ini (the SDK never reads it).
     // Writing them to toml would trigger SDK "unknown cvar" warnings.
     if (c.key == "launcher_language" || c.key == "launcher_steam_overlay" ||
-        c.key == "launcher_share_shader_cache") continue;
+        c.key == "launcher_share_shader_cache" || c.key == "launcher_prompt_style") continue;
     f << c.key << " = ";
     switch (c.kind) {
       case CvarRow::kBool:
@@ -2326,6 +2421,9 @@ void OpenSettings(HWND parent) {
       ReadLauncherIni();
       auto it = g_launcher_ini.find("launcher_share_shader_cache");
       c.value = (it != g_launcher_ini.end() && it->second == "on") ? "on" : "off";
+    } else if (c.key == "launcher_prompt_style") {
+      ReadLauncherIni();
+      c.value = GetPromptStyle();
     }
   }
 
@@ -2436,7 +2534,7 @@ int BuildPageControls(HWND hwnd, HFONT font, int dlg_w, int category) {
   const int col_w = two_columns
                         ? (dlg_w - 2 * margin_x - col_gap) / 2
                         : (dlg_w - 2 * margin_x);
-  const int label_w = two_columns ? 210 : 240;
+  const int label_w = two_columns ? 232 : 240;
   const int ctrl_w = two_columns ? (col_w - label_w - 8) : 160;
   const int rows_per_col = (item_count + columns - 1) / columns;
   int idx_in_cat = -1;
@@ -2809,9 +2907,14 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_launcher_ini["launcher_steam_overlay"] = (c.value == "off") ? "off" : "on";
           } else if (c.key == "launcher_share_shader_cache") {
             g_launcher_ini["launcher_share_shader_cache"] = (c.value == "on") ? "on" : "off";
+          } else if (c.key == "launcher_prompt_style") {
+            g_launcher_ini["launcher_prompt_style"] = IsKnownPromptStyle(c.value) ? c.value : "keyboard";
+            g_launcher_ini.erase("launcher_key_prompts");
           }
         }
         SaveToml(g_toml_path);
+        WriteLauncherIni();
+        GenerateKeyPromptOverlay();
         if (new_lang != old_lang) {
           // Update g_lang AND the launcher.ini sidecar (the only place the
           // launcher language is persisted).
@@ -3032,6 +3135,421 @@ void ApplySteamDeckPresetIfDetected() {
               TrC("Steam Deck preset"), MB_OK | MB_ICONINFORMATION);
 }
 
+// v1.1.1: keyboard key caps on the button-prompt atlas. The game draws its
+// A/B/X/Y/LB/RB/LT/RT/stick prompts from one 256x256 DXT5 atlas (guest hash
+// 2D1098B531AA9CA8, 8x8 cells of 32 px). We write
+// textures\2D1098B531AA9CA8.overlay.png (4x, 1024x1024) with opaque key caps
+// in the cells of the buttons that have keyboard binds; the runtime decodes the
+// original atlas, upscales it and punches the overlay through where alpha > 0
+// (rexglue-sdk src/graphics/pipeline/texture/replacement.cpp). D-pad, arrows
+// and everything else stay original and no game asset is redistributed.
+static int GetPngEncoderClsid(CLSID* clsid) {
+  UINT num = 0, size = 0;
+  GetImageEncodersSize(&num, &size);
+  if (size == 0) return -1;
+  std::vector<uint8_t> buf(size);
+  ImageCodecInfo* info = reinterpret_cast<ImageCodecInfo*>(buf.data());
+  GetImageEncoders(num, size, info);
+  for (UINT i = 0; i < num; ++i) {
+    if (wcscmp(info[i].MimeType, L"image/png") == 0) {
+      *clsid = info[i].Clsid;
+      return int(i);
+    }
+  }
+  return -1;
+}
+
+// "E,Space+LMB" -> first alternative -> "E"; "Shift+Left" -> "SHIFT+<-".
+static std::wstring PromptKeyLabel(const std::string& bind) {
+  std::string first = bind.substr(0, bind.find(','));
+  std::wstring out;
+  size_t pos = 0;
+  while (pos <= first.size()) {
+    size_t plus = first.find('+', pos);
+    std::string tok = first.substr(pos, plus == std::string::npos ? std::string::npos : plus - pos);
+    while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+    while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+    std::string lower = tok;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::wstring label;
+    if (lower == "space") label = L"SPACE";
+    else if (lower == "return" || lower == "enter") label = L"ENTER";
+    else if (lower == "control" || lower == "ctrl" || lower == "lcontrol") label = L"CTRL";
+    else if (lower == "shift" || lower == "lshift") label = L"SHIFT";
+    else if (lower == "alt" || lower == "menu") label = L"ALT";
+    else if (lower == "escape") label = L"ESC";
+    else if (lower == "tab") label = L"TAB";
+    else if (lower == "backspace") label = L"BKSP";
+    else if (lower == "capslock") label = L"CAPS";
+    else if (lower == "wheelup") label = L"WHL\u2191";
+    else if (lower == "wheeldown") label = L"WHL\u2193";
+    else if (lower == "left") label = L"\u2190";
+    else if (lower == "right") label = L"\u2192";
+    else if (lower == "up") label = L"\u2191";
+    else if (lower == "down") label = L"\u2193";
+    else {
+      std::string up = tok;
+      std::transform(up.begin(), up.end(), up.begin(), ::toupper);
+      if (up.size() > 6) up.resize(6);
+      label = Widen(up);
+    }
+    if (!label.empty()) {
+      if (!out.empty()) out += L"+";
+      out += label;
+    }
+    if (plus == std::string::npos) break;
+    pos = plus + 1;
+  }
+  return out.empty() ? L"?" : out;
+}
+
+// One prompt atlas: guest hash + size, overlay scale, and the button cells in
+// guest pixel coordinates. Add a line per texture that shows gamepad buttons
+// (find them with the Texture Dump switch: textures\dump\<hash>_<w>x<h>_<fmt>.png).
+struct PromptCell { const char* key; int x, y, w, h; };
+struct PromptAtlas {
+  const wchar_t* hash;
+  int scale;  // overlay scale vs the guest texture (4 = crisp 128 px caps)
+  std::vector<PromptCell> cells;
+};
+static const PromptAtlas kPromptAtlases[] = {
+    // Main button-prompt atlas 256x256 (8x8 cells of 32 px).
+    {L"2D1098B531AA9CA8", 4,
+     {{"keybind_a", 0, 0, 32, 32},               {"keybind_b", 32, 0, 32, 32},
+      {"keybind_x", 64, 0, 32, 32},              {"keybind_y", 96, 0, 32, 32},
+      {"@move", 32, 32, 32, 32},                 {"@mouse", 64, 32, 32, 32},
+      {"keybind_left_shoulder", 32, 64, 32, 32}, {"keybind_right_shoulder", 64, 64, 32, 32},
+      {"keybind_left_trigger", 96, 64, 32, 32},  {"keybind_right_trigger", 128, 64, 32, 32},
+      {"keybind_lstick_press", 160, 64, 32, 32}, {"keybind_rstick_press", 192, 64, 32, 32},
+      // bottom row: stick-shake prompts "< stick >" (two animation frames each);
+      // the stick icon is replaced, the animated arrows stay original.
+      {"@shake_l", 12, 229, 34, 24}, {"@shake_l", 82, 229, 34, 24},
+      {"@shake_r", 140, 229, 34, 24}, {"@shake_r", 210, 229, 34, 24}}},
+    // DATA LOAD page 1024x1024: LB / RB tabs top-right.
+    {L"51AA9FBD20140C6D", 2,
+     {{"keybind_left_shoulder", 824, 1, 32, 30}, {"keybind_right_shoulder", 856, 1, 32, 30}}},
+};
+
+// v1.2: prompt icon sets (prompts\ps_*, Zacksly CC BY 3.0) and the title
+// texture (textures\) travel inside the launcher exe and are written out
+// when their folder is missing - the 1.1 in-launcher updater only copies a
+// fixed list of files, so this is how 1.1 installs get them. A folder that
+// exists is never touched (the user may have removed or changed files).
+struct BundledAsset { int res_id; const wchar_t* rel; };
+static const BundledAsset kBundledAssets[] = {
+    {300, L"prompts\\ps_fullsolid\\Circle.png"},
+    {301, L"prompts\\ps_fullsolid\\Create.png"},
+    {302, L"prompts\\ps_fullsolid\\Cross.png"},
+    {303, L"prompts\\ps_fullsolid\\L1.png"},
+    {304, L"prompts\\ps_fullsolid\\L2.png"},
+    {305, L"prompts\\ps_fullsolid\\Left Stick All.png"},
+    {306, L"prompts\\ps_fullsolid\\Left Stick Click.png"},
+    {307, L"prompts\\ps_fullsolid\\Left Stick Left-Right.png"},
+    {308, L"prompts\\ps_fullsolid\\Options.png"},
+    {309, L"prompts\\ps_fullsolid\\R1.png"},
+    {310, L"prompts\\ps_fullsolid\\R2.png"},
+    {311, L"prompts\\ps_fullsolid\\Right Stick Click.png"},
+    {312, L"prompts\\ps_fullsolid\\Right Stick Left-Right.png"},
+    {313, L"prompts\\ps_fullsolid\\Right Stick Up-Down.png"},
+    {314, L"prompts\\ps_fullsolid\\Right Stick.png"},
+    {315, L"prompts\\ps_fullsolid\\Square.png"},
+    {316, L"prompts\\ps_fullsolid\\Triangle.png"},
+    {317, L"prompts\\ps_solid\\Circle.png"},
+    {318, L"prompts\\ps_solid\\Create.png"},
+    {319, L"prompts\\ps_solid\\Cross.png"},
+    {320, L"prompts\\ps_solid\\L1.png"},
+    {321, L"prompts\\ps_solid\\L2.png"},
+    {322, L"prompts\\ps_solid\\Left Stick All.png"},
+    {323, L"prompts\\ps_solid\\Left Stick Click.png"},
+    {324, L"prompts\\ps_solid\\Left Stick Left-Right.png"},
+    {325, L"prompts\\ps_solid\\Options.png"},
+    {326, L"prompts\\ps_solid\\R1.png"},
+    {327, L"prompts\\ps_solid\\R2.png"},
+    {328, L"prompts\\ps_solid\\Right Stick Click.png"},
+    {329, L"prompts\\ps_solid\\Right Stick Left-Right.png"},
+    {330, L"prompts\\ps_solid\\Right Stick Up-Down.png"},
+    {331, L"prompts\\ps_solid\\Right Stick.png"},
+    {332, L"prompts\\ps_solid\\Square.png"},
+    {333, L"prompts\\ps_solid\\Triangle.png"},
+    {334, L"prompts\\ps_outline\\Circle.png"},
+    {335, L"prompts\\ps_outline\\Create.png"},
+    {336, L"prompts\\ps_outline\\Cross.png"},
+    {337, L"prompts\\ps_outline\\L1.png"},
+    {338, L"prompts\\ps_outline\\L2.png"},
+    {339, L"prompts\\ps_outline\\Left Stick All.png"},
+    {340, L"prompts\\ps_outline\\Left Stick Click.png"},
+    {341, L"prompts\\ps_outline\\Left Stick Left-Right.png"},
+    {342, L"prompts\\ps_outline\\Options.png"},
+    {343, L"prompts\\ps_outline\\R1.png"},
+    {344, L"prompts\\ps_outline\\R2.png"},
+    {345, L"prompts\\ps_outline\\Right Stick Click.png"},
+    {346, L"prompts\\ps_outline\\Right Stick Left-Right.png"},
+    {347, L"prompts\\ps_outline\\Right Stick Up-Down.png"},
+    {348, L"prompts\\ps_outline\\Right Stick.png"},
+    {349, L"prompts\\ps_outline\\Square.png"},
+    {350, L"prompts\\ps_outline\\Triangle.png"},
+    {351, L"prompts\\LICENSE-zacksly.txt"},
+    {352, L"prompts\\README.txt"},
+    {353, L"textures\\6E42BC7CF738BCF0.png"},
+    {354, L"textures\\README.txt"},
+};
+
+void EnsureBundledAssets() {
+  const std::wstring root = GetExeDir();
+  std::set<std::wstring> present_dirs;
+  for (const auto& a : kBundledAssets) {
+    const std::wstring rel(a.rel);
+    const std::wstring dir = root + L"\\" + rel.substr(0, rel.find_last_of(L'\\'));
+    if (present_dirs.count(dir)) continue;
+    if (PathIsDirectoryW(dir.c_str())) { present_dirs.insert(dir); continue; }
+    // First asset of a missing folder: create it and write every asset of it.
+    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+    for (const auto& b : kBundledAssets) {
+      const std::wstring brel(b.rel);
+      if (root + L"\\" + brel.substr(0, brel.find_last_of(L'\\')) != dir) continue;
+      HRSRC hres = FindResourceW(nullptr, MAKEINTRESOURCEW(b.res_id), RT_RCDATA);
+      if (!hres) continue;
+      HGLOBAL hmem = LoadResource(nullptr, hres);
+      if (!hmem) continue;
+      const DWORD size = SizeofResource(nullptr, hres);
+      const void* data = LockResource(hmem);
+      if (!data || !size) continue;
+      std::ofstream f(root + L"\\" + brel, std::ios::binary | std::ios::trunc);
+      if (f) f.write(static_cast<const char*>(data), size);
+    }
+    present_dirs.insert(dir);
+  }
+}
+
+// launcher.ini: launcher_prompt_style = keyboard | xbox | ps_* (a folder under
+// prompts\ with the icon PNGs, see prompts\README.txt). Migrates the nightly
+// key launcher_key_prompts (on/off).
+bool IsKnownPromptStyle(const std::string& v) {
+  return v == "keyboard" || v == "xbox" || v == "ps_fullsolid" || v == "ps_solid" || v == "ps_outline";
+}
+
+std::string GetPromptStyle() {
+  auto it = g_launcher_ini.find("launcher_prompt_style");
+  if (it != g_launcher_ini.end()) {
+    return IsKnownPromptStyle(it->second) ? it->second : "keyboard";
+  }
+  auto legacy = g_launcher_ini.find("launcher_key_prompts");
+  if (legacy != g_launcher_ini.end() && legacy->second == "off") return "xbox";
+  return "keyboard";
+}
+
+void GenerateKeyPromptOverlay() {
+  const std::wstring dir = GetExeDir() + L"\\textures";
+  ReadLauncherIni();
+  const std::string style = GetPromptStyle();
+  if (g_cvars.empty()) DefineCvars();
+  LoadTomlValues(GetExeDir() + L"\\" + kGameTomlName);
+  auto val = [](const char* key) -> std::string {
+    for (const auto& c : g_cvars) if (c.key == key) return c.value;
+    return std::string();
+  };
+  // Icon sets (PlayStation) live in prompts\<style>\; keyboard caps only make
+  // sense with the keyboard driver on. Anything else = original Xbox icons.
+  const bool icon_set = style.rfind("ps_", 0) == 0;
+  const std::wstring icon_dir = GetExeDir() + L"\\prompts\\" + Widen(style);
+  bool enabled = (style == "keyboard" && val("mnk_mode") == "true") ||
+                 (icon_set && PathIsDirectoryW(icon_dir.c_str()));
+  if (!enabled) {
+    for (const auto& atlas : kPromptAtlases) {
+      DeleteFileW((dir + L"\\" + atlas.hash + L".overlay.png").c_str());
+    }
+    return;
+  }
+  CreateDirectoryW(dir.c_str(), nullptr);
+  CLSID png;
+  if (GetPngEncoderClsid(&png) < 0) return;
+  // The game's own UI font (Cinema Calligraphy), embedded as RCDATA and loaded
+  // as a private font so nothing has to be installed. Segoe UI as fallback.
+  PrivateFontCollection private_fonts;
+  bool game_font = false;
+  if (HRSRC hres = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_FONT), RT_RCDATA)) {
+    if (HGLOBAL hmem = LoadResource(nullptr, hres)) {
+      const DWORD size = SizeofResource(nullptr, hres);
+      void* data = LockResource(hmem);
+      if (data && size && private_fonts.AddMemoryFont(data, INT(size)) == Ok &&
+          private_fonts.GetFamilyCount() > 0) {
+        game_font = true;
+      }
+    }
+  }
+  FontFamily fallback(L"Segoe UI");
+  FontFamily game_family;
+  int found = 0;
+  if (game_font) private_fonts.GetFamilies(1, &game_family, &found);
+  const FontFamily& family = (game_font && found > 0) ? game_family : fallback;
+  const FontStyle font_style = (game_font && found > 0) ? FontStyleRegular : FontStyleBold;
+
+  // Movement keys as one label ("WASD") when they are single keys.
+  std::wstring move_label;
+  {
+    std::wstring u = PromptKeyLabel(val("keybind_lstick_up")), l = PromptKeyLabel(val("keybind_lstick_left"));
+    std::wstring d = PromptKeyLabel(val("keybind_lstick_down")), r = PromptKeyLabel(val("keybind_lstick_right"));
+    move_label = (u.size() == 1 && l.size() == 1 && d.size() == 1 && r.size() == 1) ? (u + l + d + r) : L"MOVE";
+  }
+
+  for (const auto& atlas : kPromptAtlases) {
+    const int S = atlas.scale;
+    int gw = 0, gh = 0;
+    for (const auto& c : atlas.cells) {
+      gw = std::max(gw, c.x + c.w);
+      gh = std::max(gh, c.y + c.h);
+    }
+    // Round the overlay up to the guest texture size (power of two >= extent).
+    int size = 1;
+    while (size < std::max(gw, gh)) size <<= 1;
+    Bitmap bmp(size * S, size * S, PixelFormat32bppARGB);
+    Graphics g(&bmp);
+    g.Clear(Color(0, 0, 0, 0));
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+
+    auto draw_cap = [&](const RectF& r, const std::wstring& label) {
+      const float rad = std::min(r.Width, r.Height) * 0.16f;
+      auto add_round = [&](GraphicsPath& path, const RectF& q) {
+        path.AddArc(q.X, q.Y, rad * 2, rad * 2, 180, 90);
+        path.AddArc(q.X + q.Width - rad * 2, q.Y, rad * 2, rad * 2, 270, 90);
+        path.AddArc(q.X + q.Width - rad * 2, q.Y + q.Height - rad * 2, rad * 2, rad * 2, 0, 90);
+        path.AddArc(q.X, q.Y + q.Height - rad * 2, rad * 2, rad * 2, 90, 90);
+        path.CloseFigure();
+      };
+      GraphicsPath cap;
+      add_round(cap, r);
+      SolidBrush lip(Color(255, 150, 150, 150));
+      g.FillPath(&lip, &cap);
+      RectF face(r.X, r.Y, r.Width, r.Height - r.Height * 0.09f);
+      GraphicsPath face_path;
+      add_round(face_path, face);
+      SolidBrush fill(Color(255, 238, 238, 238));
+      g.FillPath(&fill, &face_path);
+      Pen pen(Color(255, 35, 35, 35), std::max(1.0f, 0.4f * S));
+      g.DrawPath(&pen, &cap);
+      const size_t n = label.size();
+      const float base = std::min(r.Width, r.Height);
+      const float fsize = base * (n <= 1 ? 0.62f : n <= 2 ? 0.50f : n <= 4 ? 0.30f : n <= 6 ? 0.22f : 0.16f);
+      Font font(&family, fsize, font_style, UnitPixel);
+      StringFormat sf;
+      sf.SetAlignment(StringAlignmentCenter);
+      sf.SetLineAlignment(StringAlignmentCenter);
+      SolidBrush text(Color(255, 25, 25, 25));
+      g.DrawString(label.c_str(), -1, &font, face, &sf, &text);
+    };
+
+    // Mouse glyph on a cap: body, button split, a big highlighted wheel and
+    // up/down arrows beside it ("scroll / move it forward-back").
+    auto draw_mouse = [&](const RectF& r) {
+      draw_cap(r, L"");
+      RectF face(r.X, r.Y, r.Width, r.Height - r.Height * 0.09f);
+      const float h = face.Height * 0.74f;
+      const float w = std::min(h * 0.62f, face.Width * 0.55f);
+      const float arrows_w = w * 0.42f;
+      const float total_w = w + arrows_w * 1.15f;
+      const float x = face.X + (face.Width - total_w) * 0.5f;
+      const float y = face.Y + (face.Height - h) * 0.5f;
+      const float stroke = std::max(1.0f, 0.5f * S);
+      GraphicsPath body;
+      body.AddArc(x, y, w, w * 0.9f, 180, 180);                       // top dome
+      body.AddArc(x, y + h - w * 0.9f, w, w * 0.9f, 0, 180);          // bottom dome
+      body.CloseFigure();
+      SolidBrush white(Color(255, 255, 255, 255));
+      g.FillPath(&white, &body);
+      Pen pen(Color(255, 35, 35, 35), stroke);
+      g.DrawPath(&pen, &body);
+      const float split_y = y + h * 0.40f;
+      g.DrawLine(&pen, x, split_y, x + w, split_y);                    // buttons bottom
+      g.DrawLine(&pen, x + w * 0.5f, y, x + w * 0.5f, split_y);        // left/right split
+      // Wheel: large, yellow like the atlas arrows, dark outline.
+      const float ww = w * 0.30f, wh = h * 0.30f;
+      RectF wheel(x + w * 0.5f - ww * 0.5f, y + h * 0.06f, ww, wh);
+      GraphicsPath wheel_path;
+      wheel_path.AddArc(wheel.X, wheel.Y, ww, ww, 180, 180);
+      wheel_path.AddArc(wheel.X, wheel.Y + wh - ww, ww, ww, 0, 180);
+      wheel_path.CloseFigure();
+      SolidBrush yellow(Color(255, 242, 211, 27));
+      g.FillPath(&yellow, &wheel_path);
+      g.DrawPath(&pen, &wheel_path);
+      // Up / down arrows to the right of the mouse.
+      SolidBrush dark(Color(255, 35, 35, 35));
+      const float ax = x + w + arrows_w * 0.15f;
+      const float aw = arrows_w, ah = h * 0.26f;
+      const float cy = y + h * 0.5f;
+      PointF up[3] = {PointF(ax, cy - h * 0.10f), PointF(ax + aw, cy - h * 0.10f), PointF(ax + aw * 0.5f, cy - h * 0.10f - ah)};
+      PointF down[3] = {PointF(ax, cy + h * 0.10f), PointF(ax + aw, cy + h * 0.10f), PointF(ax + aw * 0.5f, cy + h * 0.10f + ah)};
+      g.FillPolygon(&dark, up, 3);
+      g.FillPolygon(&dark, down, 3);
+    };
+
+    // Icon set cell: erase the original (alpha == 1 = "erase" for the runtime
+    // overlay compositor), then the PNG scaled to fit, centred.
+    auto draw_icon = [&](const RectF& r, const wchar_t* name) -> bool {
+      const std::wstring path = icon_dir + L"\\" + name + L".png";
+      Bitmap icon(path.c_str());
+      if (icon.GetLastStatus() != Ok || icon.GetWidth() == 0) return false;
+      SolidBrush erase(Color(1, 0, 0, 0));
+      g.SetCompositingMode(CompositingModeSourceCopy);
+      g.FillRectangle(&erase, r);
+      g.SetCompositingMode(CompositingModeSourceOver);
+      const float sc = std::min(r.Width / float(icon.GetWidth()), r.Height / float(icon.GetHeight()));
+      const float w = icon.GetWidth() * sc, h = icon.GetHeight() * sc;
+      g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+      g.DrawImage(&icon, RectF(r.X + (r.Width - w) * 0.5f, r.Y + (r.Height - h) * 0.5f, w, h));
+      return true;
+    };
+    static const std::pair<const char*, const wchar_t*> kIconNames[] = {
+        {"keybind_a", L"Cross"},                {"keybind_b", L"Circle"},
+        {"keybind_x", L"Square"},               {"keybind_y", L"Triangle"},
+        {"keybind_left_shoulder", L"L1"},       {"keybind_right_shoulder", L"R1"},
+        {"keybind_left_trigger", L"L2"},        {"keybind_right_trigger", L"R2"},
+        {"keybind_lstick_press", L"Left Stick Click"}, {"keybind_rstick_press", L"Right Stick Click"},
+        {"@move", L"Left Stick All"},           {"@mouse", L"Right Stick"},
+        {"@shake_l", L"Left Stick Left-Right"}, {"@shake_r", L"Right Stick Left-Right"},
+    };
+
+    for (const auto& c : atlas.cells) {
+      const std::string key(c.key);
+      const float m = 1.0f * S;
+      RectF r(float(c.x * S) + m, float(c.y * S) + m, float(c.w * S) - 2 * m, float(c.h * S) - 2 * m);
+      if (icon_set) {
+        for (const auto& n : kIconNames) {
+          if (key == n.first) {
+            // full cell (no margin) so the erase covers the original icon
+            RectF full(float(c.x * S), float(c.y * S), float(c.w * S), float(c.h * S));
+            draw_icon(full, n.second);
+            break;
+          }
+        }
+        continue;
+      }
+      if (key == "@shake_l") {
+        // two caps side by side: the left and right movement keys
+        RectF a(r.X, r.Y, r.Width * 0.5f - m * 0.5f, r.Height);
+        RectF d(r.X + r.Width * 0.5f + m * 0.5f, r.Y, r.Width * 0.5f - m * 0.5f, r.Height);
+        draw_cap(a, PromptKeyLabel(val("keybind_lstick_left")));
+        draw_cap(d, PromptKeyLabel(val("keybind_lstick_right")));
+        continue;
+      }
+      if (key == "@mouse" || key == "@shake_r") {
+        draw_mouse(r);
+        continue;
+      }
+      std::wstring label;
+      if (key == "@move") label = move_label;
+      else {
+        const std::string bind = val(c.key);
+        if (bind.empty()) continue;
+        label = PromptKeyLabel(bind);
+      }
+      draw_cap(r, label);
+    }
+    bmp.Save((dir + L"\\" + atlas.hash + L".overlay.png").c_str(), &png, nullptr);
+  }
+}
+
 // v1.1: opt-in shader cache sharing. Fingerprints the shareable storage files
 // (name:size:mtime), skips when unchanged since the last upload, otherwise
 // hands the job to a hidden PowerShell script (Compress-Archive + curl.exe
@@ -3133,6 +3651,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   SaveLauncherLanguageSidecar();
   EnsurePerfDefaultsInToml();
   ApplySteamDeckPresetIfDetected();
+  EnsureBundledAssets();
+  GenerateKeyPromptOverlay();
   MaybeShareShaderCache();
   // If %TEMP%\dp1_update.log exists, the previous auto-updater run did not
   // complete — offer the user the log for diagnostic. Runs BEFORE the main

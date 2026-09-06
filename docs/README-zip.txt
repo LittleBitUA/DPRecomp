@@ -1,4 +1,4 @@
-Deadly Premonition Recompilation 1.0  -  by <<Little Bit>> (Dmytro Bidlov)  -  MADE IN UKRAINE
+Deadly Premonition Recompilation 1.2  -  by <<Little Bit>> (Dmytro Bidlov)  -  MADE IN UKRAINE
 https://github.com/LittleBitUA/DPRecomp
 
 WHAT IS THIS
@@ -27,6 +27,12 @@ DEFAULT CONTROLS (see CONTROLS_EN.txt for the full list)
   WASD move, mouse look, wheel = weapon, E interact, R cancel/reload,
   F flashlight, C observe, Space (hold) aim, Space+LMB fire, Ctrl lock-on,
   Z/X strafe, Enter pause, M map. A controller works at the same time.
+
+BUTTON PROMPTS / TEXTURE MODS
+  Launcher -> Settings -> Controls -> Button Prompts: Keyboard (your keys),
+  Xbox (original) or PlayStation (icons by Zacksly, CC BY 3.0 - prompts\).
+  textures\<hash>.png replaces a game texture; Advanced -> Texture Dump writes
+  every loaded texture to textures\dump\ so you can find the one to edit.
 
 SAVES
   userdata\  next to the game. Back up that folder to keep your progress.

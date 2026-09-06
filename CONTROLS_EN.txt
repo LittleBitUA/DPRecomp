@@ -12,6 +12,7 @@ MOVEMENT AND CAMERA
   A > D > A > D      Tap alternately to shake the left stick (QTE "Get it off!")
   Mouse              Look (camera hook); aims while Space is held
   Wheel Up / Down    Change weapon (D-pad up / down)
+                     In the map: zoom in / out (mouse forward / back zooms too)
 
 INTERACTION
 -----------

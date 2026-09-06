@@ -376,6 +376,45 @@ name = "DPCameraAnchorHook"
 registers = ["r3"]
 after_instruction = false
 
+# DP1 v1.1.1: the remaining absolute (fnmsubs) camera routines read the same
+# anchor (same getter + handles, +128 -> +112) - hook them too so the direct yaw
+# write works while running / in the other gameplay camera modes.
+[[midasm_hook]]
+address = 0x8233875C          # sub_823386C0
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82339438          # sub_823393A8 (1st read)
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x823394C4          # sub_823393A8 (2nd read)
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8233987C          # sub_82339688
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82339B48          # sub_82339AD0 (1st read)
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82339C0C          # sub_82339AD0 (2nd read)
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
 [[midasm_hook]]
 address = 0x82339F74          # sub_82339DF8 (left-stick driven, fnmsubs) - aim?
 name = "DPCameraMouseHookWalk"

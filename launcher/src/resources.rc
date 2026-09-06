@@ -6,17 +6,131 @@
 // build: the launcher tolerates the missing resource (music is skipped).
 #define IDR_BANNER 200
 #define IDR_LOGO   201
+#define IDR_FONT   203
 
 IDR_BANNER     RCDATA "../assets/banner.png"
 IDR_LOGO       RCDATA "../assets/logo.png"
+IDR_FONT       RCDATA "../assets/Cinema_Calligraphy-Regular.otf"
+// v1.2: bundled prompt icon sets (Zacksly, CC BY 3.0) and the title texture,
+// written next to the exe when their folder is missing (EnsureBundledAssets).
+#define IDR_BUNDLE_0 300
+#define IDR_BUNDLE_1 301
+#define IDR_BUNDLE_2 302
+#define IDR_BUNDLE_3 303
+#define IDR_BUNDLE_4 304
+#define IDR_BUNDLE_5 305
+#define IDR_BUNDLE_6 306
+#define IDR_BUNDLE_7 307
+#define IDR_BUNDLE_8 308
+#define IDR_BUNDLE_9 309
+#define IDR_BUNDLE_10 310
+#define IDR_BUNDLE_11 311
+#define IDR_BUNDLE_12 312
+#define IDR_BUNDLE_13 313
+#define IDR_BUNDLE_14 314
+#define IDR_BUNDLE_15 315
+#define IDR_BUNDLE_16 316
+#define IDR_BUNDLE_17 317
+#define IDR_BUNDLE_18 318
+#define IDR_BUNDLE_19 319
+#define IDR_BUNDLE_20 320
+#define IDR_BUNDLE_21 321
+#define IDR_BUNDLE_22 322
+#define IDR_BUNDLE_23 323
+#define IDR_BUNDLE_24 324
+#define IDR_BUNDLE_25 325
+#define IDR_BUNDLE_26 326
+#define IDR_BUNDLE_27 327
+#define IDR_BUNDLE_28 328
+#define IDR_BUNDLE_29 329
+#define IDR_BUNDLE_30 330
+#define IDR_BUNDLE_31 331
+#define IDR_BUNDLE_32 332
+#define IDR_BUNDLE_33 333
+#define IDR_BUNDLE_34 334
+#define IDR_BUNDLE_35 335
+#define IDR_BUNDLE_36 336
+#define IDR_BUNDLE_37 337
+#define IDR_BUNDLE_38 338
+#define IDR_BUNDLE_39 339
+#define IDR_BUNDLE_40 340
+#define IDR_BUNDLE_41 341
+#define IDR_BUNDLE_42 342
+#define IDR_BUNDLE_43 343
+#define IDR_BUNDLE_44 344
+#define IDR_BUNDLE_45 345
+#define IDR_BUNDLE_46 346
+#define IDR_BUNDLE_47 347
+#define IDR_BUNDLE_48 348
+#define IDR_BUNDLE_49 349
+#define IDR_BUNDLE_50 350
+#define IDR_BUNDLE_51 351
+#define IDR_BUNDLE_52 352
+#define IDR_BUNDLE_53 353
+#define IDR_BUNDLE_54 354
+IDR_BUNDLE_0 RCDATA "../assets/prompts/ps_fullsolid/Circle.png"
+IDR_BUNDLE_1 RCDATA "../assets/prompts/ps_fullsolid/Create.png"
+IDR_BUNDLE_2 RCDATA "../assets/prompts/ps_fullsolid/Cross.png"
+IDR_BUNDLE_3 RCDATA "../assets/prompts/ps_fullsolid/L1.png"
+IDR_BUNDLE_4 RCDATA "../assets/prompts/ps_fullsolid/L2.png"
+IDR_BUNDLE_5 RCDATA "../assets/prompts/ps_fullsolid/Left Stick All.png"
+IDR_BUNDLE_6 RCDATA "../assets/prompts/ps_fullsolid/Left Stick Click.png"
+IDR_BUNDLE_7 RCDATA "../assets/prompts/ps_fullsolid/Left Stick Left-Right.png"
+IDR_BUNDLE_8 RCDATA "../assets/prompts/ps_fullsolid/Options.png"
+IDR_BUNDLE_9 RCDATA "../assets/prompts/ps_fullsolid/R1.png"
+IDR_BUNDLE_10 RCDATA "../assets/prompts/ps_fullsolid/R2.png"
+IDR_BUNDLE_11 RCDATA "../assets/prompts/ps_fullsolid/Right Stick Click.png"
+IDR_BUNDLE_12 RCDATA "../assets/prompts/ps_fullsolid/Right Stick Left-Right.png"
+IDR_BUNDLE_13 RCDATA "../assets/prompts/ps_fullsolid/Right Stick Up-Down.png"
+IDR_BUNDLE_14 RCDATA "../assets/prompts/ps_fullsolid/Right Stick.png"
+IDR_BUNDLE_15 RCDATA "../assets/prompts/ps_fullsolid/Square.png"
+IDR_BUNDLE_16 RCDATA "../assets/prompts/ps_fullsolid/Triangle.png"
+IDR_BUNDLE_17 RCDATA "../assets/prompts/ps_solid/Circle.png"
+IDR_BUNDLE_18 RCDATA "../assets/prompts/ps_solid/Create.png"
+IDR_BUNDLE_19 RCDATA "../assets/prompts/ps_solid/Cross.png"
+IDR_BUNDLE_20 RCDATA "../assets/prompts/ps_solid/L1.png"
+IDR_BUNDLE_21 RCDATA "../assets/prompts/ps_solid/L2.png"
+IDR_BUNDLE_22 RCDATA "../assets/prompts/ps_solid/Left Stick All.png"
+IDR_BUNDLE_23 RCDATA "../assets/prompts/ps_solid/Left Stick Click.png"
+IDR_BUNDLE_24 RCDATA "../assets/prompts/ps_solid/Left Stick Left-Right.png"
+IDR_BUNDLE_25 RCDATA "../assets/prompts/ps_solid/Options.png"
+IDR_BUNDLE_26 RCDATA "../assets/prompts/ps_solid/R1.png"
+IDR_BUNDLE_27 RCDATA "../assets/prompts/ps_solid/R2.png"
+IDR_BUNDLE_28 RCDATA "../assets/prompts/ps_solid/Right Stick Click.png"
+IDR_BUNDLE_29 RCDATA "../assets/prompts/ps_solid/Right Stick Left-Right.png"
+IDR_BUNDLE_30 RCDATA "../assets/prompts/ps_solid/Right Stick Up-Down.png"
+IDR_BUNDLE_31 RCDATA "../assets/prompts/ps_solid/Right Stick.png"
+IDR_BUNDLE_32 RCDATA "../assets/prompts/ps_solid/Square.png"
+IDR_BUNDLE_33 RCDATA "../assets/prompts/ps_solid/Triangle.png"
+IDR_BUNDLE_34 RCDATA "../assets/prompts/ps_outline/Circle.png"
+IDR_BUNDLE_35 RCDATA "../assets/prompts/ps_outline/Create.png"
+IDR_BUNDLE_36 RCDATA "../assets/prompts/ps_outline/Cross.png"
+IDR_BUNDLE_37 RCDATA "../assets/prompts/ps_outline/L1.png"
+IDR_BUNDLE_38 RCDATA "../assets/prompts/ps_outline/L2.png"
+IDR_BUNDLE_39 RCDATA "../assets/prompts/ps_outline/Left Stick All.png"
+IDR_BUNDLE_40 RCDATA "../assets/prompts/ps_outline/Left Stick Click.png"
+IDR_BUNDLE_41 RCDATA "../assets/prompts/ps_outline/Left Stick Left-Right.png"
+IDR_BUNDLE_42 RCDATA "../assets/prompts/ps_outline/Options.png"
+IDR_BUNDLE_43 RCDATA "../assets/prompts/ps_outline/R1.png"
+IDR_BUNDLE_44 RCDATA "../assets/prompts/ps_outline/R2.png"
+IDR_BUNDLE_45 RCDATA "../assets/prompts/ps_outline/Right Stick Click.png"
+IDR_BUNDLE_46 RCDATA "../assets/prompts/ps_outline/Right Stick Left-Right.png"
+IDR_BUNDLE_47 RCDATA "../assets/prompts/ps_outline/Right Stick Up-Down.png"
+IDR_BUNDLE_48 RCDATA "../assets/prompts/ps_outline/Right Stick.png"
+IDR_BUNDLE_49 RCDATA "../assets/prompts/ps_outline/Square.png"
+IDR_BUNDLE_50 RCDATA "../assets/prompts/ps_outline/Triangle.png"
+IDR_BUNDLE_51 RCDATA "../assets/prompts/LICENSE-zacksly.txt"
+IDR_BUNDLE_52 RCDATA "../assets/prompts/README.txt"
+IDR_BUNDLE_53 RCDATA "../assets/textures/6E42BC7CF738BCF0.png"
+IDR_BUNDLE_54 RCDATA "../assets/textures/README.txt"
 
 // FILEVERSION + PRODUCTVERSION + FileVersion + ProductVersion all flow
 // from the same release tag. **Every kLauncherVersion bump must also bump
 // these.** Format: MAJOR,MINOR,PATCH,0 (e.g. v0.2.0 → 0,2,0,0). Keep the
 // string values in sync with kLauncherVersion in main.cpp.
 1 VERSIONINFO
-FILEVERSION     1,1,0,0
-PRODUCTVERSION  1,1,0,0
+FILEVERSION     1,2,0,0
+PRODUCTVERSION  1,2,0,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          0x40004L
@@ -29,11 +143,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "LittleBitUA"
             VALUE "FileDescription",  "Deadly Premonition launcher"
-            VALUE "FileVersion",      "1.1.0.0"
+            VALUE "FileVersion",      "1.2.0.0"
             VALUE "InternalName",     "DPLauncher"
             VALUE "OriginalFilename", "PlayDeadlyPremonition.exe"
             VALUE "ProductName",      "Deadly Premonition (rexglue port)"
-            VALUE "ProductVersion",   "1.1.0.0"
+            VALUE "ProductVersion",   "1.2.0.0"
         END
     END
     BLOCK "VarFileInfo"
