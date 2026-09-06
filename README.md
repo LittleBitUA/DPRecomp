@@ -4,7 +4,7 @@
 
 # Deadly Premonition Recompilation
 
-### Play *Deadly Premonition* natively on Windows: 60 FPS, real mouse look, a launcher, DualSense triggers, FSR 3 — no emulator required.
+### Play *Deadly Premonition* natively on Windows: 60 FPS, real mouse look, keyboard and PlayStation button prompts, a launcher, DualSense triggers, FSR 3 — no emulator required.
 
 [![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/latest/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
@@ -175,7 +175,7 @@ Saves are stored in `userdata\` next to the game. To move or back up your progre
 
 `PlayDeadlyPremonition.exe` is the recommended way to start the game. It:
 
-- shows every setting in five tabs — **Graphics** (render path, internal resolution, upscaler, sharpness, FXAA, 60 FPS, window / monitor), **Advanced** (game language, GPU adapter, texture cache, audio), **Mouse** (direct camera control, sensitivity, invert, keyboard key prompts), **Controls** (DualSense triggers, every key binding), **Debug** (log level, PSO policy); *Advanced* also has the **Texture Dump** switch for modders;
+- shows every setting in five tabs — **Graphics** (render path, internal resolution, upscaler, sharpness, FXAA, 60 FPS, window, a real list of monitors), **Advanced** (game language, GPU adapter, texture cache, audio, Steam overlay switch, shader cache sharing, **Texture Dump** for modders), **Mouse** (direct camera control, sensitivity, invert, key stick ramp, auto-shake), **Controls** (**Button Prompts**: Keyboard / Xbox / PlayStation, DualSense triggers, every key binding), **Debug** (log level, PSO policy);
 - writes `deadlyprem.toml` next to the game and repairs keys that the in-game overlay may drop;
 - checks GitHub for a newer release on start and installs it in place with one click, keeping your config and saves.
 
@@ -192,6 +192,7 @@ Mirrors the Director's Cut PC keymap. A controller works at the same time.
 | Move | `W` `A` `S` `D` | Left stick |
 | Look | Mouse | Right stick |
 | Change weapon | Mouse wheel | D-pad up / down |
+| Map zoom | Mouse wheel (or mouse forward / back) | Right stick up / down |
 | Interact / accept | `E` | A |
 | Cancel / reload | `R` | B |
 | Observe | `C` | Left stick press |
@@ -200,6 +201,7 @@ Mirrors the Director's Cut PC keymap. A controller works at the same time.
 | Draw weapon / aim | hold `Space` | Right trigger |
 | Aim (while weapon drawn) | Mouse (or `W` `A` `S` `D`) | Left stick |
 | Fire | `Space` + `LMB` | A while aiming |
+| Shake the stick (QTE "Get it off!") | tap `A` `D` `A` `D` rapidly | wiggle the left stick |
 | Hold breath / lock-on | `Control` | Left trigger |
 | Strafe left / right | `Z` / `X` | LB / RB |
 | Pause menu | `Enter` | Start |
@@ -226,7 +228,7 @@ Yes. The USA disc ships a different executable (that is why v0.1.1 failed with `
 <details>
 <summary><b>Is 60 FPS safe?</b></summary>
 
-It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.1 the logic tick follows the real frame time, so frame drops and long cutscenes stay in sync with the audio (the 1.0 build could drift, issue #12). If you ever see something time-related misbehave, switch it off (Graphics → *60 FPS (ehw patch)*) and please open an issue with the location.
+It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.1 the logic tick follows the real frame time, so frame drops and long cutscenes stay in sync with the audio (the 1.0 build could drift, issue #12); 1.2 also lets the tick go below 1.0 (`dp_60fps_tick_min`), which stops the game from running slightly ahead of the audio when the limiter releases a frame early. If you ever see something time-related misbehave, switch it off (Graphics → *60 FPS (ehw patch)*) and please open an issue with the location.
 </details>
 
 <details>
@@ -275,8 +277,9 @@ Yes, since 1.2. Turn on <i>Texture Dump</i> in the launcher (Advanced), play, pi
 
 ## Known issues
 
-- At 2× internal resolution some low-resolution post-process effects (glow, depth of field) can show a fine grid on bright edges; 1× does not have it. Being investigated.
-- Clouds in some outdoor scenes render as flat blotches (issue #10).
+- **2× internal resolution and the post-process passes.** The game's glow, depth of field and the sun's halo are computed in small buffers sized for 1×; at 2× they are scaled with everything else, so bright edges can show a fine grid, the blur is softer than the original, and the sun's halo edge in the sky is stair-stepped. 1× does not have any of it. The planned fix (1.3) is a "resolution scale threshold": small render targets stay at their native size, as in RPCS3.
+- Clouds in some outdoor scenes render as flat blotches with hard edges (issue #10).
+- A black screen when the game is started through Steam is being diagnosed with the reporter (issue #13); the Steam Overlay switch in Advanced helps in some setups.
 - Achievements are tracked locally (list and unlock toasts on **F7**); there is no Xbox Live.
 - Linux is not supported yet.
 
