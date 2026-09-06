@@ -38,4 +38,4 @@ Future releases install in place from the launcher. This 1.0 zip must be install
 ### 🙏 Credits
 [ehw](https://github.com/ehw/game-patches) (60 FPS patch), [Alexbeav](https://github.com/Alexbeav) (disc installer), [ReXGlue](https://github.com/rexglue/rexglue-sdk) / [Xenia](https://xenia.jp/), [DPfix](https://github.com/PeterTh/dpfix), and everyone who reported issues against v0.1.1.
 
-— «Little Bit»
+— «Little Bit» (Dmytro Bidlov) · 🇺🇦 MADE IN UKRAINE

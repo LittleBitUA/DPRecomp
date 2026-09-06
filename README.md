@@ -13,7 +13,9 @@
 
 ## [⬇  Download 1.0 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-**by «Little Bit»**
+**by «Little Bit» — Dmytro Bidlov**
+
+**🇺🇦 MADE IN UKRAINE**
 
 </div>
 
@@ -224,7 +226,7 @@ Open an issue with: your GPU and driver, whether the render path is ROV or RTV, 
 
 ## Credits
 
-- **«Little Bit»** — the port, the launcher, the SDK fixes.
+- **«Little Bit» (Dmytro Bidlov)** — the port, the launcher, the SDK fixes. Made in Ukraine.
 - **[ehw](https://github.com/ehw/game-patches)** — the 60 FPS patch (originally for Xenia), ported to the PAL executable.
 - **[Alexbeav](https://github.com/Alexbeav)** — the first-run disc image installer (contributed to DownpourRecomp, ported here).
 - **[ReXGlue](https://github.com/rexglue/rexglue-sdk)** and **[Xenia](https://xenia.jp/)** — the runtime this port stands on.
