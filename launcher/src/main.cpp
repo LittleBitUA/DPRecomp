@@ -1937,7 +1937,7 @@ static bool WriteUpdateScript(const std::wstring& script_path,
   // Host shell files for the DPRecomp nightly layout (runtime + GPU plugin +
   // FidelityFX backend). Each is guarded by Test-Path below, so zips missing
   // an entry stay harmless. Keep in sync with the release zip contents.
-  script += L"  $copy = @('PlayDeadlyPremonition.exe','deadlyprem.exe','rexruntimerd.dll','rexgpu-xenosrd.dll','TracyClientrd.dll','amd_fidelityfx_dx12drel.dll','deadlyprem_usa.exe','gamecontrollerdb.txt','CONTROLS.txt','CONTROLS_EN.txt','README.txt')\r\n";
+  script += L"  $copy = @('PlayDeadlyPremonition.exe','deadlyprem.exe','rexruntimerd.dll','rexgpu-xenosrd.dll','TracyClientrd.dll','amd_fidelityfx_dx12drel.dll','deadlyprem_usa.exe','gamecontrollerdb.txt','README.txt')\r\n";
   script += L"  foreach ($f in $copy) {\r\n";
   script += L"    $src = Join-Path $root $f\r\n";
   script += L"    if (Test-Path $src) {\r\n";

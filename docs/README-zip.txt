@@ -23,7 +23,7 @@ SETTINGS
   key, DualSense adaptive triggers), advanced, debug. Inside the game: F4 =
   live settings overlay, F3 = performance overlay, F7 = achievements.
 
-DEFAULT CONTROLS (see CONTROLS_EN.txt for the full list)
+DEFAULT CONTROLS (full table and rebinding: launcher -> Settings -> Controls)
   WASD move, mouse look, wheel = weapon, E interact, R cancel/reload,
   F flashlight, C observe, Space (hold) aim, Space+LMB fire, Ctrl lock-on,
   Z/X strafe, Enter pause, M map. A controller works at the same time.
