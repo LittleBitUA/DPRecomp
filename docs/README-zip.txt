@@ -1,4 +1,4 @@
-Deadly Premonition Recompilation 1.2  -  by <<Little Bit>> (Dmytro Bidlov)  -  MADE IN UKRAINE
+Deadly Premonition Recompilation 1.2.1  -  by <<Little Bit>> (Dmytro Bidlov)  -  MADE IN UKRAINE
 https://github.com/LittleBitUA/DPRecomp
 
 WHAT IS THIS

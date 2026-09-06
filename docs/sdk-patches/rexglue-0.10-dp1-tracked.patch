@@ -2339,6 +2339,47 @@ index 5bd3dc5..291d5dd 100644
  )
  
  # Vulkan UI backend
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..9da2f79 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <climits>
+ #include <cmath>
+ #include <memory>
+@@ -187,6 +188,13 @@ bool D3D12Presenter::DispatchTemporalUpscaler(ID3D12GraphicsCommandList* command
+ 
+   ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
+   if (ffxDispatch(context, &dispatch_desc.header) != FFX_API_RETURN_OK) {
++    static std::atomic<bool> dispatch_failure_logged = false;
++    if (!dispatch_failure_logged.exchange(true)) {
++      REXLOG_WARN(
++          "D3D12Presenter: FidelityFX temporal upscaler dispatch failed ({}x{} -> {}x{}), "
++          "falling back to spatial FSR",
++          input_width, input_height, output_width, output_height);
++    }
+     return false;
+   }
+ 
+@@ -867,6 +875,14 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+               command_list, effect_source_resource, effect_input_width, effect_input_height,
+               effect_dest_resource, guest_output_flow.effect_output_sizes[i].first,
+               guest_output_flow.effect_output_sizes[i].second, guest_output_paint_config);
++          // The FidelityFX dispatch binds its own descriptor heaps on the
++          // command list. The following effects (RCAS, bilinear) set root
++          // descriptor tables from the presenter's view heap, which is only
++          // valid while that heap is the one currently bound - otherwise it's
++          // D3D12 EXECUTION ERROR #708 SET_DESCRIPTOR_TABLE_INVALID. Hardware
++          // usually tolerates it, but with Steam's Game Recording hooked into
++          // the swap chain it produced a black screen (DPRecomp issue #13).
++          command_list->SetDescriptorHeaps(1, &view_heap);
+           if (!temporal_dispatch_done) {
+             D3D12_RESOURCE_BARRIER barrier_uav_to_rtv;
+             barrier_uav_to_rtv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 diff --git a/src/ui/keybinds.cpp b/src/ui/keybinds.cpp
 index 9822f3b..6f7bf7c 100644
 --- a/src/ui/keybinds.cpp
