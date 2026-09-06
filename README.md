@@ -22,7 +22,7 @@
 > [!IMPORTANT]
 > **1.0 is a full restart of the project.** The old v0.1.1 preview was built on an outdated SDK and is superseded in every respect: new runtime, new GPU plugin, new launcher, new input. If you still have v0.1.1, delete it and start fresh — the launcher, the config file and the save location have all changed.
 >
-> **Region:** the **European (PAL) Xbox 360 disc** is supported right now. **A USA (NTSC) build is being prepared** — see [FAQ](#frequently-asked-questions).
+> **Regions:** both the **European (PAL)** and the **USA (NTSC)** Xbox 360 discs are supported. The zip contains a recompiled build for each; the launcher picks the right one from your `default.xex`.
 
 ---
 
@@ -97,7 +97,7 @@ All captured from the 1.0 build at 2× internal resolution.
 
 ## What you need before playing
 
-1. **A legally-owned copy of *Deadly Premonition* for Xbox 360 — the European (PAL) release** — as a disc image (`.iso`) or as already extracted files (`default.xex`, `nxeart`, `updata`, …). The USA disc does not work yet (different executable, see FAQ).
+1. **A legally-owned copy of *Deadly Premonition* for Xbox 360 — European (PAL) or USA (NTSC) release** — as a disc image (`.iso`) or as already extracted files (`default.xex`, `nxeart`, `updata`, …).
 2. **Windows 10 or 11**, 64-bit.
 3. **A GPU with Direct3D 12 and rasterizer-ordered views** (NVIDIA GTX 900+ / RTX, AMD RX 400+, Intel Arc). Integrated graphics from the last few years also work, at 1× internal resolution.
 4. ~6 GB of free disk space for the extracted game data.
@@ -110,7 +110,7 @@ All captured from the 1.0 build at 2× internal resolution.
 2. Put your game data into the `assets` folder next to `deadlyprem.exe`:
    - **either** drop your `.iso` anywhere and start the game — the built-in installer asks for the image and extracts it into `assets` (takes a few minutes, resumable);
    - **or** copy the already-extracted disc contents (`default.xex` must end up at `assets\default.xex`).
-3. Start **`PlayDeadlyPremonition.exe`** and press **PLAY**. The first launch compiles a few shaders; later launches are instant.
+3. Start **`PlayDeadlyPremonition.exe`** and press **PLAY** (with no game data yet, PLAY opens the installer). The launcher starts the PAL or USA build to match your disc. The first launch compiles a few shaders; later launches are instant.
 
 Saves are stored in `userdata\` next to the game. To move or back up your progress, copy that folder.
 
@@ -164,7 +164,7 @@ No. An emulator runs Xbox 360 instructions on a virtual CPU at runtime. Here the
 <details>
 <summary><b>Does the USA (NTSC) version work?</b></summary>
 
-Not yet. The USA disc ships a different executable (`XThread::Execute - No function registered at 824E9558` is the symptom), so it needs its own recompilation. **A USA build is in progress** and will be released as a separate download.
+Yes. The USA disc ships a different executable (that is why v0.1.1 failed with `No function registered at 824E9558`), so 1.0 contains two recompiled builds: `deadlyprem.exe` for PAL and `deadlyprem_usa.exe` for USA. The launcher and the built-in installer start the right one automatically from the size of your `default.xex`; you never have to choose.
 </details>
 
 <details>
