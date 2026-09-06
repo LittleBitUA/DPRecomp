@@ -11,7 +11,7 @@
 
 ![York in the rain — Deadly Premonition Recompilation 1.0](docs/screenshots/york.jpg)
 
-## [⬇  Download 1.0 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇  Download 1.1 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
 **by «Little Bit» — Dmytro Bidlov**
 
@@ -22,6 +22,8 @@
 ---
 
 > [!IMPORTANT]
+> **1.1 (September 2026)** fixes the reports that came in after 1.0: the mouse now aims too, holding Shift runs instead of freezing York, the 60 FPS patch no longer drifts cutscene animation away from the audio, saves and the shader cache really live next to the game (migrated from Documents automatically), and the shader/PSO cache finally accumulates, with a visible compile indicator. Details in [What's new in 1.1](#whats-new-in-11).
+>
 > **1.0 is a full restart of the project.** The old v0.1.1 preview was built on an outdated SDK and is superseded in every respect: new runtime, new GPU plugin, new launcher, new input. If you still have v0.1.1, delete it and start fresh — the launcher, the config file and the save location have all changed.
 >
 > **Regions:** both the **European (PAL)** and the **USA (NTSC)** Xbox 360 discs are supported. The zip contains a recompiled build for each; the launcher picks the right one from your `default.xex`.
@@ -31,6 +33,7 @@
 ## Table of contents
 
 - [What is this?](#what-is-this)
+- [What's new in 1.1](#whats-new-in-11)
 - [What's new in 1.0](#whats-new-in-10)
 - [Screenshots](#screenshots)
 - [What you need before playing](#what-you-need-before-playing)
@@ -40,6 +43,7 @@
 - [Frequently asked questions](#frequently-asked-questions)
 - [Known issues](#known-issues)
 - [Building from source](#building-from-source)
+- [How this is made: a human and an AI](#how-this-is-made-a-human-and-an-ai)
 - [Credits](#credits)
 - [Legal](#legal)
 
@@ -55,6 +59,20 @@ It is the same technique as [N64: Recompiled](https://github.com/Mr-Wiseguy/N64R
 > **You provide your own legally-owned copy of the game.** The release zip is the host shell only. It does not contain `default.xex`, game data, music or textures. See [Legal](#legal).
 
 ---
+
+## What's new in 1.1
+
+- **Mouse aiming.** The aim camera (Space held) is a separate routine driven by the *left* stick with its own acceleration, which is why 1.0 aimed with WASD only. 1.1 detects that camera and feeds the mouse into the left stick while it runs.
+- **Mouse look is position control now.** 1.0 nudged the camera target once per frame and the game's camera spring forgot most of it; 1.1 keeps the un-reached angle pending and also turns the yaw state directly, so a mouse move is a fixed angle. Sensitivity is in radians per pixel (default 0.003); auto-centering resumes after the mouse has been idle for `dp_mouse_camera_hold_ms`.
+- **Keyboard fix:** holding Shift froze York and Control (LT) did nothing, because the key driver silenced every plain key while a modifier was held. Run = hold **Shift** (the X button); the 1.0 controls sheet wrongly listed E as run.
+- **60 FPS:** the logic tick is derived from the measured frame time instead of being pinned to 1/60 s, so long cutscenes no longer drift out of sync with the voices, and the runtime sleeps with a high-resolution timer so the limiter actually holds 16.7 ms.
+- **Saves and shader cache next to the game — for real.** In 1.0 the runtime kept using `Documents\deadlyprem`. 1.1 uses `userdata\` and copies your existing saves and shader storage from Documents on first launch.
+- **Shader / PSO cache:** the storage never grew after its first session (fixed); driver-compiled pipelines are cached on disk (`userdata\cache\shaders\local`), and a "Preparing shaders" toast at launch plus a corner badge during play show when pipelines are being built.
+- **Steam:** launcher → Advanced → *Steam Overlay* `off` for the black-screen / tinted-quarter-frame problem when starting through Steam.
+- **Opt-in shader cache sharing:** the launcher asks once whether it may send your shader cache (anonymous, shader microcode and pipeline descriptions only) to the project; merged caches ship with the next release. `tools/merge_shader_storage.py` merges the collected files.
+- **Steam Deck preset:** the launcher recognises a Deck (Steam sets `SteamDeck=1`; the APU reports as AMD Custom GPU 0405/0932) and applies the community-tested settings once: RTV, 1×, 2× MSAA, 16× AF, FXAA + CAS, 30 FPS, VSync, fullscreen 1280×800. Everything stays editable.
+- **Keyboard stick with travel time** (60 ms to full deflection, like the PC port), so stick-shake QTEs ("Get it off!") count every A > D tap.
+- Launcher, both game builds and the F3 watermark report 1.1; the launcher updates in place from GitHub.
 
 ## What's new in 1.0
 
@@ -143,8 +161,9 @@ Mirrors the Director's Cut PC keymap. A controller works at the same time.
 | Cancel / reload | `R` | B |
 | Observe | `C` | Left stick press |
 | Flashlight | `F` | Y |
-| Cutscene actions | `Shift` | X |
+| Run (hold) / cutscene actions | `Shift` | X |
 | Draw weapon / aim | hold `Space` | Right trigger |
+| Aim (while weapon drawn) | Mouse (or `W` `A` `S` `D`) | Left stick |
 | Fire | `Space` + `LMB` | A while aiming |
 | Hold breath / lock-on | `Control` | Left trigger |
 | Strafe left / right | `Z` / `X` | LB / RB |
@@ -172,19 +191,31 @@ Yes. The USA disc ships a different executable (that is why v0.1.1 failed with `
 <details>
 <summary><b>Is 60 FPS safe?</b></summary>
 
-It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. It has been played through large parts of the game without problems, but if you ever see something time-related misbehave, switch it off (Graphics → *60 FPS (ehw patch)*) and please open an issue with the location.
+It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.1 the logic tick follows the real frame time, so frame drops and long cutscenes stay in sync with the audio (the 1.0 build could drift, issue #12). If you ever see something time-related misbehave, switch it off (Graphics → *60 FPS (ehw patch)*) and please open an issue with the location.
 </details>
 
 <details>
 <summary><b>The mouse feels different from a PC shooter.</b></summary>
 
-Mouse motion drives the game's own camera, which is a spring-damped orbit camera by design — it always eases towards where you point. Tune *Camera Hook Sensitivity* in the launcher (or `dp_mouse_camera_sensitivity` in F4 → DP1, live). Turning *Mouse Controls Camera Directly* off falls back to stick emulation.
+Mouse motion drives the game's own camera, which is a spring-damped orbit camera by design — it eases towards where you point and re-centres behind York while you walk. Since 1.1 the hook keeps the angle you asked for until the camera gets there (position control) and turns the yaw state directly. Tune *Camera Hook Sensitivity* (radians per pixel, `dp_mouse_camera_sensitivity` in F4 → DP1, live) and *Hold Before Auto-center*. Turning *Mouse Controls Camera Directly* off falls back to stick emulation.
 </details>
 
 <details>
 <summary><b>Where are my saves?</b></summary>
 
-`userdata\` next to `deadlyprem.exe`. v0.1.1 kept them in `Documents\deadlyprem`; they are not migrated automatically (the old preview was not save-compatible in practice), start fresh.
+`userdata\` next to `deadlyprem.exe`. The 1.0 build still wrote to `Documents\deadlyprem` despite the release notes; 1.1 copies those saves (and the shader storage) into `userdata\` on its first launch and leaves the Documents copy untouched.
+</details>
+
+<details>
+<summary><b>The launcher asked to "share my shader cache". What does it send, and why?</b></summary>
+
+**Why it matters.** The runtime translates the game's Xbox 360 shaders and builds Direct3D 12 pipelines the first time it sees them, and that first time costs a stutter. Every pipeline the game has ever needed is remembered in a small storage file, and that file is pre-warmed and shipped with each release. One person cannot reach every scene of a 30-hour game, but the players together do — so the launcher can send your storage to the project, and the merged result ships with the next release. Whoever plays after you gets fewer first-time stutters.
+
+**What is sent.** Only the two storage files from `userdata\cache\shaders\shareable\`: `*.xsh` (the game's own shader microcode, i.e. data from the disc) and `*.xpso` (pipeline state descriptions: blend / depth / render-target formats — a few dozen bytes per pipeline). No save games, no settings, no user name, no hardware ID, nothing from `Documents`. The upload is a plain zip of those two files with a one-line summary (launcher version, file sizes).
+
+**Where to check.** Everything happens in one function of the launcher, [`MaybeShareShaderCache()` in `launcher/src/main.cpp`](launcher/src/main.cpp#L3041-L3100): it fingerprints the two files, skips if nothing changed, zips them with PowerShell's `Compress-Archive` and posts the zip with `curl.exe` to a project Discord channel. The file formats are written by the runtime in `src/graphics/d3d12/pipeline_cache.cpp` (see [`docs/sdk-patches`](docs/sdk-patches)), and [`tools/merge_shader_storage.py`](tools/merge_shader_storage.py) is the script that merges what players sent. The public source carries an empty webhook address; the release build carries the project one.
+
+**How to turn it on or off.** The launcher asks once on first start. Later: Settings → Advanced → *Share Shader Cache*. Off means nothing is ever sent.
 </details>
 
 <details>
@@ -221,6 +252,23 @@ Open an issue with: your GPU and driver, whether the render path is ROV or RTV, 
 4. Configure with `cmake --preset dp-relwithdebinfo` (uses `CMakeUserPresets.json` to point at your SDK install) and build. The default build is the compatibility (SSE4.1) build; `-DDP_ENABLE_X86_64_V3=ON` enables AVX2.
 5. The launcher is a separate CMake project in `launcher\` (Visual Studio generator).
 </details>
+
+---
+
+## How this is made: a human and an AI
+
+This port is developed with an AI: **Claude** by Anthropic, used through Claude Code with the **Claude Fable 5.1** model at high reasoning effort. It writes most of the code you see here — the SDK patches, the mid-asm hooks, the launcher — and it is honest to say so.
+
+It is not "AI, run this game for me". A recompilation cannot be prompted into existence; it is weeks of the same loop, done by a person:
+
+- **Capturing what the game really does.** Frames are captured in **RenderDoc** and read draw by draw (which render target, which format, which shader) — that is how the rainbow-noise texture bug, the 7e3 → 8888 EDRAM ownership fix and the depth-of-field grid were located.
+- **Reading the game's code.** The Xbox 360 executable is dumped and decompiled in **Ghidra**, and the recompiled PPC listings are traced by hand: finding the camera routines (17 of them in a table at `0x82928C68`), the frame limiter constants (16.667 ms + 11.667 ms), the aim camera that reads the *left* stick, the button that actually makes York run.
+- **Playing every build.** Each change is built, deployed and played — the "mouse feels slow", "Shift freezes York", "the cutscene drifts out of sync" reports in the 1.1 notes were reproduced at the keyboard before the AI got to touch them, and several proposed fixes were thrown away because they looked right in code and wrong on screen.
+- **Deciding.** What ships, what stays default-off, what is rolled back (the box-filter upscale experiment broke shadows and went), what belongs in the launcher — those are human calls.
+
+The AI is an engineering partner in that loop: it reads thousands of lines of the ReXGlue runtime and the game's listings faster than a person can, ports patches between projects, keeps the launcher, docs and both regional builds consistent, and writes the tedious parts without getting tired. The human brings the game, the tools, the eyes and the judgement. Neither side could have made this alone in the time it took.
+
+If you contribute, the same applies: pull requests are read by a person, tested on a real machine, and credited to you.
 
 ---
 

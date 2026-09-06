@@ -1,3 +1,28 @@
+diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
+index 7a9d6a2..d5128a3 100644
+--- a/include/rex/graphics/d3d12/pipeline_cache.h
++++ b/include/rex/graphics/d3d12/pipeline_cache.h
+@@ -381,6 +381,20 @@ class PipelineCache {
+   FILE* pipeline_storage_file_ = nullptr;
+   bool pipeline_storage_file_flush_needed_ = false;
+ 
++  // DP1 v1.1 (Downpour port): ID3D12PipelineLibrary blob cache of driver-
++  // compiled PSOs, in cache/shaders/local/ (GPU/driver specific, never
++  // shipped). LoadGraphicsPipeline hit = microseconds instead of a 100-800 ms
++  // driver compile. Library calls are serialized by pipeline_library_mutex_;
++  // the CreateGraphicsPipelineState fallback stays outside the lock.
++  Microsoft::WRL::ComPtr<ID3D12PipelineLibrary> pipeline_library_;
++  std::vector<uint8_t> pipeline_library_blob_;
++  std::filesystem::path pipeline_library_path_;
++  std::mutex pipeline_library_mutex_;
++  std::atomic<uint32_t> pipeline_library_load_hits_{0};
++  std::atomic<uint32_t> pipeline_library_store_count_{0};
++  std::atomic<bool> pipeline_library_dirty_{false};
++  void FlushPipelineLibraryToDisk();
++
+   // Thread for asynchronous writing to the storage streams.
+   void StorageWriteThread();
+   std::mutex storage_write_request_lock_;
 diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
 index cd7693a..9eec523 100644
 --- a/include/rex/graphics/d3d12/render_target_cache.h
@@ -77,10 +102,10 @@ index 3bbd52e..0017c1b 100644
    // update. 0 is depth, color starting from 1, nullptr if not bound.
    // Only valid for non-pixel-shader-interlock paths.
 diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
-index c8751b7..248d94b 100644
+index c8751b7..ca35353 100644
 --- a/include/rex/input/mnk/mnk_input_driver.h
 +++ b/include/rex/input/mnk/mnk_input_driver.h
-@@ -24,6 +24,13 @@ namespace rex::input::mnk {
+@@ -24,6 +24,20 @@ namespace rex::input::mnk {
  
  void SetMouseLookActive(bool active);
  bool IsMouseLookActive();
@@ -91,10 +116,17 @@ index c8751b7..248d94b 100644
 +void SetMouseCameraHookActive(bool active);
 +bool IsMouseCameraHookActive();
 +void TakeMouseCameraDelta(float& dx_out, float& dy_out);
++// DP1 v1.1 (DPRecomp #11): the aim camera of the game (PAL sub_8233B3C0) is
++// driven by the LEFT stick and keeps its own velocity model, so the camera
++// hook cannot steer it. A game hook calls NoteMouseAimFrame() every frame the
++// aim camera runs; while that is fresh, GetState maps the mouse onto the left
++// stick (the game's native aim input) instead of feeding the camera hook.
++void NoteMouseAimFrame();
++bool IsMouseAimStickActive();
  
  class MnkInputDriver final : public InputDriver,
                               public rex::ui::WindowInputListener,
-@@ -50,6 +57,8 @@ class MnkInputDriver final : public InputDriver,
+@@ -50,6 +64,8 @@ class MnkInputDriver final : public InputDriver,
    void OnMouseDown(rex::ui::MouseEvent& e) override;
    void OnMouseUp(rex::ui::MouseEvent& e) override;
    void OnMouseMove(rex::ui::MouseEvent& e) override;
@@ -103,7 +135,7 @@ index c8751b7..248d94b 100644
  
    // WindowListener
    void OnClosing(rex::ui::UIEvent& e) override;
-@@ -82,6 +91,14 @@ class MnkInputDriver final : public InputDriver,
+@@ -82,6 +98,14 @@ class MnkInputDriver final : public InputDriver,
    float mouse_dx_ = 0.0f;
    float mouse_dy_ = 0.0f;
  
@@ -118,6 +150,37 @@ index c8751b7..248d94b 100644
    // UI thread only.
    int32_t prev_mouse_x_ = 0;
    int32_t prev_mouse_y_ = 0;
+diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
+index 1f52480..48d7478 100644
+--- a/include/rex/rex_app.h
++++ b/include/rex/rex_app.h
+@@ -26,6 +26,7 @@
+ #include <rex/ui/imgui_drawer.h>
+ #include <rex/ui/immediate_drawer.h>
+ #include <rex/ui/overlay/debug_overlay.h>
++#include <rex/ui/overlay/pso_compile_indicator_overlay.h>
+ #include <rex/ui/window.h>
+ #include <rex/ui/window_listener.h>
+ #include <rex/ui/windowed_app.h>
+@@ -297,6 +298,9 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   std::unique_ptr<Runtime> runtime_;
+   std::unique_ptr<ui::Window> window_;
+   std::thread module_thread_;
++  // DP1 v1.1: second half of LaunchModule, run once the shader storage replay
++  // (shown by ShaderCompileDialog) has finished.
++  void FinishModuleLaunch(system::object_ref<system::XThread> main_thread);
+   std::atomic<bool> shutting_down_{false};
+   std::unique_ptr<ui::ImmediateDrawer> immediate_drawer_;
+   std::unique_ptr<ui::ImGuiDrawer> imgui_drawer_;
+@@ -304,6 +308,8 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   // Built-in overlays
+   std::shared_ptr<LogCaptureSink> log_sink_;
+   std::unique_ptr<ui::DebugOverlayDialog> debug_overlay_;
++  // DP1 v1.1: corner badge while pipelines compile (Downpour port).
++  std::unique_ptr<ui::PsoCompileIndicatorDialog> pso_compile_indicator_overlay_;
+   std::unique_ptr<ui::ConsoleDialog> console_overlay_;
+   std::unique_ptr<ui::SettingsDialog> settings_overlay_;
+   std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;
 diff --git a/include/rex/ui/overlay/debug_overlay.h b/include/rex/ui/overlay/debug_overlay.h
 index e15e410..c548be1 100644
 --- a/include/rex/ui/overlay/debug_overlay.h
@@ -160,6 +223,64 @@ index 3e1b948..a6286ce 100644
    kClear = 0x0C,
    kReturn = 0x0D,  // Enter.
  
+diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
+index 896dfec..123c093 100644
+--- a/src/core/threading_win.cpp
++++ b/src/core/threading_win.cpp
+@@ -93,12 +93,51 @@ void SyncMemory() {
+   MemoryBarrier();
+ }
+ 
++// DP1 2026-09-06 (DPRecomp #12): ::Sleep(ms) is quantised to the system timer
++// period (up to 15.6 ms unless somebody called timeBeginPeriod), so a guest
++// frame limiter that sleeps for "the rest of the 16.67 ms" overshoots by
++// whole milliseconds and the game runs below its target rate. Use a
++// high-resolution waitable timer (Windows 10 1803+, ~0.5 ms accuracy) when
++// the OS provides one and fall back to ::Sleep otherwise.
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++
++namespace {
++struct HighResolutionSleepTimer {
++  HANDLE handle = nullptr;
++  bool tried = false;
++  HANDLE Get() {
++    if (!tried) {
++      tried = true;
++      handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                                      TIMER_ALL_ACCESS);
++    }
++    return handle;
++  }
++  ~HighResolutionSleepTimer() {
++    if (handle) {
++      CloseHandle(handle);
++    }
++  }
++};
++}  // namespace
++
+ void Sleep(std::chrono::microseconds duration) {
+   if (duration.count() < 100) {
+     MaybeYield();
+-  } else {
+-    ::Sleep(static_cast<DWORD>(duration.count() / 1000));
++    return;
++  }
++  thread_local HighResolutionSleepTimer timer;
++  if (HANDLE h = timer.Get()) {
++    LARGE_INTEGER due;
++    due.QuadPart = -static_cast<LONGLONG>(duration.count()) * 10;  // 100 ns units, relative
++    if (SetWaitableTimer(h, &due, 0, nullptr, nullptr, FALSE)) {
++      WaitForSingleObject(h, INFINITE);
++      return;
++    }
+   }
++  ::Sleep(static_cast<DWORD>(duration.count() / 1000));
+ }
+ 
+ SleepResult AlertableSleep(std::chrono::microseconds duration) {
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 index 19874a5..81706d6 100644
 --- a/src/graphics/d3d12/command_processor.cpp
@@ -201,10 +322,27 @@ index 19874a5..81706d6 100644
  
    // Update the textures - this may bind pipelines.
 diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
-index 8e6b854..d2da86a 100644
+index 8e6b854..8ff3824 100644
 --- a/src/graphics/d3d12/pipeline_cache.cpp
 +++ b/src/graphics/d3d12/pipeline_cache.cpp
-@@ -59,6 +59,27 @@ REXCVAR_DEFINE_INT32(d3d12_pipeline_creation_threads, -1, "GPU/D3D12",
+@@ -11,6 +11,7 @@
+ 
+ #include "thirdparty/dxbc/DXBCChecksum.h"
+ 
++#include <chrono>
+ #include <algorithm>
+ #include <atomic>
+ #include <cinttypes>
+@@ -32,6 +33,8 @@
+ #include <rex/filesystem.h>
+ #include <rex/graphics/d3d12/command_processor.h>
+ #include <rex/graphics/d3d12/pipeline_cache.h>
++
++#include <rex/ui/overlay/pso_compile_indicator_state.h>
+ #include <rex/graphics/d3d12/render_target_cache.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/format/dxbc.h>
+@@ -59,6 +62,34 @@ REXCVAR_DEFINE_INT32(d3d12_pipeline_creation_threads, -1, "GPU/D3D12",
      .range(-1, 32)
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
@@ -214,6 +352,13 @@ index 8e6b854..d2da86a 100644
 +// 'block' (render thread waits up to d3d12_pso_block_per_draw_budget_ms for
 +// that PSO, geometry never lost for fast compiles), 'sync' (no async compile
 +// at all, every miss compiles inline on the render thread).
++REXCVAR_DEFINE_BOOL(d3d12_pso_library_enable, true, "GPU/D3D12",
++                    "DP1 v1.1 (Downpour port): keep driver-compiled PSO blobs across runs in an "
++                    "ID3D12PipelineLibrary file (cache/shaders/local/*.pso_lib). Warm launches "
++                    "skip the driver compile per pipeline. GPU/driver specific; rebuilt "
++                    "automatically after a driver or adapter change.")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
 +REXCVAR_DEFINE_STRING(pso_missing_policy, "block", "GPU",
 +                      "PSO still compiling: skip (drop draw), block (wait per draw, budgeted), "
 +                      "sync (compile inline)")
@@ -232,7 +377,134 @@ index 8e6b854..d2da86a 100644
  REXCVAR_DEFINE_BOOL(d3d12_tessellation_wireframe, false, "GPU/D3D12",
                      "Render tessellation as wireframe");
  
-@@ -771,7 +792,10 @@ void PipelineCache::EndSubmission() {
+@@ -260,6 +291,61 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+     return;
+   }
+   pipeline_storage_file_flush_needed_ = false;
++
++  // DP1 v1.1: ID3D12PipelineLibrary blob cache (see pipeline_cache.h).
++  pipeline_library_.Reset();
++  pipeline_library_blob_.clear();
++  pipeline_library_path_.clear();
++  pipeline_library_load_hits_.store(0, std::memory_order_relaxed);
++  pipeline_library_store_count_.store(0, std::memory_order_relaxed);
++  pipeline_library_dirty_.store(false, std::memory_order_relaxed);
++  if (REXCVAR_GET(d3d12_pso_library_enable)) {
++    ID3D12Device* library_device = command_processor_.GetD3D12Provider().GetDevice();
++    Microsoft::WRL::ComPtr<ID3D12Device1> device1;
++    if (SUCCEEDED(library_device->QueryInterface(IID_PPV_ARGS(&device1)))) {
++      auto shader_storage_local_root = shader_storage_root / "local";
++      std::error_code ec;
++      std::filesystem::create_directories(shader_storage_local_root, ec);
++      pipeline_library_path_ =
++          shader_storage_local_root /
++          fmt::format("{:08X}.{}.d3d12.pso_lib", title_id, edram_rov_used ? "rov" : "rtv");
++      FILE* lib_file = rex::filesystem::OpenFile(pipeline_library_path_, "rb");
++      if (lib_file) {
++        rex::filesystem::Seek(lib_file, 0, SEEK_END);
++        int64_t size = rex::filesystem::Tell(lib_file);
++        if (size > 0 && size < int64_t(1) << 30) {
++          pipeline_library_blob_.resize(size_t(size));
++          rex::filesystem::Seek(lib_file, 0, SEEK_SET);
++          if (fread(pipeline_library_blob_.data(), 1, pipeline_library_blob_.size(), lib_file) !=
++              pipeline_library_blob_.size()) {
++            pipeline_library_blob_.clear();
++          }
++        }
++        fclose(lib_file);
++      }
++      HRESULT hr = device1->CreatePipelineLibrary(
++          pipeline_library_blob_.empty() ? nullptr : pipeline_library_blob_.data(),
++          pipeline_library_blob_.size(), IID_PPV_ARGS(&pipeline_library_));
++      if (FAILED(hr)) {
++        // E_INVALIDARG / D3D12_ERROR_DRIVER_VERSION_MISMATCH /
++        // D3D12_ERROR_ADAPTER_NOT_FOUND: start over with an empty library.
++        REXGPU_INFO("PSO library blob unusable (HRESULT 0x{:08X}), rebuilding from scratch",
++                    uint32_t(hr));
++        pipeline_library_blob_.clear();
++        hr = device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&pipeline_library_));
++        if (FAILED(hr)) {
++          REXGPU_INFO("PSO library disabled (CreatePipelineLibrary failed 0x{:08X})",
++                      uint32_t(hr));
++          pipeline_library_.Reset();
++        } else {
++          pipeline_library_dirty_.store(true, std::memory_order_relaxed);
++        }
++      } else {
++        REXGPU_INFO("PSO library loaded: {} bytes from '{}'", pipeline_library_blob_.size(),
++                    rex::path_to_utf8(pipeline_library_path_));
++      }
++    }
++  }
+   // 'XEPS'.
+   const uint32_t pipeline_storage_magic = 0x53504558;
+   // 'DXRO' or 'DXRT'.
+@@ -490,6 +576,8 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+       }
+       shaders_translation_thread_cond.notify_one();
+       ++shaders_translated;
++      PsoCompileIndicatorStateRef().storage_shaders_translated.store(
++          uint32_t(shaders_translated), std::memory_order_relaxed);
+     }
+     if (!shader_translation_threads.empty()) {
+       {
+@@ -514,6 +602,10 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+                 (rex::chrono::Clock::QueryHostTickCount() - shader_storage_initialization_start) *
+                     1000 / rex::chrono::Clock::QueryHostTickFrequency());
+     rex::filesystem::TruncateStdioFile(shader_storage_file_, shader_storage_valid_bytes);
++    // DP1 v1.1: the stream was in read mode at EOF; C requires a positioning
++    // call before switching to writing, otherwise the storage writer thread fwrite
++    // silently fails and the storage never grows past its first session.
++    rex::filesystem::Seek(shader_storage_file_, 0, SEEK_END);
+   } else {
+     rex::filesystem::TruncateStdioFile(shader_storage_file_, 0);
+     shader_storage_file_header.magic = shader_storage_magic;
+@@ -542,6 +634,8 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+     }
+ 
+     size_t pipelines_created = 0;
++    PsoCompileIndicatorStateRef().storage_pipelines_total.store(
++        uint32_t(pipeline_stored_descriptions.size()), std::memory_order_release);
+     for (const PipelineStoredDescription& pipeline_stored_description :
+          pipeline_stored_descriptions) {
+       const PipelineDescription& pipeline_description = pipeline_stored_description.description;
+@@ -641,6 +735,8 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+         {
+           std::lock_guard<std::mutex> lock(creation_request_lock_);
+           creation_queue_.push(new_pipeline);
++          PsoCompileIndicatorStateRef().creation_queue_size.store(
++              uint32_t(creation_queue_.size()), std::memory_order_relaxed);
+         }
+         creation_request_cond_.notify_one();
+       } else {
+@@ -709,6 +805,13 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+   shader_storage_cache_root_ = cache_root;
+   shader_storage_title_id_ = title_id;
+ 
++  // DP1 v1.1: same read->write switch for the pipeline description stream.
++  if (pipeline_storage_file_) {
++    rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_END);
++  }
++  // Capture the replayed PSOs even if the process is killed later.
++  FlushPipelineLibraryToDisk();
++
+   // Start the storage writing thread.
+   storage_write_flush_shaders_ = false;
+   storage_write_flush_pipelines_ = false;
+@@ -731,6 +834,12 @@ void PipelineCache::ShutdownShaderStorage() {
+   storage_write_shader_queue_.clear();
+   storage_write_pipeline_queue_.clear();
+ 
++  FlushPipelineLibraryToDisk();
++  pipeline_library_.Reset();
++  pipeline_library_blob_.clear();
++  pipeline_library_path_.clear();
++  pipeline_library_dirty_.store(false, std::memory_order_relaxed);
++
+   if (pipeline_storage_file_) {
+     fclose(pipeline_storage_file_);
+     pipeline_storage_file_ = nullptr;
+@@ -771,7 +880,10 @@ void PipelineCache::EndSubmission() {
        // Assuming the creation queue is already empty (because the processor
        // thread also worked on creating the leftover pipelines), so only check
        // if there are threads with pipelines currently being created.
@@ -244,7 +516,7 @@ index 8e6b854..d2da86a 100644
        if (await_creation_completion_event) {
          creation_completion_event_->Reset();
          creation_completion_set_event_ = true;
-@@ -910,7 +934,9 @@ bool PipelineCache::ConfigurePipeline(
+@@ -910,7 +1022,9 @@ bool PipelineCache::ConfigurePipeline(
    assert_not_null(root_signature_out);
  
    bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
@@ -255,6 +527,196 @@ index 8e6b854..d2da86a 100644
  
    // Ensure shaders are translated - needed now for GetCurrentStateDescription.
    // Edge flags are not supported yet (because polygon primitives are not).
+@@ -1015,6 +1129,7 @@ bool PipelineCache::ConfigurePipeline(
+   pipelines_.emplace(hash, new_pipeline);
+   COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
+ 
++  PsoCompileIndicatorStateRef().total_misses_session.fetch_add(1, std::memory_order_relaxed);
+   if (use_async) {
+     uint32_t bound_rts =
+         pipeline_util::GetBoundRTMaskFromNormalizedColorMask(normalized_color_mask);
+@@ -1030,10 +1145,26 @@ bool PipelineCache::ConfigurePipeline(
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       creation_queue_.push(new_pipeline);
++      PsoCompileIndicatorStateRef().creation_queue_size.store(
++          uint32_t(creation_queue_.size()), std::memory_order_relaxed);
+     }
+     creation_request_cond_.notify_one();
+   } else {
++    // Inline (draw-blocking) compile: report it so the indicator can flash
++    // "Shader stall N ms" afterwards.
++    const auto sync_start = std::chrono::steady_clock::now();
+     new_pipeline->state.store(CreateD3D12Pipeline(runtime_description), std::memory_order_release);
++    const auto sync_end = std::chrono::steady_clock::now();
++    auto& indicator = PsoCompileIndicatorStateRef();
++    indicator.sync_compiles_session.fetch_add(1, std::memory_order_relaxed);
++    indicator.last_sync_compile_steady_ns.store(
++        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(sync_end.time_since_epoch())
++                     .count()),
++        std::memory_order_relaxed);
++    const float sync_ms = std::chrono::duration<float, std::milli>(sync_end - sync_start).count();
++    uint32_t sync_ms_bits;
++    std::memcpy(&sync_ms_bits, &sync_ms, sizeof(sync_ms_bits));
++    indicator.last_sync_compile_duration_ms_bits.store(sync_ms_bits, std::memory_order_relaxed);
+   }
+ 
+   if (pipeline_storage_file_) {
+@@ -3028,17 +3159,42 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
+ 
+   // Create the D3D12 pipeline state object.
+   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+-  ID3D12PipelineState* state;
+-  if (FAILED(device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state)))) {
+-    if (runtime_description.pixel_shader != nullptr) {
+-      REXGPU_ERROR("Failed to create graphics pipeline with VS {:016X}, PS {:016X}",
+-                   runtime_description.vertex_shader->shader().ucode_data_hash(),
+-                   runtime_description.pixel_shader->shader().ucode_data_hash());
++  ID3D12PipelineState* state = nullptr;
++  // DP1 v1.1: ID3D12PipelineLibrary fast path, keyed by the description hash
++  // (the same hash the .xpso storage uses).
++  wchar_t pipeline_name[17];
++  swprintf_s(pipeline_name, L"%016llX",
++             static_cast<unsigned long long>(XXH3_64bits(&description, sizeof(description))));
++  if (pipeline_library_) {
++    std::lock_guard<std::mutex> lock(pipeline_library_mutex_);
++    if (SUCCEEDED(pipeline_library_->LoadGraphicsPipeline(pipeline_name, &state_desc,
++                                                          IID_PPV_ARGS(&state)))) {
++      pipeline_library_load_hits_.fetch_add(1, std::memory_order_relaxed);
+     } else {
+-      REXGPU_ERROR("Failed to create graphics pipeline with VS {:016X}",
+-                   runtime_description.vertex_shader->shader().ucode_data_hash());
++      state = nullptr;
++    }
++  }
++  if (!state) {
++    if (FAILED(device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state)))) {
++      if (runtime_description.pixel_shader != nullptr) {
++        REXGPU_ERROR("Failed to create graphics pipeline with VS {:016X}, PS {:016X}",
++                     runtime_description.vertex_shader->shader().ucode_data_hash(),
++                     runtime_description.pixel_shader->shader().ucode_data_hash());
++      } else {
++        REXGPU_ERROR("Failed to create graphics pipeline with VS {:016X}",
++                     runtime_description.vertex_shader->shader().ucode_data_hash());
++      }
++      return nullptr;
++    }
++    if (pipeline_library_) {
++      std::lock_guard<std::mutex> lock(pipeline_library_mutex_);
++      if (SUCCEEDED(pipeline_library_->StorePipeline(pipeline_name, state))) {
++        pipeline_library_store_count_.fetch_add(1, std::memory_order_relaxed);
++        pipeline_library_dirty_.store(true, std::memory_order_relaxed);
++        PsoCompileIndicatorStateRef().library_stores_session.fetch_add(1,
++                                                                        std::memory_order_relaxed);
++      }
+     }
+-    return nullptr;
+   }
+   std::u16string name;
+   if (runtime_description.pixel_shader != nullptr) {
+@@ -3053,6 +3209,54 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
+   return state;
+ }
+ 
++// DP1 v1.1: serialize the pipeline library to disk (atomic replace). No-op
++// when nothing new was stored since the last flush.
++void PipelineCache::FlushPipelineLibraryToDisk() {
++  if (!pipeline_library_ || !pipeline_library_dirty_.load(std::memory_order_relaxed) ||
++      pipeline_library_path_.empty()) {
++    return;
++  }
++  std::vector<uint8_t> serialized;
++  HRESULT hr;
++  {
++    std::lock_guard<std::mutex> lock(pipeline_library_mutex_);
++    SIZE_T serialized_size = pipeline_library_->GetSerializedSize();
++    if (serialized_size == 0) {
++      return;
++    }
++    serialized.resize(serialized_size);
++    hr = pipeline_library_->Serialize(serialized.data(), serialized_size);
++  }
++  if (FAILED(hr)) {
++    REXGPU_WARN("PSO library Serialize failed: HRESULT 0x{:08X}", uint32_t(hr));
++    return;
++  }
++  auto tmp_path = pipeline_library_path_;
++  tmp_path += ".tmp";
++  FILE* lib_file = rex::filesystem::OpenFile(tmp_path, "wb");
++  if (!lib_file) {
++    REXGPU_WARN("PSO library file open failed: {}", rex::path_to_utf8(tmp_path));
++    return;
++  }
++  size_t written = fwrite(serialized.data(), 1, serialized.size(), lib_file);
++  fclose(lib_file);
++  std::error_code ec;
++  if (written != serialized.size()) {
++    std::filesystem::remove(tmp_path, ec);
++    return;
++  }
++  std::filesystem::remove(pipeline_library_path_, ec);
++  std::filesystem::rename(tmp_path, pipeline_library_path_, ec);
++  if (ec) {
++    REXGPU_WARN("PSO library rename failed: {}", ec.message());
++    return;
++  }
++  pipeline_library_dirty_.store(false, std::memory_order_relaxed);
++  REXGPU_INFO("PSO library saved: {} bytes, {} loads / {} stores this session",
++              serialized.size(), pipeline_library_load_hits_.load(std::memory_order_relaxed),
++              pipeline_library_store_count_.load(std::memory_order_relaxed));
++}
++
+ void PipelineCache::StorageWriteThread() {
+   ShaderStoredHeader shader_header;
+   // Don't leak anything in unused bits.
+@@ -3223,6 +3427,10 @@ void PipelineCache::CreationThread(size_t thread_index) {
+       pipeline_to_create = creation_queue_.top();
+       creation_queue_.pop();
+       ++creation_threads_busy_;
++      PsoCompileIndicatorStateRef().creation_queue_size.store(uint32_t(creation_queue_.size()),
++                                                              std::memory_order_relaxed);
++      PsoCompileIndicatorStateRef().creation_threads_busy.store(
++          uint32_t(creation_threads_busy_), std::memory_order_relaxed);
+     }
+ 
+     PipelineRuntimeDescription runtime_description;
+@@ -3236,9 +3444,21 @@ void PipelineCache::CreationThread(size_t thread_index) {
+     // Pipeline created - the thread is not busy anymore, safe to set the
+     // completion event if needed (at the next iteration, or in some other
+     // thread).
++    {
++      auto& indicator = PsoCompileIndicatorStateRef();
++      indicator.total_completions_session.fetch_add(1, std::memory_order_relaxed);
++      indicator.storage_pipelines_created.fetch_add(1, std::memory_order_relaxed);
++      indicator.last_completion_steady_ns.store(
++          uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                       std::chrono::steady_clock::now().time_since_epoch())
++                       .count()),
++          std::memory_order_relaxed);
++    }
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       --creation_threads_busy_;
++      PsoCompileIndicatorStateRef().creation_threads_busy.store(
++          uint32_t(creation_threads_busy_), std::memory_order_relaxed);
+     }
+   }
+ }
+@@ -3262,6 +3482,14 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+     }
+     pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+                                     std::memory_order_release);
++    {
++      auto& indicator = PsoCompileIndicatorStateRef();
++      indicator.total_completions_session.fetch_add(1, std::memory_order_relaxed);
++      indicator.storage_pipelines_created.fetch_add(1, std::memory_order_relaxed);
++      std::lock_guard<std::mutex> lock(creation_request_lock_);
++      indicator.creation_queue_size.store(uint32_t(creation_queue_.size()),
++                                          std::memory_order_relaxed);
++    }
+   }
+ }
+ 
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
 index dd321a5..4e3076c 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
@@ -665,10 +1127,15 @@ index 76f5600..18f0702 100644
        return;
      default:
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
-index 3f9422d..56ad464 100644
+index 3f9422d..7e5a76b 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
 +++ b/src/input/mnk/mnk_input_driver.cpp
-@@ -29,6 +29,21 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
+@@ -1,3 +1,4 @@
++#include <chrono>
+ /**
+  * @file        input/mnk/mnk_input_driver.cpp
+  * @brief       Keyboard/mouse input driver implementation.
+@@ -29,6 +30,21 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
                      "from the keybind_rstick_* keys only");
  REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
      .range(0.01, 10.0);
@@ -690,7 +1157,7 @@ index 3f9422d..56ad464 100644
  
  REXCVAR_DEFINE_STRING(keybind_a, "Semicolon,Space", "Input/Keybinds/Controller", "A button");
  REXCVAR_DEFINE_STRING(keybind_b, "Quote,Backspace", "Input/Keybinds/Controller", "B button");
-@@ -71,6 +86,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
+@@ -71,6 +87,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
  // it. That is what lets the D-pad share the arrow keys. A consequence is
  // that binding a bare modifier name ("Shift") can never fire, since holding it
  // makes the live mask non-zero while the bind wants zero.
@@ -704,7 +1171,7 @@ index 3f9422d..56ad464 100644
  constexpr uint8_t kModShift = 1u << 0;
  constexpr uint8_t kModCtrl = 1u << 1;
  constexpr uint8_t kModAlt = 1u << 2;
-@@ -86,30 +108,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
+@@ -86,30 +109,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
    return mods;
  }
  
@@ -746,26 +1213,32 @@ index 3f9422d..56ad464 100644
  }
  
  std::string_view TrimSpaces(std::string_view s) {
-@@ -122,17 +132,41 @@ std::string_view TrimSpaces(std::string_view s) {
+@@ -122,17 +133,99 @@ std::string_view TrimSpaces(std::string_view s) {
    return s;
  }
  
 -bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t live_mods) {
 -  uint8_t want = TakeModifiers(token);
 -  if (want != live_mods) {
--    return false;
--  }
--  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(token);
--  if (vk == rex::ui::VirtualKey::kNone) {
--    return false;
-+// DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.cpp):
-+// evaluates one comma-separated alternative. Its '+'-separated tokens are
-+// either modifier names, which build the required modifier mask, or key names,
-+// all of which must be down. A group without any key name (a bare "Shift")
-+// never fires, matching the previous behaviour.
-+bool GroupPressed(const bool (&key_down)[256], std::string_view group, uint8_t live_mods) {
-+  uint8_t want = 0;
-+  bool any_key = false;
++// DP1 v1.1 (DPRecomp #11 "holding Shift freezes York"): bind evaluation.
++// One comma-separated alternative = modifier names + key names joined by '+'.
++// Rules:
++//   * every listed key must be down and every listed modifier must be held;
++//     OTHER modifiers being held no longer silence a bind ("W" keeps working
++//     while Shift = X button is held, so run = Shift + WASD works);
++//   * a bare modifier group ("Shift") fires while that modifier is held;
++//   * shadowing keeps the D-pad on the arrow keys: a group is silent while a
++//     MORE specific configured group (same keys, strictly more modifiers) is
++//     satisfied, so "Left" stays quiet while "Shift+Left" fires.
++struct ParsedGroup {
++  uint8_t mods = 0;
++  std::vector<uint16_t> keys;  // sorted
++  bool valid = false;
++};
++
++ParsedGroup ParseGroup(std::string_view group) {
++  ParsedGroup out;
++  bool bad = false;
 +  while (!group.empty()) {
 +    size_t plus = group.find('+');
 +    std::string_view token = TrimSpaces(group.substr(0, plus));
@@ -779,26 +1252,75 @@ index 3f9422d..56ad464 100644
 +    }
 +    uint8_t bit = ModifierBit(token);
 +    if (bit) {
-+      want |= bit;
++      out.mods |= bit;
 +      continue;
 +    }
 +    rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(token);
-+    if (vk == rex::ui::VirtualKey::kNone) {
-+      return false;
-+    }
 +    uint16_t idx = static_cast<uint16_t>(vk);
-+    if (!(idx < 256 && key_down[idx])) {
++    if (vk == rex::ui::VirtualKey::kNone || idx >= 256) {
++      bad = true;
++      break;
++    }
++    out.keys.push_back(idx);
++  }
++  std::sort(out.keys.begin(), out.keys.end());
++  out.valid = !bad && (out.mods != 0 || !out.keys.empty());
++  return out;
++}
++
++bool GroupSatisfied(const ParsedGroup& g, const bool (&key_down)[256], uint8_t live_mods) {
++  if (!g.valid || (live_mods & g.mods) != g.mods) {
+     return false;
+   }
+-  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(token);
+-  if (vk == rex::ui::VirtualKey::kNone) {
++  for (uint16_t k : g.keys) {
++    if (!key_down[k]) {
 +      return false;
 +    }
-+    any_key = true;
++  }
++  return true;
++}
++
++// All configured groups of the current poll (for shadowing); filled at the
++// top of GetState under state_mutex_.
++std::vector<ParsedGroup> g_all_groups;
++
++void ForEachGroup(const std::string& cvar_val, const std::function<void(std::string_view)>& fn) {
++  std::string_view rest(cvar_val);
++  while (!rest.empty()) {
++    size_t comma = rest.find(',');
++    std::string_view token = TrimSpaces(rest.substr(0, comma));
++    if (comma == std::string_view::npos) {
++      rest = std::string_view();
++    } else {
++      rest.remove_prefix(comma + 1);
++    }
++    if (!token.empty()) {
++      fn(token);
++    }
++  }
++}
++
++bool GroupPressed(const bool (&key_down)[256], std::string_view group, uint8_t live_mods) {
++  ParsedGroup g = ParseGroup(group);
++  if (!GroupSatisfied(g, key_down, live_mods)) {
+     return false;
    }
 -  uint16_t idx = static_cast<uint16_t>(vk);
 -  return idx < 256 && key_down[idx];
-+  return any_key && want == live_mods;
++  // Shadowed by a more specific configured group?
++  for (const ParsedGroup& other : g_all_groups) {
++    if (other.keys == g.keys && other.mods != g.mods && (other.mods & g.mods) == g.mods &&
++        GroupSatisfied(other, key_down, live_mods)) {
++      return false;
++    }
++  }
++  return true;
  }
  
  std::atomic<bool> mouse_look_active{true};
-@@ -147,6 +181,24 @@ bool IsMouseLookActive() {
+@@ -147,6 +240,43 @@ bool IsMouseLookActive() {
    return mouse_look_active.load(std::memory_order_relaxed);
  }
  
@@ -820,10 +1342,29 @@ index 3f9422d..56ad464 100644
 +  dy_out = mouse_camera_dy.exchange(0.0f, std::memory_order_relaxed);
 +}
 +
++// DP1 v1.1: "aim camera ran this frame" stamp (steady clock, ns).
++std::atomic<int64_t> mouse_aim_frame_ns{0};
++
++void NoteMouseAimFrame() {
++  const auto now = std::chrono::steady_clock::now().time_since_epoch();
++  mouse_aim_frame_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count(),
++                           std::memory_order_relaxed);
++}
++
++bool IsMouseAimStickActive() {
++  const int64_t last = mouse_aim_frame_ns.load(std::memory_order_relaxed);
++  if (last == 0) {
++    return false;
++  }
++  const auto now = std::chrono::steady_clock::now().time_since_epoch();
++  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
++  return (now_ns - last) < 150 * 1000000LL;
++}
++
  using rex::ui::VirtualKey;
  
  MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order)
-@@ -212,7 +264,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+@@ -212,7 +342,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
        rest.remove_prefix(comma + 1);
      }
      token = TrimSpaces(token);
@@ -833,7 +1374,7 @@ index 3f9422d..56ad464 100644
        return true;
      }
    }
-@@ -222,8 +275,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+@@ -222,8 +353,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
  void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
    // Disabled means no device at all, so it never occupies a guest user slot.
    if (!IsEnabled()) {
@@ -852,7 +1393,7 @@ index 3f9422d..56ad464 100644
    DeviceInfo info;
    info.id = kMnkDevice;
    info.name = "Keyboard and Mouse";
-@@ -269,11 +332,32 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -269,11 +410,49 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
        std::memset(out_state, 0, sizeof(*out_state));
        out_state->packet_number = packet_number_;
      }
@@ -882,10 +1423,27 @@ index 3f9422d..56ad464 100644
 +  key_down_[static_cast<uint16_t>(VirtualKey::kWheelUp)] = wheel_up_pulse;
 +  key_down_[static_cast<uint16_t>(VirtualKey::kWheelDown)] = wheel_down_pulse;
 +
++  // DP1 v1.1: snapshot every configured group for bind shadowing (see GroupPressed).
++  g_all_groups.clear();
++  for (const std::string* bind : {&REXCVAR_GET(keybind_a), &REXCVAR_GET(keybind_b), &REXCVAR_GET(keybind_x),
++                                  &REXCVAR_GET(keybind_y), &REXCVAR_GET(keybind_left_shoulder),
++                                  &REXCVAR_GET(keybind_right_shoulder), &REXCVAR_GET(keybind_lstick_press),
++                                  &REXCVAR_GET(keybind_rstick_press), &REXCVAR_GET(keybind_back),
++                                  &REXCVAR_GET(keybind_start), &REXCVAR_GET(keybind_guide),
++                                  &REXCVAR_GET(keybind_dpad_up), &REXCVAR_GET(keybind_dpad_down),
++                                  &REXCVAR_GET(keybind_dpad_left), &REXCVAR_GET(keybind_dpad_right),
++                                  &REXCVAR_GET(keybind_left_trigger), &REXCVAR_GET(keybind_right_trigger),
++                                  &REXCVAR_GET(keybind_lstick_left), &REXCVAR_GET(keybind_lstick_right),
++                                  &REXCVAR_GET(keybind_lstick_up), &REXCVAR_GET(keybind_lstick_down),
++                                  &REXCVAR_GET(keybind_rstick_left), &REXCVAR_GET(keybind_rstick_right),
++                                  &REXCVAR_GET(keybind_rstick_up), &REXCVAR_GET(keybind_rstick_down)}) {
++    ForEachGroup(*bind, [](std::string_view grp) { g_all_groups.push_back(ParseGroup(grp)); });
++  }
++
    uint16_t buttons = 0;
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
      buttons |= X_INPUT_GAMEPAD_A;
-@@ -331,11 +415,24 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -331,11 +510,36 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
      ry -= INT16_MAX;
  
@@ -894,7 +1452,14 @@ index 3f9422d..56ad464 100644
 -    constexpr double kBaseScale = 200.0;
 -    rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);
 -    ry += static_cast<int32_t>(double(-mouse_dy_) * sensitivity * kBaseScale);
-+  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive() && !IsMouseCameraHookActive()) {
++  // DP1 v1.1: while the game's aim camera runs, the mouse becomes the LEFT
++  // stick (the aim camera's native input); the camera hook path is bypassed.
++  const bool aim_stick = IsMouseCameraHookActive() && IsMouseAimStickActive();
++  if (aim_stick) {
++    float drop_dx = 0.0f, drop_dy = 0.0f;
++    TakeMouseCameraDelta(drop_dx, drop_dy);  // never replay aim motion as a camera snap later
++  }
++  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive() && (!IsMouseCameraHookActive() || aim_stick)) {
 +    // DP1 (rev. 2, 2026-09-06): VECTOR mapping. The deadzone floor is added to
 +    // the length of the mouse motion vector, not per axis - a per-axis floor
 +    // turned every small move into a 45-degree diagonal ("crooked"). The
@@ -909,13 +1474,18 @@ index 3f9422d..56ad464 100644
 +      const double gain = REXCVAR_GET(mnk_sensitivity) * REXCVAR_GET(mnk_stick_scale);
 +      const double floor = double(std::clamp(REXCVAR_GET(mnk_deadzone_floor), 0, 32767));
 +      const double out_len = std::min(floor + len * gain, double(INT16_MAX));
-+      rx += static_cast<int32_t>(std::lround(dx / len * out_len));
-+      ry += static_cast<int32_t>(std::lround(dy / len * out_len));
++      if (aim_stick) {
++        lx += static_cast<int32_t>(std::lround(dx / len * out_len));
++        ly += static_cast<int32_t>(std::lround(dy / len * out_len));
++      } else {
++        rx += static_cast<int32_t>(std::lround(dx / len * out_len));
++        ry += static_cast<int32_t>(std::lround(dy / len * out_len));
++      }
 +    }
    }
    // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
    // mouse is off, and toggling it on would otherwise dump the whole backlog
-@@ -481,10 +578,17 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
+@@ -481,10 +685,17 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
  }
  
  void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
@@ -934,7 +1504,7 @@ index 3f9422d..56ad464 100644
    SetKeyState(vk, true);
  }
  
-@@ -549,6 +653,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -549,6 +760,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
        mouse_dx_ += float(x - prev_mouse_x_);
        mouse_dy_ += float(y - prev_mouse_y_);
      }
@@ -950,7 +1520,7 @@ index 3f9422d..56ad464 100644
    }
    prev_mouse_x_ = x;
    prev_mouse_y_ = y;
-@@ -558,6 +671,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -558,6 +778,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
    }
  }
  
@@ -968,7 +1538,7 @@ index 3f9422d..56ad464 100644
  void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
    has_focus_ = false;
    // Withdraw the request too, or an update queued before the focus loss grabs
-@@ -568,6 +692,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+@@ -568,6 +799,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
      std::memset(key_down_, 0, sizeof(key_down_));
      mouse_dx_ = 0.0f;
      mouse_dy_ = 0.0f;
@@ -1123,6 +1693,20 @@ index c7c440d..19211ad 100644
    const int ordinal = static_cast<int>(controllers_.size()) - 1;
    SDL_SetGamepadPlayerIndex(controller, ordinal);
  
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index 5bd3dc5..291d5dd 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -29,6 +29,9 @@ set(REXUI_OVERLAY_SOURCES
+     overlay/console_overlay.cpp
+     overlay/console_commands.cpp
+     overlay/settings_overlay.cpp
++    overlay/pso_compile_indicator_state.cpp
++    overlay/pso_compile_indicator_overlay.cpp
++    overlay/shader_compile_overlay.cpp
+ )
+ 
+ # Vulkan UI backend
 diff --git a/src/ui/keybinds.cpp b/src/ui/keybinds.cpp
 index 9822f3b..6f7bf7c 100644
 --- a/src/ui/keybinds.cpp
@@ -1183,21 +1767,105 @@ index 43d6c06..35646a5 100644
    }
    ImGui::End();
    ImGui::PopStyleColor();
-diff --git a/thirdparty/libmspack b/thirdparty/libmspack
---- a/thirdparty/libmspack
-+++ b/thirdparty/libmspack
-@@ -1 +1 @@
--Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837
-+Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837-dirty
-diff --git a/thirdparty/moltenvk b/thirdparty/moltenvk
---- a/thirdparty/moltenvk
-+++ b/thirdparty/moltenvk
-@@ -1 +1 @@
--Subproject commit 701747d61a0484e91c205e081a24ca592ffa12b4
-+Subproject commit 701747d61a0484e91c205e081a24ca592ffa12b4-dirty
-diff --git a/thirdparty/o1heap b/thirdparty/o1heap
---- a/thirdparty/o1heap
-+++ b/thirdparty/o1heap
-@@ -1 +1 @@
--Subproject commit 388a73fd9007300e5130c5fe352d9ce3288b6dde
-+Subproject commit 388a73fd9007300e5130c5fe352d9ce3288b6dde-dirty
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..5fb41ee 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -25,6 +25,8 @@
+ #include <rex/ui/overlay/console_overlay.h>
+ #include <rex/ui/overlay/debug_overlay.h>
+ #include <rex/ui/overlay/settings_overlay.h>
++#include <rex/ui/overlay/pso_compile_indicator_state.h>
++#include <rex/ui/overlay/shader_compile_overlay.h>
+ #include <rex/audio/audio_system.h>
+ #include <rex/audio/sdl/sdl_audio_system.h>
+ #include <rex/input/input_system.h>
+@@ -394,6 +396,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
+   // lazily on the first Draw instead).
+   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
++  // DP1 v1.1: PSO compile indicator (self-gates on show_shader_compile_indicator).
++  if (!pso_compile_indicator_overlay_) {
++    pso_compile_indicator_overlay_ =
++        std::make_unique<ui::PsoCompileIndicatorDialog>(imgui_drawer_.get());
++  }
+   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
+     if (debug_overlay_) {
+       debug_overlay_.reset();
+@@ -457,25 +464,60 @@ void ReXApp::LaunchModule() {
+     }
+ 
+     auto* graphics_system = runtime_->graphics_system();
+-    if (graphics_system && !runtime_->cache_root().empty()) {
+-      uint32_t title_id = runtime_->kernel_state()->title_id();
+-      if (title_id != 0) {
+-        REXLOG_INFO("Initializing shader storage for title {:08X}...", title_id);
+-        graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id, true);
+-      }
++    const uint32_t title_id =
++        runtime_->kernel_state() ? runtime_->kernel_state()->title_id() : 0;
++    const bool has_shader_storage =
++        graphics_system && !runtime_->cache_root().empty() && title_id != 0;
++    if (!has_shader_storage) {
++      FinishModuleLaunch(std::move(main_thread));
++      return;
++    }
++    REXLOG_INFO("Initializing shader storage for title {:08X}...", title_id);
++
++    // DP1 v1.1 (Downpour port): run the blocking storage replay on a worker
++    // thread and keep the UI thread pumping so a "Pipelines N / M" toast is
++    // visible instead of a frozen window; the toast resumes the guest main
++    // thread once the replay has finished.
++    if (imgui_drawer_) {
++      auto& progress = rex::graphics::d3d12::PsoCompileIndicatorStateRef();
++      progress.storage_finished.store(false, std::memory_order_release);
++      progress.storage_shaders_translated.store(0, std::memory_order_relaxed);
++      progress.storage_pipelines_total.store(0, std::memory_order_relaxed);
++      progress.storage_pipelines_created.store(0, std::memory_order_relaxed);
++      auto cache_root = runtime_->cache_root();
++      auto main_thread_shared =
++          std::make_shared<system::object_ref<system::XThread>>(std::move(main_thread));
++      // Owned by the drawer's dialog list; deleted after Close().
++      new rex::ui::ShaderCompileDialog(
++          imgui_drawer_.get(), "Preparing shaders",
++          "Warming the pipeline cache; only the first launch after an update takes a while.",
++          [this, main_thread_shared]() mutable {
++            FinishModuleLaunch(std::move(*main_thread_shared));
++          });
++      std::thread([graphics_system, cache_root = std::move(cache_root), title_id]() {
++        graphics_system->InitializeShaderStorage(cache_root, title_id, true);
++        rex::graphics::d3d12::PsoCompileIndicatorStateRef().storage_finished.store(
++            true, std::memory_order_release);
++      }).detach();
++      return;
+     }
+ 
+-    OnPostLaunchModule(main_thread.get());
+-    main_thread->Resume();
++    graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id, true);
++    FinishModuleLaunch(std::move(main_thread));
++  });
++}
+ 
+-    module_thread_ = std::thread([this, main_thread = std::move(main_thread)]() mutable {
+-      main_thread->Wait(0, 0, 0, nullptr);
+-      OnGuestThreadExit(main_thread.get());
+-      REXLOG_INFO("Execution complete");
+-      if (!shutting_down_.load(std::memory_order_acquire)) {
+-        app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
+-      }
+-    });
++void ReXApp::FinishModuleLaunch(system::object_ref<system::XThread> main_thread) {
++  OnPostLaunchModule(main_thread.get());
++  main_thread->Resume();
++
++  module_thread_ = std::thread([this, main_thread = std::move(main_thread)]() mutable {
++    main_thread->Wait(0, 0, 0, nullptr);
++    OnGuestThreadExit(main_thread.get());
++    REXLOG_INFO("Execution complete");
++    if (!shutting_down_.load(std::memory_order_acquire)) {
++      app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
++    }
+   });
+ }
+ 

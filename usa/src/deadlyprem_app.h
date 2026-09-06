@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <cstdlib>
 #include <functional>
 #include <optional>
@@ -49,9 +52,9 @@ class DeadlypremApp : public rex::ReXApp {
     // stamp>" in SetupPresentation; this hook runs right after it.
     // F3 debug overlay watermark (ASCII only: the overlay font has no special glyphs).
     rex::ui::SetDebugOverlayBuildStamp(
-        "Deadly Premonition Recompilation 1.0 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+        "Deadly Premonition Recompilation 1.1 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
     if (window()) {
-      window()->SetTitle("Deadly Premonition Recompilation (USA) | 1.0 «Little Bit»");
+      window()->SetTitle("Deadly Premonition Recompilation (USA) | 1.1 «Little Bit»");
     }
     rex::PathConfig runtime_paths = defaults;
     const auto& game_root = runtime_paths.game_data_root;
@@ -83,21 +86,77 @@ class DeadlypremApp : public rex::ReXApp {
     if (paths.game_data_root.empty()) {
       paths.game_data_root = rex::filesystem::GetExecutableFolder() / "assets";
     }
-    // Saves / profile (2026-09-06). The SDK default is user_data_root =
-    // game_data_root, i.e. inside assets\ (which may be a junction to another
-    // install here). v0.1.1 used Documents\deadlyprem, which OneDrive redirects
-    // and dehydrates after reboots - the likely cause of the "save sequence
-    // loops forever after a restart" report (DPRecomp #6). Keep user data
-    // next to the exe instead; --user_data_root still overrides.
-    if (paths.user_data_root.empty()) {
+    // Saves / profile / shader cache (2026-09-06, fixed in 1.1). The SDK hands
+    // us user_data_root already resolved to Documents\deadlyprem (its platform
+    // user folder), so the 1.0 "if empty" check never fired and everything
+    // silently stayed in Documents - the userdata\ folder next to the exe (and
+    // the pre-warmed shader storage shipped in the zip) were never used.
+    // v1.1: portable layout unconditionally unless --user_data_root /
+    // --cache_root were given on the command line, plus a one-time migration
+    // of the 1.0 state (saves under <XUID>\, shader storage under
+    // cache\shaders\shareable\) from the legacy Documents location.
+    const std::filesystem::path legacy_user_root = paths.user_data_root;
+    if (!rex::cvar::HasNonDefaultValue("user_data_root")) {
       paths.user_data_root = rex::filesystem::GetExecutableFolder() / "userdata";
     }
-    // The SDK derives cache_root from the Documents user dir BEFORE this hook
-    // runs, so move it next to the exe as well (portable layout, like the
-    // Downpour release): <exe>Serdatache holds the shareable shader /
-    // pipeline storage (.xsh / .xpso).
     if (!rex::cvar::HasNonDefaultValue("cache_root")) {
       paths.cache_root = paths.user_data_root / "cache";
+    }
+    MigrateLegacyUserData(legacy_user_root, paths.user_data_root, paths.cache_root);
+  }
+
+  // One-time copy of the Documents\deadlyprem state into the portable layout.
+  // Only fills what is missing at the destination; never deletes the source.
+  static void MigrateLegacyUserData(const std::filesystem::path& legacy_root,
+                                    const std::filesystem::path& user_root,
+                                    const std::filesystem::path& cache_root) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (legacy_root.empty() || legacy_root == user_root || !fs::is_directory(legacy_root, ec)) {
+      return;
+    }
+    size_t copied = 0;
+    // Profiles / saves: <16 hex digits XUID>\...
+    for (const auto& entry : fs::directory_iterator(legacy_root, ec)) {
+      if (!entry.is_directory(ec)) continue;
+      const std::string name = entry.path().filename().string();
+      if (name.size() != 16 ||
+          !std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isxdigit(c); })) {
+        continue;
+      }
+      const fs::path dst = user_root / name;
+      if (fs::exists(dst, ec)) continue;
+      fs::create_directories(user_root, ec);
+      fs::copy(entry.path(), dst, fs::copy_options::recursive, ec);
+      if (!ec) {
+        ++copied;
+        REXLOG_INFO("Migrated profile {} from {} to {}", name, legacy_root.string(),
+                    user_root.string());
+      } else {
+        REXLOG_WARN("Profile migration of {} failed: {}", name, ec.message());
+        ec.clear();
+      }
+    }
+    // Shader storage (portable, shareable): copy files that do not exist yet.
+    const fs::path legacy_shareable = legacy_root / "cache" / "shaders" / "shareable";
+    const fs::path dst_shareable = cache_root / "shaders" / "shareable";
+    if (fs::is_directory(legacy_shareable, ec)) {
+      for (const auto& entry : fs::directory_iterator(legacy_shareable, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        const fs::path dst = dst_shareable / entry.path().filename();
+        if (fs::exists(dst, ec)) continue;
+        fs::create_directories(dst_shareable, ec);
+        fs::copy_file(entry.path(), dst, ec);
+        if (!ec) {
+          ++copied;
+        } else {
+          ec.clear();
+        }
+      }
+    }
+    if (copied) {
+      REXLOG_INFO("Legacy user data migration: {} item(s) copied from {}", copied,
+                  legacy_root.string());
     }
   }
 

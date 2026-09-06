@@ -19,6 +19,8 @@
 #include <commctrl.h>
 #include <shlobj.h>
 #include <winhttp.h>
+#include <dxgi.h>
+#include <wrl/client.h>
 #include <thread>
 #include <string>
 #include <fstream>
@@ -51,6 +53,10 @@ void LoadLauncherLanguageFromToml();
 // live further down at file scope, after the anon ns closes.
 extern std::unordered_map<std::string, std::string> g_launcher_ini;
 void WriteLauncherIni();
+void MaybeShareShaderCache();
+void ApplySteamDeckPresetIfDetected();
+static void ReadLauncherIni();
+extern std::unordered_map<std::string, std::string> g_launcher_ini;
 
 namespace {
 
@@ -159,7 +165,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Balanced",                  L"Збалансований"},
       {"Performance",               L"Швидкодія"},
       {"Ultra Performance",         L"Макс. швидкодія"},
-      {"FSR Softness (0 = max sharpen)", L"М'якість FSR (0 = макс. різкість)"},
+      {"FSR Softness (0 = sharpest)", L"М'якість FSR (0 = макс. різкість)"},
       {"CAS Extra Sharpness",       L"CAS: додаткова різкість"},
       {"Preserve Aspect (Letterbox)", L"Зберегти пропорції"},
       {"60 FPS (ehw patch)",        L"60 FPS (патч ehw)"},
@@ -179,7 +185,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
                                     L"SDL (рекомендовано, підтримка DualSense)"},
       {"XInput (Xbox controllers only)",
                                     L"XInput (лише Xbox-геймпади)"},
-      {"Controller Mappings File (SDL)",
+      {"Controller Mappings (SDL)",
                                     L"Файл мапінгів геймпадів (SDL)"},
       {"Game Language",             L"Мова гри"},
       {"German (Deutsch)",          L"Німецька"},
@@ -199,11 +205,11 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Mute Game Audio",           L"Вимкнути звук гри"},
       // Mouse.
       {"Mouse & Keyboard Mode",     L"Миша + клавіатура"},
-      {"Mouse Controls Camera Directly (hook)",
+      {"Mouse Camera Hook (direct)",
                                     L"Миша керує камерою напряму (хук)"},
       {"Camera Hook Sensitivity",   L"Чутливість камери (хук)"},
       {"Camera Hook Invert Y",      L"Інвертувати Y камери (хук)"},
-      {"Mouse Controls Camera (right stick)",
+      {"Mouse as Right Stick",
                                     L"Миша керує камерою (правий стік)"},
       {"Mouse Sensitivity",         L"Чутливість миші"},
       {"Stick Scale (units per pixel)", L"Масштаб стіка (одиниць на піксель)"},
@@ -226,7 +232,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Left Trigger End Position", L"Лівий курок: кінець"},
       {"Left Trigger Strength",     L"Лівий курок: сила"},
       // Keybinds (Director's Cut layout).
-      {"A button (action / fire while aiming)",
+      {"A button (action / fire)",
                                     L"A (дія / постріл під час прицілювання)"},
       {"B button",                  L"B"},
       {"X button",                  L"X"},
@@ -264,10 +270,17 @@ static const std::map<std::string, std::wstring>& UkTable() {
                                     L"Skip (не чекати, геометрія зникає)"},
       {"Sync (inline compile, longest stutter)",
                                     L"Sync (компіляція в кадрі, найдовші фризи)"},
-      {"PSO Per-Draw Block Budget (ms)", L"Бюджет очікування PSO на драв (мс)"},
+      {"PSO Block Budget (ms)", L"Бюджет очікування PSO на драв (мс)"},
       {"No PSO Wait At Frame End",  L"Не чекати PSO наприкінці кадру"},
       {"D3D12 Debug Layer (slow)",  L"D3D12 debug layer (повільно)"},
       {"Shader Storage Cache",      L"Кеш шейдерів на диску"},
+      {"Share Shader Cache",        L"Ділитися кешем шейдерів"},
+      {"Help other players?",       L"Допомогти іншим гравцям?"},
+      {"Steam Deck preset",         L"Пресет Steam Deck"},
+      {"Steam Deck detected - the community-tested Deck preset was applied (RTV, 1x, 2x MSAA, 16x AF, FXAA + CAS, 30 FPS, VSync, fullscreen 1280x800). You can change anything in Settings; this will not be applied again.",
+       L"Виявлено Steam Deck - застосовано перевірений спільнотою пресет (RTV, 1x, 2x MSAA, 16x AF, FXAA + CAS, 30 FPS, VSync, повний екран 1280x800). Усе можна змінити в Settings; повторно не застосовуватиметься."},
+      {"Share your shader cache with the project?\n\nWhen enabled, the launcher sends the shader cache the game builds while you play (only shader microcode and pipeline descriptions - no personal data, no save games) to the developers. Merged caches ship with the next release, so people who play after you get fewer stutters in new scenes.\n\nYou can change this later in Settings -> Advanced -> Share Shader Cache.",
+       L"Поділитися кешем шейдерів із проєктом?\n\nЯкщо увімкнути, лаунчер надсилатиме розробникам кеш шейдерів, який гра будує під час твоєї гри (лише мікрокод шейдерів і описи pipeline - без персональних даних і сейвів). Злиті кеші виходять у наступному релізі, тож ті, хто гратиме після тебе, матимуть менше підлагувань у нових сценах.\n\nЗмінити можна пізніше: Settings -> Advanced -> Share Shader Cache."},
       {"Log Files To Keep",         L"Кількість лог-файлів"},
       {"Log File Size Limit (MB)",  L"Ліміт розміру лог-файлу (МБ)"},
       // Misc.
@@ -314,7 +327,14 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.0.0";
+constexpr const wchar_t* kLauncherVersion = L"v1.1.0";
+// v1.1: opt-in shader cache sharing. When the user enables "Share Shader
+// Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
+// userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
+// pipeline descriptions only, no personal data) and posts it to this Discord
+// webhook whenever the cache changed since the last upload. Empty = feature
+// hidden and disabled.
+constexpr const wchar_t* kShaderCacheWebhookUrl = L"";  // set your own Discord webhook here; the release build carries the project one
 constexpr const char* kGithubReleaseUrl =
     "https://github.com/LittleBitUA/DPRecomp/releases/latest";
 
@@ -781,6 +801,16 @@ void LaunchGame(HWND hwnd) {
   std::wstring args = L"--game_data_root assets";
   std::wstring cmdline = L"\"" + exe + L"\" " + args;
 
+  // v1.1 (DPRecomp #13): optional Steam overlay opt-out for users who added
+  // the launcher to Steam. The child inherits our environment.
+  {
+    ReadLauncherIni();
+    auto it = g_launcher_ini.find("launcher_steam_overlay");
+    if (it != g_launcher_ini.end() && it->second == "off") {
+      SetEnvironmentVariableW(L"SteamNoOverlayUIDrawing", L"1");
+    }
+  }
+
   STARTUPINFOW si = {sizeof(si)};
   PROCESS_INFORMATION pi = {};
   std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
@@ -1026,7 +1056,7 @@ void DefineCvars() {
   // RCAS sharpness for present_effect = fsr/fsr2/fsr3: sharpness = 1 - r * 0.5
   // (SDK default 0.2 = 0.9, reported "way too sharp" on DP 2026-09-06; the
   // dist toml pins 1.6 = 0.2). Hot-reloadable in-game via F4 too.
-  AddCvar("present_fsr_sharpness_reduction", "FSR Softness (0 = max sharpen)",
+  AddCvar("present_fsr_sharpness_reduction", "FSR Softness (0 = sharpest)",
           kCatGraphics, K::kFloat, "1.6", {}, 0.0, 2.0);
   // Extra sharpening blend for present_effect = cas only.
   AddCvar("present_cas_additional_sharpness", "CAS Extra Sharpness",
@@ -1036,6 +1066,14 @@ void DefineCvars() {
   // DP1 2026-09-06: ehw's 60 FPS patch (DPRecomp #3) ported to the PAL XEX as
   // mid-asm hooks; the cvar toggles them at runtime (hot-reload).
   AddCvar("dp_60fps", "60 FPS (ehw patch)", kCatGraphics, K::kBool, "true");
+  // v1.1: PSO cache (Downpour port). Indicator badge while pipelines compile;
+  // driver PSO blob library so the second launch skips the driver compiles.
+  AddCvar("show_shader_compile_indicator", "Shader Compile Indicator",
+          kCatGraphics, K::kBool, "true");
+  AddCvar("shader_compile_indicator_verbose", "Shader Indicator: Verbose",
+          kCatGraphics, K::kBool, "false");
+  AddCvar("d3d12_pso_library_enable", "PSO Library (disk cache)",
+          kCatGraphics, K::kBool, "true");
   AddCvar("vsync", "VSync", kCatGraphics, K::kBool, "true");
   // dist-default ships windowed for bring-up.
   AddCvar("fullscreen", "Fullscreen", kCatGraphics, K::kBool, "false");
@@ -1061,11 +1099,24 @@ void DefineCvars() {
   AddCvar("launcher_language", "Launcher Language", kCatAdvanced,
           K::kEnum, "en",
           {{"en", "English"}, {"uk", "Ukrainian"}});
+  // v1.1 (DPRecomp #13): launcher-only, persisted in launcher.ini. "off" sets
+  // SteamNoOverlayUIDrawing=1 for the game process, which stops the Steam
+  // overlay (GameOverlayRenderer64.dll) from drawing into our swap chain when
+  // the launcher was added to Steam as a non-Steam game.
+  AddCvar("launcher_steam_overlay", "Steam Overlay", kCatAdvanced,
+          K::kEnum, "on",
+          {{"on", "On (Steam default)"}, {"off", "Off (fixes black screen / tinted quarter frame)"}});
+  // v1.1: opt-in shader cache sharing (launcher-only, see kShaderCacheWebhookUrl).
+  if (kShaderCacheWebhookUrl[0] != L'\0') {
+    AddCvar("launcher_share_shader_cache", "Share Shader Cache", kCatAdvanced,
+            K::kEnum, "off",
+            {{"off", "Off"}, {"on", "On - send my shader cache (anonymous) to the project"}});
+  }
   AddCvar("input_backend", "Input Backend", kCatAdvanced,
           K::kEnum, "sdl",
           {{"sdl", "SDL (recommended, DualSense support)"},
            {"xinput", "XInput (Xbox controllers only)"}});
-  AddCvar("hid_mappings_file", "Controller Mappings File (SDL)", kCatAdvanced,
+  AddCvar("hid_mappings_file", "Controller Mappings (SDL)", kCatAdvanced,
           K::kString, "gamecontrollerdb.txt");
   // Ported from the Downpour launcher (2026-09-05). Xbox 360 XLanguage IDs
   // (SDK cvar user_language, UINT32): the PAL disc carries EN/DE/FR/ES/IT.
@@ -1098,13 +1149,23 @@ void DefineCvars() {
   AddCvar("mnk_mode", "Mouse & Keyboard Mode", kCatMouse, K::kBool, "true");
   // DP1 2026-09-06: direct camera control via a game hook (no stick
   // emulation). When on, the stick mapping below is bypassed.
-  AddCvar("dp_mouse_camera", "Mouse Controls Camera Directly (hook)",
+  AddCvar("dp_mouse_camera", "Mouse Camera Hook (direct)",
           kCatMouse, K::kBool, "true");
   AddCvar("dp_mouse_camera_sensitivity", "Camera Hook Sensitivity",
-          kCatMouse, K::kFloat, "0.015", {}, 0.001, 0.05);
+          kCatMouse, K::kFloat, "0.003", {}, 0.0005, 0.05);
   AddCvar("dp_mouse_camera_invert_y", "Camera Hook Invert Y",
           kCatMouse, K::kBool, "false");
-  AddCvar("mnk_mouse", "Mouse Controls Camera (right stick)", kCatMouse,
+  // v1.1 (DPRecomp #11): position control instead of a one-frame stick-like
+  // nudge. "direct" turns the camera yaw state itself, "catch-up" keeps the
+  // angle the camera has not reached yet pending, "hold" = idle time after
+  // which the pending angle is released to the game's auto-centering.
+  AddCvar("dp_mouse_camera_direct", "Camera Hook: Direct Yaw",
+          kCatMouse, K::kBool, "true");
+  AddCvar("dp_mouse_camera_catchup", "Camera Hook: Catch-up",
+          kCatMouse, K::kBool, "true");
+  AddCvar("dp_mouse_camera_hold_ms", "Camera Auto-center Hold (ms)",
+          kCatMouse, K::kInt, "120", {}, 0, 2000);
+  AddCvar("mnk_mouse", "Mouse as Right Stick", kCatMouse,
           K::kBool, "true");
   AddCvar("mnk_sensitivity", "Mouse Sensitivity",
           kCatMouse, K::kFloat, "1.0", {}, 0.05, 5.0);
@@ -1116,6 +1177,10 @@ void DefineCvars() {
   AddCvar("mnk_deadzone_floor", "Deadzone Floor (stick units)",
           kCatMouse, K::kInt, "8689", {}, 0, 32767);
   AddCvar("mnk_invert_y", "Invert Mouse Y", kCatMouse, K::kBool, "false");
+  // v1.1: stick-shake QTEs on a keyboard - hold A + D to oscillate the stick.
+  AddCvar("mnk_key_stick_ramp_ms", "Key Stick Ramp (ms)", kCatMouse, K::kFloat, "60.0", {}, 0.0, 300.0);
+  AddCvar("mnk_auto_shake", "Auto-shake (hold A + D)", kCatMouse, K::kBool, "false");
+  AddCvar("mnk_auto_shake_hz", "Auto-shake Rate (Hz)", kCatMouse, K::kFloat, "12.0", {}, 2.0, 30.0);
 
   // ===== DUALSENSE ADAPTIVE TRIGGERS =====
   // Applied by the SDL input driver on every DualSense connect event; other
@@ -1151,7 +1216,7 @@ void DefineCvars() {
   // "E,Space+LMB" = interact on E, or fire when Space (aim) and LMB are held
   // together. Space+LMB / WheelUp / WheelDown rely on the DP1 combo/wheel port
   // in the SDK.
-  AddCvar("keybind_a", "A button (action / fire while aiming)",
+  AddCvar("keybind_a", "A button (action / fire)",
           kCatControls, K::kString, "E,Space+LMB");
   AddCvar("keybind_b", "B button",
           kCatControls, K::kString, "R");
@@ -1226,7 +1291,7 @@ void DefineCvars() {
           {{"block", "Block (wait per draw, budgeted — recommended)"},
            {"skip",  "Skip (no block, pop-in on miss)"},
            {"sync",  "Sync (inline compile, longest stutter)"}});
-  AddCvar("d3d12_pso_block_per_draw_budget_ms", "PSO Per-Draw Block Budget (ms)",
+  AddCvar("d3d12_pso_block_per_draw_budget_ms", "PSO Block Budget (ms)",
           kCatDebug, K::kFloat, "8.0", {}, 0.5, 500.0);
   AddCvar("d3d12_pso_no_block_at_submission_end", "No PSO Wait At Frame End",
           kCatDebug, K::kBool, "true");
@@ -2078,6 +2143,8 @@ void EnsurePerfDefaultsInToml() {
   static const std::set<std::string> kNoAutoSeed = {
       // Launcher-only setting: lives in launcher.ini, the SDK never sees it.
       "launcher_language",
+      "launcher_steam_overlay",
+      "launcher_share_shader_cache",
   };
   for (const auto& c : g_cvars) {
     if (kNoAutoSeed.count(c.key)) continue;
@@ -2195,7 +2262,8 @@ void SaveToml(const std::wstring& toml_path) {
   for (const auto& c : g_cvars) {
     // Launcher-only settings live in launcher.ini (the SDK never reads it).
     // Writing them to toml would trigger SDK "unknown cvar" warnings.
-    if (c.key == "launcher_language") continue;
+    if (c.key == "launcher_language" || c.key == "launcher_steam_overlay" ||
+        c.key == "launcher_share_shader_cache") continue;
     f << c.key << " = ";
     switch (c.kind) {
       case CvarRow::kBool:
@@ -2250,7 +2318,14 @@ void OpenSettings(HWND parent) {
   for (auto& c : g_cvars) {
     if (c.key == "launcher_language") {
       c.value = (g_lang == kLangUk) ? "uk" : "en";
-      break;
+    } else if (c.key == "launcher_steam_overlay") {
+      ReadLauncherIni();
+      auto it = g_launcher_ini.find("launcher_steam_overlay");
+      c.value = (it != g_launcher_ini.end() && it->second == "off") ? "off" : "on";
+    } else if (c.key == "launcher_share_shader_cache") {
+      ReadLauncherIni();
+      auto it = g_launcher_ini.find("launcher_share_shader_cache");
+      c.value = (it != g_launcher_ini.end() && it->second == "on") ? "on" : "off";
     }
   }
 
@@ -2729,6 +2804,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
           }
         }
+        for (const auto& c : g_cvars) {
+          if (c.key == "launcher_steam_overlay") {
+            g_launcher_ini["launcher_steam_overlay"] = (c.value == "off") ? "off" : "on";
+          } else if (c.key == "launcher_share_shader_cache") {
+            g_launcher_ini["launcher_share_shader_cache"] = (c.value == "on") ? "on" : "off";
+          }
+        }
         SaveToml(g_toml_path);
         if (new_lang != old_lang) {
           // Update g_lang AND the launcher.ini sidecar (the only place the
@@ -2892,6 +2974,150 @@ void SaveLauncherLanguageSidecar() {
   WriteLauncherIni();
 }
 
+// v1.1: Steam Deck preset (community-tested settings, DPRecomp discussions).
+// Detection: Steam sets SteamDeck=1 in the environment of games it launches
+// on the Deck (works under Proton), and the Deck APU reports as
+// "AMD Custom GPU 0405" (LCD) / "AMD Custom GPU 0932" (OLED). Applied once,
+// recorded in launcher.ini (deck_preset_applied), so the user can change any
+// value afterwards without it being re-applied.
+static bool IsSteamDeck() {
+  wchar_t buf[8] = {};
+  if (GetEnvironmentVariableW(L"SteamDeck", buf, 8) && buf[0] == L'1') return true;
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
+  for (UINT i = 0;; ++i) {
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+    DXGI_ADAPTER_DESC1 desc{};
+    if (FAILED(adapter->GetDesc1(&desc))) continue;
+    std::wstring name(desc.Description);
+    if (name.find(L"AMD Custom GPU 0405") != std::wstring::npos ||
+        name.find(L"AMD Custom GPU 0932") != std::wstring::npos ||
+        name.find(L"Van Gogh") != std::wstring::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ApplySteamDeckPresetIfDetected() {
+  ReadLauncherIni();
+  if (g_launcher_ini.count("deck_preset_applied")) return;
+  if (!IsSteamDeck()) return;
+  if (g_cvars.empty()) DefineCvars();
+  const std::wstring toml = GetExeDir() + L"\\" + kGameTomlName;
+  LoadTomlValues(toml);
+  static const std::pair<const char*, const char*> kPreset[] = {
+      {"render_target_path_d3d12", "rtv"}, {"resolution_scale", "1"},
+      {"native_2x_msaa", "true"},          {"anisotropic_override", "5"},
+      {"swap_post_effect", "fxaa"},        {"present_effect", "cas"},
+      {"present_fsr_quality_mode", "auto"}, {"dp_60fps", "false"},
+      {"vsync", "true"},                   {"fullscreen", "true"},
+      {"window_width", "1280"},            {"window_height", "800"},
+      {"monitor", "0"},                    {"d3d12_allow_variable_refresh_rate_and_tearing", "false"},
+      {"present_dither", "false"},
+  };
+  for (auto& c : g_cvars) {
+    for (const auto& kv : kPreset) {
+      if (c.key == kv.first) c.value = kv.second;
+    }
+  }
+  SaveToml(toml);
+  g_launcher_ini["deck_preset_applied"] = "1";
+  WriteLauncherIni();
+  MessageBoxW(nullptr,
+              TrC("Steam Deck detected - the community-tested Deck preset was applied (RTV, 1x, "
+                  "2x MSAA, 16x AF, FXAA + CAS, 30 FPS, VSync, fullscreen 1280x800). You can "
+                  "change anything in Settings; this will not be applied again."),
+              TrC("Steam Deck preset"), MB_OK | MB_ICONINFORMATION);
+}
+
+// v1.1: opt-in shader cache sharing. Fingerprints the shareable storage files
+// (name:size:mtime), skips when unchanged since the last upload, otherwise
+// hands the job to a hidden PowerShell script (Compress-Archive + curl.exe
+// multipart POST to the Discord webhook) so the launcher never blocks. The
+// fingerprint is recorded before the upload; a failed upload is retried the
+// next time the cache changes.
+void MaybeShareShaderCache() {
+  if (kShaderCacheWebhookUrl[0] == L'\0') return;
+  ReadLauncherIni();
+  // First run: ask once. The answer is recorded either way so the question
+  // never comes back; Settings -> Advanced can flip it later.
+  if (g_launcher_ini.find("launcher_share_shader_cache") == g_launcher_ini.end()) {
+    const int answer = MessageBoxW(
+        nullptr,
+        TrC("Share your shader cache with the project?\n\nWhen enabled, the launcher sends the shader cache the game builds while you play (only shader microcode and pipeline descriptions - no personal data, no save games) to the developers. Merged caches ship with the next release, so people who play after you get fewer stutters in new scenes.\n\nYou can change this later in Settings -> Advanced -> Share Shader Cache."),
+        TrC("Help other players?"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
+    g_launcher_ini["launcher_share_shader_cache"] = (answer == IDYES) ? "on" : "off";
+    WriteLauncherIni();
+  }
+  auto en = g_launcher_ini.find("launcher_share_shader_cache");
+  if (en == g_launcher_ini.end() || en->second != "on") return;
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::path(GetExeDir()) / L"userdata" / L"cache" / L"shaders" / L"shareable";
+  if (!fs::is_directory(dir, ec)) return;
+  std::string fp;
+  std::string summary;
+  unsigned long long total = 0;
+  for (const auto& e : fs::directory_iterator(dir, ec)) {
+    if (!e.is_regular_file(ec)) continue;
+    const std::wstring ext = e.path().extension().wstring();
+    if (ext != L".xsh" && ext != L".xpso") continue;
+    const auto size = (unsigned long long)e.file_size(ec);
+    const auto mtime = (long long)e.last_write_time(ec).time_since_epoch().count();
+    const std::string name = Narrow(e.path().filename().c_str());
+    fp += name + ":" + std::to_string(size) + ":" + std::to_string(mtime) + ";";
+    summary += name + " " + std::to_string(size / 1024) + "KB, ";
+    total += size;
+  }
+  if (fp.empty() || total < 4096) return;
+  // Cheap 64-bit FNV-1a of the descriptor string.
+  unsigned long long h = 1469598103934665603ull;
+  for (unsigned char c : fp) { h ^= c; h *= 1099511628211ull; }
+  char hex[17];
+  std::snprintf(hex, sizeof(hex), "%016llx", h);
+  auto done = g_launcher_ini.find("shader_cache_shared_fp");
+  if (done != g_launcher_ini.end() && done->second == hex) return;
+  g_launcher_ini["shader_cache_shared_fp"] = hex;
+  WriteLauncherIni();
+
+  wchar_t tmp[MAX_PATH];
+  if (!GetTempPathW(MAX_PATH, tmp)) return;
+  const std::wstring script = std::wstring(tmp) + L"dp1_share_cache.ps1";
+  const std::wstring zip = std::wstring(tmp) + L"DPRecomp_shadercache_" + Widen(hex) + L".zip";
+  std::string content = "DPRecomp shader cache | launcher " + Narrow(kLauncherVersion) +
+                        " | " + summary + "total " + std::to_string(total / 1024) + " KB | fp " + hex;
+  std::string ps;
+  ps += "$ErrorActionPreference = 'Stop'\r\n";
+  ps += "$src = '" + Narrow(dir.wstring().c_str()) + "'\r\n";
+  ps += "$zip = '" + Narrow(zip.c_str()) + "'\r\n";
+  ps += "Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue\r\n";
+  ps += "Compress-Archive -Path (Join-Path $src '*.xsh'), (Join-Path $src '*.xpso') -DestinationPath $zip -Force\r\n";
+  ps += "$json = '{\"content\":\"" + content + "\"}'\r\n";
+  ps += "& curl.exe -s -S -f -F \"payload_json=$json\" -F \"file=@$zip\" '" +
+        Narrow(kShaderCacheWebhookUrl) + "' | Out-Null\r\n";
+  ps += "Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue\r\n";
+  {
+    std::ofstream f(script, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << ps;
+  }
+  std::wstring cmd = L"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" +
+                     script + L"\"";
+  STARTUPINFOW si{}; si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_HIDE;
+  PROCESS_INFORMATION pi{};
+  std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+  buf.push_back(L'\0');
+  if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                     nullptr, &si, &pi)) {
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+}
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   INITCOMMONCONTROLSEX icc = {sizeof(icc),
                               ICC_TAB_CLASSES | ICC_STANDARD_CLASSES |
@@ -2906,6 +3132,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   // their language choice survives the next SDK F4 SaveConfig wipe.
   SaveLauncherLanguageSidecar();
   EnsurePerfDefaultsInToml();
+  ApplySteamDeckPresetIfDetected();
+  MaybeShareShaderCache();
   // If %TEMP%\dp1_update.log exists, the previous auto-updater run did not
   // complete — offer the user the log for diagnostic. Runs BEFORE the main
   // window is created so the dialog is the first thing they see.

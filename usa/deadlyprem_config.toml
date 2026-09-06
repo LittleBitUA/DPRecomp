@@ -283,10 +283,10 @@ name = "DP60FpsVblankGateHook"
 jump_address_on_true = 0x8252A2B4
 
 [[midasm_hook]]
-address = 0x8252A310          # subf r8,r11,r10 -> li r8,1
-name = "DP60FpsDeltaHook"
-registers = ["r8"]
-after_instruction = true
+address = 0x8252A32C          # stfs f0,-11344(r24): f0 = logic tick (vblank delta) -> real frame time / 16.67 ms (v1.1, #12)
+name = "DP60FpsTickHook"
+registers = ["f0"]
+after_instruction = false
 
 # Jump tables (sp00nznet/360tools extract_switch_tables.py on the USA image, 2026-09-06): 9 tables.
 [[switch_tables]]
@@ -394,6 +394,21 @@ address = 0x82338A58          # sub_823387E8 (PAL 82338A38, fmadds)
 name = "DPCameraMouseHook"
 registers = ["r31"]
 
+# DP1 v1.1 (#11): aim camera sub_8233B3C0 (left-stick driven): mark the frame so the
+# MnK driver maps the mouse onto the left stick (see deadlyprem_camera_hook.cpp).
+[[midasm_hook]]
+address = 0x8233B62C          # lfs f0,128(r3) in the aim camera routine
+name = "DPCameraAimHook"
+after_instruction = false
+
+# DP1 v1.1 (#11): capture the camera anchor pointer for the direct yaw write
+# (walking camera: lfs f0,128(r3) = anchor yaw read, see deadlyprem_camera_hook.cpp).
+[[midasm_hook]]
+address = 0x8233AFD0
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
+
 [[midasm_hook]]
 address = 0x8233B054          # sub_8233A8D8 = walking camera (PAL 8233AB28, fnmsubs)
 name = "DPCameraMouseHookWalk"
@@ -423,6 +438,14 @@ registers = ["r31"]
 address = 0x8233A084          # sub_82339F00 (PAL 8233A150, fmadds)
 name = "DPCameraMouseHook"
 registers = ["r31"]
+
+# DP1 v1.1 (#11): capture the camera anchor pointer for the direct yaw write
+# (aim camera: lfs f0,128(r3) = anchor yaw read, see deadlyprem_camera_hook.cpp).
+[[midasm_hook]]
+address = 0x82339C6C
+name = "DPCameraAnchorHook"
+registers = ["r3"]
+after_instruction = false
 
 [[midasm_hook]]
 address = 0x82339D24          # sub_82339BA8 (PAL 82339DF8, left stick, fnmsubs)

@@ -8,8 +8,9 @@ use whichever feels better.
 
 MOVEMENT AND CAMERA
 -------------------
-  W A S D            Walk / Run (York always sprints at full speed)
-  Mouse              Look (right stick)
+  W A S D            Walk (hold Shift to run)
+  A > D > A > D      Tap alternately to shake the left stick (QTE "Get it off!")
+  Mouse              Look (camera hook); aims while Space is held
   Wheel Up / Down    Change weapon (D-pad up / down)
 
 INTERACTION
@@ -18,7 +19,7 @@ INTERACTION
   R                  Cancel / Reload / Close menu   (B button)
   C                  Observe                        (left stick press)
   F                  Flashlight ON / OFF            (Y button)
-  Shift              Cutscene-specific actions      (X button)
+  Shift              Hold: RUN / cutscene actions    (X button)
 
 COMBAT / WEAPONS
 ----------------

@@ -28,6 +28,7 @@ target_compile_options(${TGT} PRIVATE
 )
 
 target_link_libraries(${TGT} PRIVATE
+    dxgi
   gdiplus
   shlwapi
   comctl32
