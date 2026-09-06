@@ -1,0 +1,1203 @@
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index cd7693a..9eec523 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -750,6 +750,15 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   ID3D12PipelineState* resolve_rov_clear_32bpp_pipeline_ = nullptr;
+   // Clearing 64bpp color.
+   ID3D12PipelineState* resolve_rov_clear_64bpp_pipeline_ = nullptr;
++
++  // DP1 fix: value-clipping 7e3 -> 8888 in-place EDRAM conversion (uses the
++  // resolve EDRAM buffer clear root signature: root constants + uint4 UAV).
++  ID3D12PipelineState* rov_7e3_to_8888_pipeline_ = nullptr;
++  void PixelShaderInterlockReinterpret7e3To8888(uint32_t start_tiles,
++                                                uint32_t length_tiles) override;
++  // Records what a resolve clear writes for the 7e3 tracking.
++  void PixelShaderInterlockTrackClear(const draw_util::ResolveInfo& resolve_info, bool clear_depth,
++                                      bool clear_color);
+ };
+ 
+ }  // namespace rex::graphics::d3d12
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 2cf24c4..9dfd653 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -18,6 +18,10 @@ REXCVAR_DECLARE(bool, vsync);
+ REXCVAR_DECLARE(bool, clear_memory_page_state);
+ REXCVAR_DECLARE(bool, half_pixel_offset);
+ REXCVAR_DECLARE(bool, async_shader_compilation);
++// DP1 (2026-09-06, ported from the Downpour fork): what to do with a draw whose
++// PSO is still compiling on a background thread. Defined in d3d12/pipeline_cache.cpp.
++REXCVAR_DECLARE(std::string, pso_missing_policy);
++REXCVAR_DECLARE(double, d3d12_pso_block_per_draw_budget_ms);
+ 
+ // GPU Resolution / Readback / Queries
+ REXCVAR_DECLARE(int32_t, resolution_scale);
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 3bbd52e..0017c1b 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -548,6 +548,25 @@ class RenderTargetCache {
+   // EDRAM memory are committed with a memory barrier.
+   void PixelShaderInterlockFullEdramBarrierPlaced();
+ 
++  // DP1 fix (pixel shader interlock): value-clipping 7e3 -> 8888 EDRAM
++  // reinterpretation, the ROV counterpart of the host render target ownership
++  // transfer fix. The cache remembers which tiles were last written as
++  // k_2_10_10_10_FLOAT(_AS_16_16_16_16) color; when such tiles get bound as
++  // k_8_8_8_8(_GAMMA) color for drawing, the implementation is asked to
++  // convert their contents in place (unpack 7e3, saturate, pack UNORM8) before
++  // the draw, so pixels the draw leaves untouched (alpha test / src.a == 0
++  // blending) hold clipped LDR color instead of 7e3 bit patterns read as UNORM8.
++  // start_tiles + length_tiles never wrap past xenos::kEdramTileCount.
++  virtual void PixelShaderInterlockReinterpret7e3To8888(uint32_t start_tiles,
++                                                        uint32_t length_tiles) {}
++  // Records the format class of the color (or depth, for which is_color is
++  // false) data written to the tile range, and, if convert_if_7e3_to_8888 is
++  // true (drawing, as opposed to clearing), requests the reinterpretation of
++  // the sub-ranges that still hold 7e3 data when binding them as 8888.
++  void PixelShaderInterlockTrackTiles(uint32_t start_tiles, uint32_t length_tiles, bool is_color,
++                                      xenos::ColorRenderTargetFormat color_format,
++                                      bool convert_if_7e3_to_8888);
++
+  private:
+   const RegisterFile& register_file_;
+   uint32_t draw_resolution_scale_x_;
+@@ -661,6 +680,12 @@ class RenderTargetCache {
+   // changes to this throughout a frame are pretty rare.
+   std::map<uint32_t, OwnershipRange> ownership_ranges_;
+ 
++  // DP1 fix (pixel shader interlock): per-tile "last written as 7e3 color"
++  // flags, see PixelShaderInterlockTrackTiles. Independent of
++  // ownership_ranges_, which the interlock path resets on every full barrier
++  // and which doesn't carry the real color format there.
++  uint8_t interlock_tile_is_7e3_[xenos::kEdramTileCount] = {};
++
+   // Render targets actually used by the draw call with the last successful
+   // update. 0 is depth, color starting from 1, nullptr if not bound.
+   // Only valid for non-pixel-shader-interlock paths.
+diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
+index c8751b7..248d94b 100644
+--- a/include/rex/input/mnk/mnk_input_driver.h
++++ b/include/rex/input/mnk/mnk_input_driver.h
+@@ -24,6 +24,13 @@ namespace rex::input::mnk {
+ 
+ void SetMouseLookActive(bool active);
+ bool IsMouseLookActive();
++// DP1 2026-09-06: direct camera control. While active, mouse motion is NOT
++// mapped to the right stick; instead the app drains the raw deltas (pixels
++// since the last call) from a game-side hook and applies them to the camera
++// angles itself.
++void SetMouseCameraHookActive(bool active);
++bool IsMouseCameraHookActive();
++void TakeMouseCameraDelta(float& dx_out, float& dy_out);
+ 
+ class MnkInputDriver final : public InputDriver,
+                              public rex::ui::WindowInputListener,
+@@ -50,6 +57,8 @@ class MnkInputDriver final : public InputDriver,
+   void OnMouseDown(rex::ui::MouseEvent& e) override;
+   void OnMouseUp(rex::ui::MouseEvent& e) override;
+   void OnMouseMove(rex::ui::MouseEvent& e) override;
++  // DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.h)
++  void OnMouseWheel(rex::ui::MouseEvent& e) override;
+ 
+   // WindowListener
+   void OnClosing(rex::ui::UIEvent& e) override;
+@@ -82,6 +91,14 @@ class MnkInputDriver final : public InputDriver,
+   float mouse_dx_ = 0.0f;
+   float mouse_dy_ = 0.0f;
+ 
++  // DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.h)
++  // Vertical mouse-wheel accumulator (MouseEvent::kScrollPerDetent units,
++  // 120 per detent). Filled by OnMouseWheel on the UI thread, drained one
++  // detent per GetDeviceState poll on the guest thread (under state_mutex_),
++  // pulsing kWheelUp / kWheelDown for exactly one poll so the wheel can be
++  // bound to any controller button ("WheelUp" / "WheelDown").
++  int32_t wheel_accumulator_y_ = 0;
++
+   // UI thread only.
+   int32_t prev_mouse_x_ = 0;
+   int32_t prev_mouse_y_ = 0;
+diff --git a/include/rex/ui/overlay/debug_overlay.h b/include/rex/ui/overlay/debug_overlay.h
+index e15e410..c548be1 100644
+--- a/include/rex/ui/overlay/debug_overlay.h
++++ b/include/rex/ui/overlay/debug_overlay.h
+@@ -10,6 +10,7 @@
+  *              See LICENSE file in the project root for full license text.
+  */
+ #pragma once
++#include <string_view>
+ #include <rex/ui/imgui_dialog.h>
+ #include <array>
+ #include <cstdint>
+@@ -17,6 +18,10 @@
+ 
+ namespace rex::ui {
+ 
++// DP1 2026-09-06: lets the app replace the SDK build stamp watermark shown by the
++// debug overlay (F3) with its own build string. Empty = REXGLUE_BUILD_STAMP.
++void SetDebugOverlayBuildStamp(std::string_view stamp);
++
+ struct FrameStats {
+   double frame_time_ms = 0;
+   double fps = 0;
+diff --git a/include/rex/ui/virtual_key.h b/include/rex/ui/virtual_key.h
+index 3e1b948..a6286ce 100644
+--- a/include/rex/ui/virtual_key.h
++++ b/include/rex/ui/virtual_key.h
+@@ -42,6 +42,14 @@ enum class VirtualKey : uint16_t {
+   kBack = 0x08,  // Backspace.
+   kTab = 0x09,
+ 
++  // DP1 port 2026-09-05 (from dpour fork ce7d25d, include/rex/ui/virtual_key.h)
++  // Synthetic pulse keys used by MnK to expose vertical mouse-wheel scroll
++  // as bindable buttons (one logical "press" per WHEEL_DELTA detent of 120).
++  // These never come from real keyboard events; 0x0A/0x0B are unassigned in
++  // the Win32 VK table.
++  kWheelUp = 0x0A,
++  kWheelDown = 0x0B,
++
+   kClear = 0x0C,
+   kReturn = 0x0D,  // Enter.
+ 
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..81706d6 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
++#include <thread>
+ #include <cstdarg>
+ #include <cstring>
+ #include <sstream>
+@@ -2400,7 +2402,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   if (REXCVAR_GET(async_shader_compilation) &&
+       pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
+-    return true;
++    // DP1 2026-09-06 (ported from the Downpour SDK fork): the PSO is still
++    // compiling on a background thread. pso_missing_policy=block spin-waits
++    // up to d3d12_pso_block_per_draw_budget_ms for it, so fast compiles never
++    // drop geometry; on timeout (or with policy=skip) the draw is dropped for
++    // this frame only.
++    if (REXCVAR_GET(pso_missing_policy) == "block") {
++      const auto budget = std::chrono::microseconds(
++          static_cast<int64_t>(REXCVAR_GET(d3d12_pso_block_per_draw_budget_ms) * 1000.0));
++      const auto wait_start = std::chrono::steady_clock::now();
++      while (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
++        std::this_thread::sleep_for(std::chrono::microseconds(50));
++        if (std::chrono::steady_clock::now() - wait_start > budget) {
++          return true;
++        }
++      }
++      // Fall through with the now-ready PSO.
++    } else {
++      return true;
++    }
+   }
+ 
+   // Update the textures - this may bind pipelines.
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index 8e6b854..d2da86a 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -59,6 +59,27 @@ REXCVAR_DEFINE_INT32(d3d12_pipeline_creation_threads, -1, "GPU/D3D12",
+     .range(-1, 32)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// DP1 2026-09-06: ported from the Downpour SDK fork (pipeline_cache.cpp there).
++// Behavior when a draw call's PSO is still being compiled on a background
++// thread: 'skip' (draw dropped, geometry invisible this frame = pop-in),
++// 'block' (render thread waits up to d3d12_pso_block_per_draw_budget_ms for
++// that PSO, geometry never lost for fast compiles), 'sync' (no async compile
++// at all, every miss compiles inline on the render thread).
++REXCVAR_DEFINE_STRING(pso_missing_policy, "block", "GPU",
++                      "PSO still compiling: skip (drop draw), block (wait per draw, budgeted), "
++                      "sync (compile inline)")
++    .allowed({"skip", "block", "sync"})
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_DOUBLE(d3d12_pso_block_per_draw_budget_ms, 8.0, "GPU/D3D12",
++                      "Per-draw wait budget (ms) when pso_missing_policy=block; on timeout the "
++                      "draw is skipped for this frame")
++    .range(0.5, 500.0)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(d3d12_pso_no_block_at_submission_end, true, "GPU/D3D12",
++                    "Do not stall the render thread at frame end waiting for in-flight "
++                    "background PSO compiles (they roll over to later frames)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(d3d12_tessellation_wireframe, false, "GPU/D3D12",
+                     "Render tessellation as wireframe");
+ 
+@@ -771,7 +792,10 @@ void PipelineCache::EndSubmission() {
+       // Assuming the creation queue is already empty (because the processor
+       // thread also worked on creating the leftover pipelines), so only check
+       // if there are threads with pipelines currently being created.
+-      await_creation_completion_event = creation_threads_busy_ != 0;
++      await_creation_completion_event = 
++          // DP1: with d3d12_pso_no_block_at_submission_end the frame submits
++          // immediately and pending PSOs are picked up by later frames.
++          !REXCVAR_GET(d3d12_pso_no_block_at_submission_end) && creation_threads_busy_ != 0;
+       if (await_creation_completion_event) {
+         creation_completion_event_->Reset();
+         creation_completion_set_event_ = true;
+@@ -910,7 +934,9 @@ bool PipelineCache::ConfigurePipeline(
+   assert_not_null(root_signature_out);
+ 
+   bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
+-                   pixel_shader != nullptr;
++                   pixel_shader != nullptr &&
++                   // DP1: pso_missing_policy=sync forces inline compiles.
++                   REXCVAR_GET(pso_missing_policy) != "sync";
+ 
+   // Ensure shaders are translated - needed now for GetCurrentStateDescription.
+   // Edge flags are not supported yet (because polygon primitives are not).
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index dd321a5..4e3076c 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -79,6 +79,9 @@ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_scaled_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_scaled_cs.h"
++// DP1 fix (ROV 7e3 -> 8888), built with fxc from
++// ../shaders/edram_7e3_to_8888_cs.hlsl.
++#include "../shaders/bytecode/d3d12_5_1/edram_7e3_to_8888_cs.h"
+ }  // namespace shaders
+ 
+ const D3D12RenderTargetCache::ResolveCopyShaderCode
+@@ -948,6 +951,19 @@ bool D3D12RenderTargetCache::Initialize() {
+       return false;
+     }
+     resolve_rov_clear_64bpp_pipeline_->SetName(L"Resolve Clear 64bpp");
++
++    // DP1 fix: 7e3 -> 8888 in-place EDRAM conversion pipeline.
++    rov_7e3_to_8888_pipeline_ = ui::d3d12::util::CreateComputePipeline(
++        device, shaders::edram_7e3_to_8888_cs, sizeof(shaders::edram_7e3_to_8888_cs),
++        resolve_rov_clear_root_signature_);
++    if (rov_7e3_to_8888_pipeline_ == nullptr) {
++      REXGPU_ERROR(
++          "D3D12RenderTargetCache: Failed to create the EDRAM 7e3 -> 8888 "
++          "conversion pipeline");
++      Shutdown();
++      return false;
++    }
++    rov_7e3_to_8888_pipeline_->SetName(L"EDRAM 7e3 to 8888");
+   } else {
+     assert_unhandled_case(path_);
+     Shutdown();
+@@ -960,6 +976,7 @@ bool D3D12RenderTargetCache::Initialize() {
+ }
+ 
+ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
++  ui::d3d12::util::ReleaseAndNull(rov_7e3_to_8888_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_64bpp_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_32bpp_pipeline_);
+   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_root_signature_);
+@@ -1370,6 +1387,9 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+           // instance), overlap of the depth and the color ranges is highly
+           // unlikely.
+           CommitEdramBufferUAVWrites();
++          // DP1 fix: the clear overwrites the tiles - record their new format
++          // class (no conversion needed).
++          PixelShaderInterlockTrackClear(resolve_info, clear_depth, clear_color);
+           command_list.D3DSetComputeRootSignature(resolve_rov_clear_root_signature_);
+           command_list.D3DSetComputeRootDescriptorTable(1, descriptor_edram.second);
+           std::pair<uint32_t, uint32_t> clear_group_count = resolve_info.GetClearShaderGroupCount(
+@@ -1716,6 +1736,71 @@ void D3D12RenderTargetCache::RequestPixelShaderInterlockBarrier() {
+   CommitEdramBufferUAVWrites();
+ }
+ 
++void D3D12RenderTargetCache::PixelShaderInterlockReinterpret7e3To8888(uint32_t start_tiles,
++                                                                      uint32_t length_tiles) {
++  // DP1 fix: see RenderTargetCache::PixelShaderInterlockTrackTiles.
++  assert_true(GetPath() == Path::kPixelShaderInterlock);
++  if (!rov_7e3_to_8888_pipeline_ || !length_tiles ||
++      start_tiles + length_tiles > xenos::kEdramTileCount) {
++    return;
++  }
++  ui::d3d12::util::DescriptorCpuGpuHandlePair descriptor_edram;
++  if (bindless_resources_used_) {
++    descriptor_edram = command_processor_.GetSystemBindlessViewHandlePair(
++        D3D12CommandProcessor::SystemBindlessView::kEdramR32G32B32A32UintUAV);
++  } else {
++    if (!command_processor_.RequestOneUseSingleViewDescriptors(1, &descriptor_edram)) {
++      return;
++    }
++    WriteEdramUintPow2UAVDescriptor(descriptor_edram.first, 4);
++  }
++  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
++  TransitionEdramBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++  // All preceding interlocked (and UAV) writes must be visible to the
++  // conversion, which reads and writes the same dwords.
++  CommitEdramBufferUAVWrites();
++  // 32bpp tiles are contiguous kEdramTileWidthSamples * kEdramTileHeightSamples
++  // * resolution scale dwords in the ROV EDRAM buffer (see
++  // edram_32bpp_tile_pitch_dwords_scaled), and the shader works on uint4s.
++  uint32_t tile_uint4s = xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples *
++                         (draw_resolution_scale_x() * draw_resolution_scale_y()) / 4;
++  uint32_t constants[2] = {start_tiles * tile_uint4s, length_tiles * tile_uint4s};
++  command_list.D3DSetComputeRootSignature(resolve_rov_clear_root_signature_);
++  command_list.D3DSetComputeRoot32BitConstants(0, uint32_t(rex::countof(constants)), constants,
++                                               0);
++  command_list.D3DSetComputeRootDescriptorTable(1, descriptor_edram.second);
++  command_processor_.SetExternalPipeline(rov_7e3_to_8888_pipeline_);
++  command_processor_.SubmitBarriers();
++  // 64 threads x 4 uint4s per group - keep in sync with the shader.
++  constexpr uint32_t kUint4sPerGroup = 64 * 4;
++  command_list.D3DDispatch((constants[1] + kUint4sPerGroup - 1) / kUint4sPerGroup, 1, 1);
++  // The draw that follows must wait for the conversion.
++  MarkEdramBufferModified(EdramBufferModificationStatus::kAsUAV);
++}
++
++void D3D12RenderTargetCache::PixelShaderInterlockTrackClear(
++    const draw_util::ResolveInfo& resolve_info, bool clear_depth, bool clear_color) {
++  // DP1 fix: mark the cleared tiles (row by row - the resolve area is a
++  // rectangle within the pitch) with the format class of the clear.
++  for (uint32_t i = 0; i < 2; ++i) {
++    bool is_color = i != 0;
++    if (is_color ? !clear_color : !clear_depth) {
++      continue;
++    }
++    const draw_util::ResolveEdramInfo& edram_info =
++        is_color ? resolve_info.color_edram_info : resolve_info.depth_edram_info;
++    uint32_t base_tiles, row_length_used_tiles, rows;
++    draw_util::GetResolveEdramTileSpan(edram_info, resolve_info.coordinate_info,
++                                       resolve_info.height_div_8, base_tiles,
++                                       row_length_used_tiles, rows);
++    for (uint32_t row = 0; row < rows; ++row) {
++      PixelShaderInterlockTrackTiles(base_tiles + row * edram_info.pitch_tiles,
++                                     row_length_used_tiles, is_color,
++                                     xenos::ColorRenderTargetFormat(edram_info.format), false);
++    }
++  }
++}
++
+ void D3D12RenderTargetCache::TransitionEdramBuffer(D3D12_RESOURCE_STATES new_state) {
+   if (command_processor_.PushTransitionBarrier(edram_buffer_, edram_buffer_state_, new_state)) {
+     // Resetting edram_buffer_modification_status_ only if the barrier has been
+@@ -3126,6 +3211,20 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
+                       dest_color_format ==
+                           xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16)) {
+             a.OpMov(dxbc::Dest::O(0), dxbc::Src::R(1));
++          } else if (dest_is_color &&
++                     (dest_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
++                      dest_color_format ==
++                          xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
++            // DP1 fix (LittleBitUA, 2026-06-20, re-applied on nightly 0c7b01a
++            // 2026-09-05): HDR 7e3 -> 8888 ownership transfer with
++            // value-clipping instead of bit-preservation. Bit-preserving is
++            // Xenos-faithful, but the raw 7e3 bits unpacked as UNORM8 leak
++            // through later tonemap + alpha-blend passes wherever src.a == 0
++            // (alpha-tested hair, foliage, statue billboards in Deadly
++            // Premonition) as rainbow speckles. Saturating the HDR floats to
++            // [0, 1] and writing them as UNORM8 leaves clipped-HDR residue at
++            // those pixels, visually indistinguishable from the tonemap output.
++            a.OpMov(dxbc::Dest::O(0), dxbc::Src::R(1), true);
+           } else {
+             color_packed_in_r1x = true;
+             // Float16 has a wider range for both color and alpha, also NaNs -
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 953c5fd..82740ec 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -341,6 +341,7 @@ void RenderTargetCache::InitializeCommon() {
+ }
+ 
+ void RenderTargetCache::DestroyAllRenderTargets(bool shutting_down) {
++  std::memset(interlock_tile_is_7e3_, 0, sizeof(interlock_tile_is_7e3_));
+   ownership_ranges_.clear();
+   if (!shutting_down) {
+     ownership_ranges_.emplace(std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
+@@ -457,6 +458,9 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+   // depth_and_color_rts_used_bits -> EDRAM base.
+   uint32_t edram_bases[1 + xenos::kMaxColorRenderTargets];
+   uint32_t resource_formats[1 + xenos::kMaxColorRenderTargets];
++  // DP1 fix (pixel shader interlock): the real guest color formats, as
++  // resource_formats only carries the pixel size on the interlock path.
++  xenos::ColorRenderTargetFormat guest_color_formats[1 + xenos::kMaxColorRenderTargets] = {};
+   uint32_t rts_are_64bpp = 0;
+   if (is_rasterization_done) {
+     if (normalized_depth_control.z_enable || normalized_depth_control.stencil_enable) {
+@@ -477,6 +481,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+       edram_bases[rt_bit_index] = color_info.color_base;
+       xenos::ColorRenderTargetFormat color_format =
+           regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]).color_format;
++      guest_color_formats[rt_bit_index] = color_format;
+       bool is_64bpp = xenos::IsColorRenderTargetFormat64bpp(color_format);
+       if (is_64bpp) {
+         rts_are_64bpp |= uint32_t(1) << rt_bit_index;
+@@ -676,6 +681,17 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     if (interlock_barrier_needed) {
+       RequestPixelShaderInterlockBarrier();
+     }
++    // DP1 fix: convert tiles still holding 7e3 color that are now bound as
++    // 8888 color, and record what this draw is going to write. Done after the
++    // barrier request (the conversion itself commits all preceding interlocked
++    // writes anyway) and before ChangeOwnership, since a full barrier placed by
++    // the implementation resets the ownership map.
++    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
++      const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
++      uint32_t rt_bit_index = rt_base_index.second;
++      PixelShaderInterlockTrackTiles(rt_base_index.first, rt_lengths_tiles[i], rt_bit_index != 0,
++                                     guest_color_formats[rt_bit_index], true);
++    }
+   }
+ 
+   // From now on ownership transfers should succeed for simplicity and
+@@ -1144,6 +1160,50 @@ void RenderTargetCache::PixelShaderInterlockFullEdramBarrierPlaced() {
+   ownership_ranges_.emplace(0, empty_range);
+ }
+ 
++void RenderTargetCache::PixelShaderInterlockTrackTiles(uint32_t start_tiles, uint32_t length_tiles,
++                                                       bool is_color,
++                                                       xenos::ColorRenderTargetFormat color_format,
++                                                       bool convert_if_7e3_to_8888) {
++  assert_true(GetPath() == Path::kPixelShaderInterlock);
++  if (!length_tiles) {
++    return;
++  }
++  length_tiles = std::min(length_tiles, xenos::kEdramTileCount);
++  start_tiles &= xenos::kEdramTileCount - 1;
++  bool is_7e3 =
++      is_color && (color_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
++                   color_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16);
++  bool is_8888 = is_color && (color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
++                              color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA);
++  // The range may wrap around the end of the EDRAM - handle it as up to two
++  // non-wrapping segments.
++  auto track_segment = [&](uint32_t segment_start, uint32_t segment_end) {
++    if (is_8888 && convert_if_7e3_to_8888) {
++      uint32_t run_start = segment_start;
++      bool in_run = false;
++      for (uint32_t tile = segment_start; tile <= segment_end; ++tile) {
++        bool tile_is_7e3 = tile < segment_end && interlock_tile_is_7e3_[tile] != 0;
++        if (tile_is_7e3) {
++          if (!in_run) {
++            in_run = true;
++            run_start = tile;
++          }
++        } else if (in_run) {
++          in_run = false;
++          PixelShaderInterlockReinterpret7e3To8888(run_start, tile - run_start);
++        }
++      }
++    }
++    std::memset(interlock_tile_is_7e3_ + segment_start, is_7e3 ? 1 : 0,
++                segment_end - segment_start);
++  };
++  uint32_t end_tiles = start_tiles + length_tiles;
++  track_segment(start_tiles, std::min(end_tiles, xenos::kEdramTileCount));
++  if (end_tiles > xenos::kEdramTileCount) {
++    track_segment(0, end_tiles - xenos::kEdramTileCount);
++  }
++}
++
+ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(RenderTargetKey key) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
+   auto it_rt = render_targets_.find(key);
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+index 31de175..6775922 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp
+@@ -10,6 +10,9 @@
+  */
+ 
+ #include <algorithm>
++#include <cstdlib>
++#include <string>
++#include <vector>
+ #include <cmath>
+ #include <memory>
+ #include <sstream>
+@@ -26,6 +29,52 @@
+ 
+ REXCVAR_DEFINE_BOOL(draw_resolution_scaled_texture_offsets, true, "GPU/Shader",
+                     "Scale texture offsets with draw resolution");
++// DP1 2026-09-06: at draw resolution scale > 1, screen-space post-process
++// passes (bloom / DoF blurs) keep their tap spacing in guest texels, so every
++// bilinear tap lands on a single host texel and the texels in between are
++// skipped - a regular grid appears on hair, foliage and glow (Deadly
++// Premonition). Shifting the coordinates of resolution-scaled (resolved)
++// textures by half a host texel turns each tap into an exact 2x2 host-texel
++// box average, i.e. the pass sees the same image it saw at 1x.
++REXCVAR_DEFINE_BOOL(gpu_resolved_texture_box_filter, false, "GPU/Shader",
++                    "Sample resolution-scaled render-target textures with a 2x2 host-texel box "
++                    "(half-texel shift) so guest-texel-spaced post-process taps do not alias")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// Applying the shift to every resolved-texture fetch also turns the final 1:1
++// scene copy into a 2x2 average (the whole frame drops to 1x), so it is
++// limited to the listed pixel shaders (ucode hashes, hex, comma-separated).
++// Default (Deadly Premonition): 17-tap separable blur 2124BC7D, 2x2 box
++// downsample 46331D61, 4-tap shadow PCF FA55491D. NOT the 3-tap full-screen
++// passes (FF5A2E8B chromatic split, 1530E2EB) - those run 1:1 and would soften
++// the whole frame.
++REXCVAR_DEFINE_STRING(gpu_resolved_texture_box_filter_shaders,
++                      "2124BC7DB86884DF,46331D613EE9AA78,FA55491D7925E74A,1530E2EB5CFF039B,FF5A2E8BBD6623F6",
++                      "GPU/Shader",
++                      "Pixel shader ucode hashes (hex, comma-separated) that get the resolved "
++                      "texture 2x2 box shift")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++namespace {
++bool IsBoxFilterShader(uint64_t ucode_hash) {
++  static const std::vector<uint64_t> hashes = [] {
++    std::vector<uint64_t> result;
++    const std::string& list = REXCVAR_GET(gpu_resolved_texture_box_filter_shaders);
++    size_t pos = 0;
++    while (pos < list.size()) {
++      size_t end = list.find_first_of(", ;", pos);
++      if (end == std::string::npos) {
++        end = list.size();
++      }
++      if (end > pos) {
++        result.push_back(std::strtoull(list.substr(pos, end - pos).c_str(), nullptr, 16));
++      }
++      pos = end + 1;
++    }
++    return result;
++  }();
++  return std::find(hashes.begin(), hashes.end(), ucode_hash) != hashes.end();
++}
++}  // namespace
+ 
+ namespace rex::graphics {
+ using namespace ucode;
+@@ -834,6 +883,18 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
+     // the texture is 3D unconditionally.
+     size_needed_components |= 0b1000;
+   }
++  // DP1: 2x2 host-texel box shift for resolution-scaled textures (see the
++  // gpu_resolved_texture_box_filter cvar) - needs the texture size.
++  const bool resolved_box_shift =
++      REXCVAR_GET(gpu_resolved_texture_box_filter) && is_pixel_shader() &&
++      IsBoxFilterShader(current_shader().ucode_data_hash()) &&
++      instr.opcode == FetchOpcode::kTextureFetch &&
++      instr.dimension == xenos::FetchOpDimension::k2D &&
++      !instr.attributes.unnormalized_coordinates &&
++      (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1);
++  if (resolved_box_shift) {
++    size_needed_components |= 0b0011;
++  }
+   uint32_t size_and_is_3d_temp = size_needed_components ? PushSystemTemp() : UINT32_MAX;
+   if (size_needed_components) {
+     switch (instr.dimension) {
+@@ -1145,6 +1206,25 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
+         }
+       }
+     }
++    if (resolved_box_shift) {
++      // DP1: if this fetch slot is a resolution-scaled texture, shift the
++      // normalized XY by half a HOST texel (= 0.5 / (guest size * scale)).
++      uint32_t shift_temp = PushSystemTemp();
++      a_.OpAnd(dxbc::Dest::R(shift_temp, 0b1000),
++               LoadSystemConstant(SystemConstants::Index::kTexturesResolutionScaled,
++                                  offsetof(SystemConstants, textures_resolution_scaled),
++                                  dxbc::Src::kXXXX),
++               dxbc::Src::LU(uint32_t(1) << tfetch_index));
++      a_.OpIf(true, dxbc::Src::R(shift_temp, dxbc::Src::kWWWW));
++      a_.OpDiv(dxbc::Dest::R(shift_temp, 0b0011),
++               dxbc::Src::LF(0.5f / float(draw_resolution_scale_x_),
++                             0.5f / float(draw_resolution_scale_y_), 0.0f, 0.0f),
++               dxbc::Src::R(size_and_is_3d_temp));
++      a_.OpAdd(dxbc::Dest::R(coord_and_sampler_temp, 0b0011),
++               dxbc::Src::R(coord_and_sampler_temp), dxbc::Src::R(shift_temp));
++      a_.OpEndIf();
++      PopSystemTemp();
++    }
+     switch (instr.dimension) {
+       case xenos::FetchOpDimension::k1D:
+         // Pad to 2D array coordinates.
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..18f0702 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -10,6 +10,9 @@
+  */
+ 
+ #include <algorithm>
++#include <array>
++#include <mutex>
++#include <vector>
+ #include <cstdint>
+ #include <utility>
+ 
+@@ -246,6 +249,8 @@ bool TextureCache::GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out
+   uint32_t clamped_y = std::min(kMaxDrawResolutionScaleAlongAxis, config_y);
+   x_out = clamped_x;
+   y_out = clamped_y;
++  REXGPU_INFO("Draw resolution scale: {}x{} (resolution_scale cvar {}, config {}x{})", clamped_x,
++              clamped_y, REXCVAR_GET(resolution_scale), config_x, config_y);
+   return clamped_x == config_x && clamped_y == config_y;
+ }
+ 
+@@ -914,11 +919,28 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
+       if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
+         break;
+       }
++      {
++        // DP1 (2026-09-06): Deadly Premonition binds the same three "invalid"
++        // fetch constants every frame, flooding the log at 3 lines per frame.
++        // Report each distinct constant once (small bounded set).
++        static std::mutex reported_mutex;
++        static std::vector<std::array<uint32_t, 6>> reported;
++        std::array<uint32_t, 6> words = {fetch.dword_0, fetch.dword_1, fetch.dword_2,
++                                         fetch.dword_3, fetch.dword_4, fetch.dword_5};
++        std::lock_guard<std::mutex> lock(reported_mutex);
++        if (std::find(reported.begin(), reported.end(), words) != reported.end()) {
++          return;
++        }
++        if (reported.size() < 64) {
++          reported.push_back(words);
++        }
++      }
+       REXGPU_WARN(
+           "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) "
+           "has \"invalid\" type! This is incorrect behavior, but you can try "
+           "bypassing this by launching Xenia with "
+-          "--gpu_allow_invalid_fetch_constants=true.",
++          "--gpu_allow_invalid_fetch_constants=true. (Reported once per distinct "
++          "constant.)",
+           fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5);
+       return;
+     default:
+diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
+index 3f9422d..56ad464 100644
+--- a/src/input/mnk/mnk_input_driver.cpp
++++ b/src/input/mnk/mnk_input_driver.cpp
+@@ -29,6 +29,21 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
+                     "from the keybind_rstick_* keys only");
+ REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
+     .range(0.01, 10.0);
++// DP1 2026-09-06 (ported from the Downpour SDK fork, mnk_input_driver.cpp
++// "raw path"): mouse deltas map to right-stick deflection DIRECTLY, with a
++// floor above the game's inner right-stick deadzone. The stock mapping
++// (delta * sensitivity * 200) produced 200-600 for ordinary 1-3 px moves,
++// which the game discards below its ~8689 deadzone - that read as "slow,
++// dead mouse that only reacts to flicks" in Deadly Premonition (and Downpour).
++REXCVAR_DEFINE_DOUBLE(mnk_stick_scale, 300.0, "Input",
++                      "Right-stick units per mouse pixel (per poll) on top of the deadzone floor; "
++                      "multiplied by mnk_sensitivity")
++    .range(10.0, 5000.0);
++REXCVAR_DEFINE_INT32(mnk_deadzone_floor, 8689, "Input",
++                     "Minimum right-stick deflection for any nonzero mouse motion (XInput "
++                     "canonical inner deadzone is 8689; 0 = no floor)")
++    .range(0, 32767);
++REXCVAR_DEFINE_BOOL(mnk_invert_y, false, "Input", "Invert mouse Y for the right stick");
+ 
+ REXCVAR_DEFINE_STRING(keybind_a, "Semicolon,Space", "Input/Keybinds/Controller", "A button");
+ REXCVAR_DEFINE_STRING(keybind_b, "Quote,Backspace", "Input/Keybinds/Controller", "B button");
+@@ -71,6 +86,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
+ // it. That is what lets the D-pad share the arrow keys. A consequence is
+ // that binding a bare modifier name ("Shift") can never fire, since holding it
+ // makes the live mask non-zero while the bind wants zero.
++//
++// DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.cpp): inside
++// one alternative, '+' may also join several non-modifier keys into an AND
++// combo, "Space+LMB" or "Shift+Space+LMB". Every listed key has to be down and
++// the modifier mask still has to match exactly, so all pre-existing bind
++// strings keep their meaning. "WheelUp" / "WheelDown" are ordinary key names
++// here; the driver pulses them for one poll per scroll detent.
+ constexpr uint8_t kModShift = 1u << 0;
+ constexpr uint8_t kModCtrl = 1u << 1;
+ constexpr uint8_t kModAlt = 1u << 2;
+@@ -86,30 +108,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
+   return mods;
+ }
+ 
+-// Strips leading modifier prefixes off 'token', advancing it to the bare key
+-// name and returning the mask they require.
+-uint8_t TakeModifiers(std::string_view& token) {
+-  uint8_t mods = 0;
+-  for (;;) {
+-    size_t plus = token.find('+');
+-    if (plus == std::string_view::npos || plus == 0) {
+-      break;
+-    }
+-    std::string_view head = token.substr(0, plus);
+-    uint8_t bit = 0;
+-    if (head == "Shift") {
+-      bit = kModShift;
+-    } else if (head == "Ctrl" || head == "Control") {
+-      bit = kModCtrl;
+-    } else if (head == "Alt") {
+-      bit = kModAlt;
+-    } else {
+-      break;
+-    }
+-    mods |= bit;
+-    token.remove_prefix(plus + 1);
++// Modifier mask bit for a modifier token name, or 0 for anything else.
++uint8_t ModifierBit(std::string_view token) {
++  if (token == "Shift") {
++    return kModShift;
+   }
+-  return mods;
++  if (token == "Ctrl" || token == "Control") {
++    return kModCtrl;
++  }
++  if (token == "Alt") {
++    return kModAlt;
++  }
++  return 0;
+ }
+ 
+ std::string_view TrimSpaces(std::string_view s) {
+@@ -122,17 +132,41 @@ std::string_view TrimSpaces(std::string_view s) {
+   return s;
+ }
+ 
+-bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t live_mods) {
+-  uint8_t want = TakeModifiers(token);
+-  if (want != live_mods) {
+-    return false;
+-  }
+-  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(token);
+-  if (vk == rex::ui::VirtualKey::kNone) {
+-    return false;
++// DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.cpp):
++// evaluates one comma-separated alternative. Its '+'-separated tokens are
++// either modifier names, which build the required modifier mask, or key names,
++// all of which must be down. A group without any key name (a bare "Shift")
++// never fires, matching the previous behaviour.
++bool GroupPressed(const bool (&key_down)[256], std::string_view group, uint8_t live_mods) {
++  uint8_t want = 0;
++  bool any_key = false;
++  while (!group.empty()) {
++    size_t plus = group.find('+');
++    std::string_view token = TrimSpaces(group.substr(0, plus));
++    if (plus == std::string_view::npos) {
++      group = std::string_view();
++    } else {
++      group.remove_prefix(plus + 1);
++    }
++    if (token.empty()) {
++      continue;
++    }
++    uint8_t bit = ModifierBit(token);
++    if (bit) {
++      want |= bit;
++      continue;
++    }
++    rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(token);
++    if (vk == rex::ui::VirtualKey::kNone) {
++      return false;
++    }
++    uint16_t idx = static_cast<uint16_t>(vk);
++    if (!(idx < 256 && key_down[idx])) {
++      return false;
++    }
++    any_key = true;
+   }
+-  uint16_t idx = static_cast<uint16_t>(vk);
+-  return idx < 256 && key_down[idx];
++  return any_key && want == live_mods;
+ }
+ 
+ std::atomic<bool> mouse_look_active{true};
+@@ -147,6 +181,24 @@ bool IsMouseLookActive() {
+   return mouse_look_active.load(std::memory_order_relaxed);
+ }
+ 
++// DP1: camera hook state + raw delta accumulator (see the header).
++std::atomic<bool> mouse_camera_hook_active{false};
++std::atomic<float> mouse_camera_dx{0.0f};
++std::atomic<float> mouse_camera_dy{0.0f};
++
++void SetMouseCameraHookActive(bool active) {
++  mouse_camera_hook_active.store(active, std::memory_order_relaxed);
++}
++
++bool IsMouseCameraHookActive() {
++  return mouse_camera_hook_active.load(std::memory_order_relaxed);
++}
++
++void TakeMouseCameraDelta(float& dx_out, float& dy_out) {
++  dx_out = mouse_camera_dx.exchange(0.0f, std::memory_order_relaxed);
++  dy_out = mouse_camera_dy.exchange(0.0f, std::memory_order_relaxed);
++}
++
+ using rex::ui::VirtualKey;
+ 
+ MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order)
+@@ -212,7 +264,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+       rest.remove_prefix(comma + 1);
+     }
+     token = TrimSpaces(token);
+-    if (!token.empty() && TokenPressed(key_down, token, live_mods)) {
++    // DP1 port 2026-09-05: each alternative may be an AND combo now.
++    if (!token.empty() && GroupPressed(key_down, token, live_mods)) {
+       return true;
+     }
+   }
+@@ -222,8 +275,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+ void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+   // Disabled means no device at all, so it never occupies a guest user slot.
+   if (!IsEnabled()) {
++    static bool warned_disabled = false;
++    if (!warned_disabled) {
++      warned_disabled = true;
++      REXLOG_INFO("MnK: mnk_mode is false - keyboard/mouse device NOT enumerated");
++    }
+     return;
+   }
++  static bool logged_enabled = false;
++  if (!logged_enabled) {
++    logged_enabled = true;
++    REXLOG_INFO("MnK: keyboard/mouse device enumerated (mnk_mode=true, mnk_mouse={})", REXCVAR_GET(mnk_mouse));
++  }
+   DeviceInfo info;
+   info.id = kMnkDevice;
+   info.name = "Keyboard and Mouse";
+@@ -269,11 +332,32 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+       std::memset(out_state, 0, sizeof(*out_state));
+       out_state->packet_number = packet_number_;
+     }
++    // DP1 port 2026-09-05: drop scroll gathered while the device was not the
++    // active one, or it would replay as a burst of presses on reactivation.
++    std::lock_guard lock(state_mutex_);
++    wheel_accumulator_y_ = 0;
+     return X_ERROR_SUCCESS;
+   }
+ 
+   std::lock_guard lock(state_mutex_);
+ 
++  // DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.cpp):
++  // drain one mouse-wheel detent per poll and pulse the synthetic kWheelUp /
++  // kWheelDown keys for exactly this poll, so binds referencing "WheelUp" /
++  // "WheelDown" register as one button press per scroll detent.
++  constexpr int32_t kWheelDetent = int32_t(rex::ui::MouseEvent::kScrollPerDetent);
++  bool wheel_up_pulse = false;
++  bool wheel_down_pulse = false;
++  if (wheel_accumulator_y_ >= kWheelDetent) {
++    wheel_accumulator_y_ -= kWheelDetent;
++    wheel_up_pulse = true;
++  } else if (wheel_accumulator_y_ <= -kWheelDetent) {
++    wheel_accumulator_y_ += kWheelDetent;
++    wheel_down_pulse = true;
++  }
++  key_down_[static_cast<uint16_t>(VirtualKey::kWheelUp)] = wheel_up_pulse;
++  key_down_[static_cast<uint16_t>(VirtualKey::kWheelDown)] = wheel_down_pulse;
++
+   uint16_t buttons = 0;
+   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
+     buttons |= X_INPUT_GAMEPAD_A;
+@@ -331,11 +415,24 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
+     ry -= INT16_MAX;
+ 
+-  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
+-    double sensitivity = REXCVAR_GET(mnk_sensitivity);
+-    constexpr double kBaseScale = 200.0;
+-    rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);
+-    ry += static_cast<int32_t>(double(-mouse_dy_) * sensitivity * kBaseScale);
++  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive() && !IsMouseCameraHookActive()) {
++    // DP1 (rev. 2, 2026-09-06): VECTOR mapping. The deadzone floor is added to
++    // the length of the mouse motion vector, not per axis - a per-axis floor
++    // turned every small move into a 45-degree diagonal ("crooked"). The
++    // direction of the mouse motion is preserved exactly; only the magnitude
++    // is remapped: stick length = floor + delta length * sensitivity * scale.
++    // Motion this poll = deflection this poll; no motion = instant zero.
++    const double dx = double(mouse_dx_);
++    // Stick Y is up-positive, screen Y is down-positive.
++    const double dy = REXCVAR_GET(mnk_invert_y) ? double(mouse_dy_) : -double(mouse_dy_);
++    const double len = std::sqrt(dx * dx + dy * dy);
++    if (len > 0.0) {
++      const double gain = REXCVAR_GET(mnk_sensitivity) * REXCVAR_GET(mnk_stick_scale);
++      const double floor = double(std::clamp(REXCVAR_GET(mnk_deadzone_floor), 0, 32767));
++      const double out_len = std::min(floor + len * gain, double(INT16_MAX));
++      rx += static_cast<int32_t>(std::lround(dx / len * out_len));
++      ry += static_cast<int32_t>(std::lround(dy / len * out_len));
++    }
+   }
+   // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
+   // mouse is off, and toggling it on would otherwise dump the whole backlog
+@@ -481,10 +578,17 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
+ }
+ 
+ void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
+-  if (!IsEnabled() || !has_focus_)
++  if (!IsEnabled() || !has_focus_) {
++    static bool warned_gate = false;
++    if (!warned_gate) {
++      warned_gate = true;
++      REXLOG_INFO("MnK: key event dropped (enabled={}, has_focus={})", IsEnabled(), has_focus_.load());
++    }
+     return;
++  }
+   std::lock_guard lock(state_mutex_);
+   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
++  REXLOG_DEBUG("MnK: key down vk=0x{:02X}", vk);
+   SetKeyState(vk, true);
+ }
+ 
+@@ -549,6 +653,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+       mouse_dx_ += float(x - prev_mouse_x_);
+       mouse_dy_ += float(y - prev_mouse_y_);
+     }
++    // DP1: mirror the deltas for the camera hook (drained by the app).
++    {
++      const float cdx = relative_mouse_mode_ ? float(e.dx()) : float(x - prev_mouse_x_);
++      const float cdy = relative_mouse_mode_ ? float(e.dy()) : float(y - prev_mouse_y_);
++      mouse_camera_dx.store(mouse_camera_dx.load(std::memory_order_relaxed) + cdx,
++                            std::memory_order_relaxed);
++      mouse_camera_dy.store(mouse_camera_dy.load(std::memory_order_relaxed) + cdy,
++                            std::memory_order_relaxed);
++    }
+   }
+   prev_mouse_x_ = x;
+   prev_mouse_y_ = y;
+@@ -558,6 +671,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+   }
+ }
+ 
++// DP1 port 2026-09-05 (from dpour fork ce7d25d, mnk_input_driver.cpp).
++// Window::OnMouseWheel already forwards to every WindowInputListener, so
++// overriding it is all the plumbing the wheel needs. Same gating as
++// OnMouseDown; e.scroll_y() is in kScrollPerDetent units.
++void MnkInputDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
++  if (!IsEnabled() || !has_focus_)
++    return;
++  std::lock_guard lock(state_mutex_);
++  wheel_accumulator_y_ += e.scroll_y();
++}
++
+ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+   has_focus_ = false;
+   // Withdraw the request too, or an update queued before the focus loss grabs
+@@ -568,6 +692,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+     std::memset(key_down_, 0, sizeof(key_down_));
+     mouse_dx_ = 0.0f;
+     mouse_dy_ = 0.0f;
++    wheel_accumulator_y_ = 0;  // DP1 port 2026-09-05
+   }
+   if (attached_window_) {
+     ReleaseMouseCaptureFromUIThread(attached_window_);
+diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
+index c7c440d..19211ad 100644
+--- a/src/input/sdl/sdl_input_driver.cpp
++++ b/src/input/sdl/sdl_input_driver.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <array>
+ #include <filesystem>
+ 
+@@ -23,8 +24,124 @@
+ REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
+                       "Path to SDL gamecontroller mappings file");
+ 
++// === DP1 port 2026-09-05 (from LittleBitUA/rexglue-sdk-dpour, dpour-v1.1.x) ==
++// DualSense (PS5) adaptive-trigger ambient effects. The Xbox 360 binary has no
++// notion of adaptive triggers; DualSense applies these in firmware, so the
++// cost on the recompiled game is zero. Tunable from TOML or the F4 overlay.
++REXCVAR_DEFINE_BOOL(dualsense_adaptive_triggers, true, "Input",
++                    "Master switch for DualSense (PS5) adaptive-trigger effects. "
++                    "When true, applies the per-trigger mode + parameters from "
++                    "the dualsense_rt_* and dualsense_lt_* cvars below on every "
++                    "controller-connect event. Works over USB and Bluetooth. "
++                    "Set false to leave both triggers in pass-through analog "
++                    "mode regardless of the per-trigger settings.");
++REXCVAR_DEFINE_STRING(dualsense_rt_mode, "weapon", "Input",
++                      "DualSense right-trigger ambient effect mode. One of: "
++                      "'off' (pass-through), 'feedback' (constant resistance), "
++                      "'weapon' (sharp click at a position - gun-trigger feel), "
++                      "'vibration' (buzz throughout the pull).");
++REXCVAR_DEFINE_INT32(dualsense_rt_start, 3, "Input",
++                     "Right-trigger effect start position (0=released, "
++                     "9=fully pulled). For 'feedback' this is where resistance "
++                     "begins; for 'weapon' this is the trigger-break start.");
++REXCVAR_DEFINE_INT32(dualsense_rt_end, 6, "Input",
++                     "Right-trigger effect end position (0-9). Only used by "
++                     "'weapon' mode - the click section runs from start to end. "
++                     "Ignored by 'feedback' and 'off'.");
++REXCVAR_DEFINE_INT32(dualsense_rt_strength, 5, "Input",
++                     "Right-trigger effect strength (0-8). Higher = harder to "
++                     "pull through the resistance / click point.");
++REXCVAR_DEFINE_STRING(dualsense_lt_mode, "feedback", "Input",
++                      "DualSense left-trigger ambient effect mode. Same value "
++                      "set as dualsense_rt_mode.");
++REXCVAR_DEFINE_INT32(dualsense_lt_start, 2, "Input",
++                     "Left-trigger effect start position (0-9).");
++REXCVAR_DEFINE_INT32(dualsense_lt_end, 0, "Input",
++                     "Left-trigger effect end position (0-9). Only used by "
++                     "'weapon' mode.");
++REXCVAR_DEFINE_INT32(dualsense_lt_strength, 4, "Input",
++                     "Left-trigger effect strength (0-8).");
++
+ namespace rex::input::sdl {
+ 
++// Translate a user-friendly DualSense trigger mode string into the DS5
++// firmware mode byte. Unknown / invalid input returns 0x00 (off) so a typo
++// disables the effect rather than crashing.
++static uint8_t DualSenseTriggerModeByte(std::string_view name) {
++  if (name == "off" || name.empty()) return 0x00;
++  if (name == "feedback") return 0x01;
++  if (name == "weapon") return 0x02;
++  if (name == "vibration") return 0x06;
++  return 0x00;
++}
++
++static uint8_t DualSenseClampByte(int32_t v, int32_t lo, int32_t hi) {
++  return static_cast<uint8_t>(std::clamp(v, lo, hi));
++}
++
++namespace {
++constexpr size_t kDualSenseRtOffset = 10;
++constexpr size_t kDualSenseLtOffset = 21;
++
++// Fill an 11-byte trigger-effect slot from cvar values. mode_byte=0 leaves
++// the slot zero-initialized (i.e. effect off / pass-through). Packet layout
++// from SDL3 src/joystick/hidapi/SDL_hidapi_ps5.c (DS5EffectsState_t).
++void DualSenseFillTriggerEffect(uint8_t* slot, uint8_t mode_byte, int32_t start_cvar,
++                                int32_t end_cvar, int32_t strength_cvar) {
++  slot[0] = mode_byte;
++  switch (mode_byte) {
++    case 0x01:  // FEEDBACK: [start, strength]
++      slot[1] = DualSenseClampByte(start_cvar, 0, 9);
++      slot[2] = DualSenseClampByte(strength_cvar, 0, 8);
++      break;
++    case 0x02:  // WEAPON: [start, end, strength]
++      slot[1] = DualSenseClampByte(start_cvar, 0, 9);
++      slot[2] = DualSenseClampByte(std::max(end_cvar, start_cvar + 1), 1, 9);
++      slot[3] = DualSenseClampByte(strength_cvar, 0, 8);
++      break;
++    case 0x06:  // VIBRATION: [strength, frequency, start]
++      slot[1] = DualSenseClampByte(strength_cvar, 0, 8);
++      slot[2] = DualSenseClampByte(end_cvar, 0, 255);  // reuse end as frequency
++      slot[3] = DualSenseClampByte(start_cvar, 0, 9);
++      break;
++    default:  // OFF or unknown - leave zero
++      break;
++  }
++}
++
++void DualSenseApplyAdaptiveTriggers(SDL_Gamepad* controller, int ordinal) {
++  if (!REXCVAR_GET(dualsense_adaptive_triggers) ||
++      SDL_GetGamepadType(controller) != SDL_GAMEPAD_TYPE_PS5) {
++    return;
++  }
++  const uint8_t rt_mode = DualSenseTriggerModeByte(REXCVAR_GET(dualsense_rt_mode));
++  const uint8_t lt_mode = DualSenseTriggerModeByte(REXCVAR_GET(dualsense_lt_mode));
++  uint8_t effect[47] = {};
++  // ucEnableBits1: 0x04 = right trigger, 0x08 = left trigger. Only set the
++  // bit if that trigger has a non-off mode, so an "off" cvar value truly
++  // leaves the trigger in factory pass-through.
++  effect[0] = (rt_mode ? 0x04 : 0) | (lt_mode ? 0x08 : 0);
++  DualSenseFillTriggerEffect(effect + kDualSenseRtOffset, rt_mode,
++                             REXCVAR_GET(dualsense_rt_start), REXCVAR_GET(dualsense_rt_end),
++                             REXCVAR_GET(dualsense_rt_strength));
++  DualSenseFillTriggerEffect(effect + kDualSenseLtOffset, lt_mode,
++                             REXCVAR_GET(dualsense_lt_start), REXCVAR_GET(dualsense_lt_end),
++                             REXCVAR_GET(dualsense_lt_strength));
++  if (effect[0] == 0) {
++    REXLOG_INFO("SDL OnControllerDeviceAdded: DualSense at index {} - both triggers "
++                "configured 'off', leaving in pass-through.", ordinal);
++  } else if (!SDL_SendGamepadEffect(controller, effect, sizeof(effect))) {
++    REXLOG_WARN("SDL OnControllerDeviceAdded: DualSense adaptive-trigger setup failed: {}",
++                SDL_GetError());
++  } else {
++    REXLOG_INFO("SDL OnControllerDeviceAdded: DualSense at index {} - applied RT={} LT={} "
++                "from cvars.", ordinal, REXCVAR_GET(dualsense_rt_mode),
++                REXCVAR_GET(dualsense_lt_mode));
++  }
++}
++}  // namespace
++// === END DP1 port ============================================================
++
+ namespace {
+ 
+ // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
+@@ -467,6 +584,9 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
+   UpdateXCapabilities(state);
+   controllers_.push_back(state);
+ 
++  // DP1 port: DualSense adaptive triggers (no-op for non-PS5 pads).
++  DualSenseApplyAdaptiveTriggers(controller, static_cast<int>(controllers_.size()) - 1);
++
+   const int ordinal = static_cast<int>(controllers_.size()) - 1;
+   SDL_SetGamepadPlayerIndex(controller, ordinal);
+ 
+diff --git a/src/ui/keybinds.cpp b/src/ui/keybinds.cpp
+index 9822f3b..6f7bf7c 100644
+--- a/src/ui/keybinds.cpp
++++ b/src/ui/keybinds.cpp
+@@ -141,6 +141,10 @@ static const std::unordered_map<std::string, VirtualKey> kKeyNames = {
+     {"LMB", VirtualKey::kLButton},
+     {"RMB", VirtualKey::kRButton},
+     {"MMB", VirtualKey::kMButton},
++    // DP1 port 2026-09-05 (from dpour fork ce7d25d, src/ui/keybinds.cpp)
++    // Mouse wheel (synthetic 1-frame pulses, one per WHEEL_DELTA detent).
++    {"WheelUp", VirtualKey::kWheelUp},
++    {"WheelDown", VirtualKey::kWheelDown},
+ };
+ 
+ VirtualKey ParseVirtualKey(std::string_view name) {
+diff --git a/src/ui/overlay/debug_overlay.cpp b/src/ui/overlay/debug_overlay.cpp
+index 43d6c06..35646a5 100644
+--- a/src/ui/overlay/debug_overlay.cpp
++++ b/src/ui/overlay/debug_overlay.cpp
+@@ -9,6 +9,7 @@
+  * @license     BSD 3-Clause License
+  *              See LICENSE file in the project root for full license text.
+  */
++#include <string>
+ #include <rex/ui/overlay/debug_overlay.h>
+ #include <rex/version.h>
+ #include <imgui.h>
+@@ -19,6 +20,12 @@
+ 
+ namespace rex::ui {
+ 
++namespace {
++std::string g_build_stamp_override;
++}  // namespace
++
++void SetDebugOverlayBuildStamp(std::string_view stamp) { g_build_stamp_override = std::string(stamp); }
++
+ DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider)
+     : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {}
+ 
+@@ -88,7 +95,9 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
+   ImGui::End();
+ 
+   // Build stamp watermark -- centered near bottom of screen
+-  auto text_size = ImGui::CalcTextSize(REXGLUE_BUILD_STAMP);
++  const char* build_stamp =
++      g_build_stamp_override.empty() ? REXGLUE_BUILD_STAMP : g_build_stamp_override.c_str();
++  auto text_size = ImGui::CalcTextSize(build_stamp);
+   float padding = ImGui::GetStyle().WindowPadding.x * 2.0f;
+   float bottom_offset = io.DisplaySize.y * 0.03f;
+   ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - text_size.x - padding) * 0.5f,
+@@ -99,7 +108,7 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
+                    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
+-    ImGui::TextUnformatted(REXGLUE_BUILD_STAMP);
++    ImGui::TextUnformatted(build_stamp);
+   }
+   ImGui::End();
+   ImGui::PopStyleColor();
+diff --git a/thirdparty/libmspack b/thirdparty/libmspack
+--- a/thirdparty/libmspack
++++ b/thirdparty/libmspack
+@@ -1 +1 @@
+-Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837
++Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837-dirty
+diff --git a/thirdparty/moltenvk b/thirdparty/moltenvk
+--- a/thirdparty/moltenvk
++++ b/thirdparty/moltenvk
+@@ -1 +1 @@
+-Subproject commit 701747d61a0484e91c205e081a24ca592ffa12b4
++Subproject commit 701747d61a0484e91c205e081a24ca592ffa12b4-dirty
+diff --git a/thirdparty/o1heap b/thirdparty/o1heap
+--- a/thirdparty/o1heap
++++ b/thirdparty/o1heap
+@@ -1 +1 @@
+-Subproject commit 388a73fd9007300e5130c5fe352d9ce3288b6dde
++Subproject commit 388a73fd9007300e5130c5fe352d9ce3288b6dde-dirty

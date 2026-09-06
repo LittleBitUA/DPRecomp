@@ -1,43 +1,10 @@
-# deadlyprem - ReXGlue codegen config
+# deadlyprem - ReXGlue codegen config (nightly 0.10.0.5-dev.g0c7b01a, 2026-09-05)
 #
-# Add named functions (indirect-call targets), midasm hooks, switch tables,
-# and CRT addresses here as codegen and runtime surface issues.
+# Carried over from DPRecomp v0.1.1 (ReXGlue 0.8.1.4, June 2026): ONLY the
+# [functions] list below. Same XEX (DP PAL, media ID 7DE95D93), so the
+# addresses are still valid; each entry was earned by a crash or by the
+# 360tools vtable scan. Everything else starts from the nightly defaults.
 #
-# Cheat sheet for each section:
-#
-#   [functions]
-#   # Force-register a function at ADDR (auto-discovery missed it). Optionally
-#   # pin its end, parent (for nested splits), or give a custom name.
-#   "0x82XXXXXX" = { name = "sub_82XXXXXX" }
-#   "0x82XXXXXX" = { end = 0x82XXXXXX }
-#   "0x82XXXXXX" = { end = 0x82XXXXXX, parent = 0x82XXXXXX }
-#
-#   [[switch_tables]]
-#   # When codegen can't auto-detect a jump table, describe it manually.
-#   address = 0x82XXXXXX
-#   register = "r3"
-#   labels = [0x82XXXXXX, 0x82XXXXXX]
-#
-#   [[midasm_hook]]
-#   # Inject host code mid-instruction. Implement in src/deadlyprem_hooks.cpp.
-#   #
-#   # Variants:
-#   #   - skip-an-instruction: set `jump_address` to the next-after-bad insn
-#   #   - conditional skip: hook returns bool, with `jump_address_on_true`
-#   #   - read/modify regs: list them in `registers = ["r3","r4"]`
-#   #   - drop-in callable: `return = true` (codegen will RET from the hook)
-#   address = 0x82XXXXXX
-#   name = "DeadlypremExampleHook"
-#   registers = ["r3"]
-#   return = true
-#
-#   [rexcrt]
-#   # If the game ships a static CRT, point rexglue at its memcpy/memset/etc so
-#   # the runtime can substitute native vectorised versions.
-#   memcpy  = 0x82XXXXXX
-#   memset  = 0x82XXXXXX
-#   memmove = 0x82XXXXXX
-
 [functions]
 
 # Tail-branch targets that GapFill did not register as standalone functions.
@@ -49,7 +16,7 @@
 "0x82627480" = { name = "sub_82627480" }  # tail target from 0x826326D0
 
 # Runtime-discovered bctr/vtable thunks not seen by auto-discovery (no RTTI).
-# Same pattern as ESR Workaround #1 — add as runtime crashes surface each one.
+# Same pattern as ESR Workaround #1 вЂ” add as runtime crashes surface each one.
 "0x82500920" = { name = "sub_82500920" }  # crash run-1, after SetInterruptCallback
 "0x825E0278" = { name = "sub_825E0278" }  # crash run-2, in audio/XMA path
 "0x825D6658" = { name = "sub_825D6658" }  # crash run-3
@@ -309,9 +276,89 @@
 "0x828A9F64" = { name = "sub_828A9F64" }
 "0x828A9F7C" = { name = "sub_828A9F7C" }
 
+# Unresolved branch targets reported by the FIRST nightly-0.10 codegen run
+# (2026-09-05): "Unresolved b target X from Y (no CallTarget in FunctionNode)".
+# All sit in the 0x825B/0x828A vtable-thunk region already covered above; the
+# targets simply were not registered as standalone functions.
+"0x825B2230" = { name = "sub_825B2230" }  # b target from 0x825B226C
+"0x825B274C" = { name = "sub_825B274C" }  # b target from 0x825B278C
+"0x825B5050" = { name = "sub_825B5050" }  # b target from 0x825B5108
+"0x825BC464" = { name = "sub_825BC464" }  # b target from 0x825BC508
+"0x825BDE18" = { name = "sub_825BDE18" }  # b target from 0x825BDED0
+"0x825BDDFC" = { name = "sub_825BDDFC" }  # b target from 0x825BDF10
+"0x825BDF70" = { name = "sub_825BDF70" }  # conditional branch target from 0x825BDF4C
+"0x828A9EEC" = { name = "sub_828A9EEC" }  # b target from 0x828A9F78
 
-# [[switch_tables]]
+# DP1 2026-09-06: 60 FPS (ehw's patch ported from the USA XEX, see
+# src/deadlyprem_hooks.cpp). Hooks replace three instructions in the frame
+# pacing / vblank gate routine; the dp_60fps cvar toggles them at runtime.
+[[midasm_hook]]
+address = 0x82522654          # fadds f13,f0,f29 -> fmr f13,f0
+name = "DP60FpsTimerHook"
+registers = ["f13", "f0"]
+after_instruction = true
 
-# [[midasm_hook]]
+[[midasm_hook]]
+address = 0x8252267C          # bge cr6,0x8252268C -> b 0x8252268C
+name = "DP60FpsVblankGateHook"
+jump_address_on_true = 0x8252268C
 
-# [rexcrt]
+[[midasm_hook]]
+address = 0x825226E8          # subf r8,r11,r10 -> li r8,1
+name = "DP60FpsDeltaHook"
+registers = ["r8"]
+after_instruction = true
+
+# DP1 2026-09-06: direct mouse camera control (src/deadlyprem_camera_hook.cpp).
+# Merge point in the camera update (PAL sub_82338A38) after the right-stick X
+# contribution; the hook adds the mouse deltas to the per-frame yaw/pitch.
+[[midasm_hook]]
+address = 0x82338CA8
+name = "DPCameraMouseHook"
+registers = ["r31"]
+after_instruction = false
+
+# DP1 2026-09-06: walking gameplay camera (sub_8233AB28), merge point after RX.
+[[midasm_hook]]
+address = 0x8233B2A4
+name = "DPCameraMouseHookWalk"
+registers = ["r31"]
+after_instruction = false
+
+# DP1 2026-09-06: the rest of the camera family (aim / driving / cutscene modes),
+# each hooked at the merge point after its stick-X step. "Walk" = the routine
+# does pitch -= stick_y (fnmsubs), plain = pitch += stick_y (fmadds).
+[[midasm_hook]]
+address = 0x82338818          # sub_823386C0 (fnmsubs)
+name = "DPCameraMouseHookWalk"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x8233956C          # sub_823393A8 (fnmsubs)
+name = "DPCameraMouseHookWalk"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x823399D0          # sub_82339688 (fnmsubs)
+name = "DPCameraMouseHookWalk"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x82339CC4          # sub_82339AD0 (fnmsubs)
+name = "DPCameraMouseHookWalk"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x8233A2D4          # sub_8233A150 (fmadds)
+name = "DPCameraMouseHook"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x82339F74          # sub_82339DF8 (left-stick driven, fnmsubs) - aim?
+name = "DPCameraMouseHookWalk"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x8233BE98          # sub_8233BE20 (left-stick driven, fmadds)
+name = "DPCameraMouseHook"
+registers = ["r31"]

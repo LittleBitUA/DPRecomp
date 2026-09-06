@@ -57,3 +57,7 @@ else()
 endif()
 
 rexglue_setup_target(deadlyprem GPU_PLUGINS xenos)
+
+# USA / NTSC build (title 494F07D4): same app sources as the PAL project, separate
+# recompilation; ships next to the PAL exe and is picked by the launcher.
+set_target_properties(deadlyprem PROPERTIES OUTPUT_NAME deadlyprem_usa)

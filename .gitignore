@@ -1,32 +1,25 @@
-# Game files — must be supplied by the user
+# Game files - supplied by the user
 assets/
+usa/assets/
+*.xex
+*.iso
 
-# Recompiled C++ — derived from copyrighted game binary, NOT redistributable
+# Recompiled C++ - derived from the copyrighted game binary, NOT redistributable
 generated/default/
-generated/dp_pe.bin
+usa/generated/default/
+*_pe.bin
 
 # Build output
 out/
 build/
+launcher/build/
 
-# Local logs and scratch
+# Runtime data
+userdata/
+logs/
+shader_dump/
 *.log
-*.csv
-batch_funcs.toml
-vtable_entries.csv
-vtable_scan.log
 
 # Editor / OS noise
 .vs/
-.vscode/
-*.swp
-*.tmp
 Thumbs.db
-.DS_Store
-
-# Compiled binary co-located by build step
-deadlyprem.exe
-rexruntimerd.dll
-TracyClientrd.dll
-rexruntimed.dll
-TracyClientd.dll

@@ -1,0 +1,82 @@
+DEADLY PREMONITION - KEYBOARD AND MOUSE CONTROLS
+=================================================
+
+The bindings below mirror the official Director's Cut PC port keymap
+1:1 with the in-game "CONTROLLER SETTING" page. A game controller
+(Xbox / DualSense / any XInput pad) also works at the same time --
+use whichever feels better.
+
+MOVEMENT AND CAMERA
+-------------------
+  W A S D            Walk / Run (York always sprints at full speed)
+  Mouse              Look (right stick)
+  Wheel Up / Down    Change weapon (D-pad up / down)
+
+INTERACTION
+-----------
+  E                  Interact / Pick up / Accept    (A button)
+  R                  Cancel / Reload / Close menu   (B button)
+  C                  Observe                        (left stick press)
+  F                  Flashlight ON / OFF            (Y button)
+  Shift              Cutscene-specific actions      (X button)
+
+COMBAT / WEAPONS
+----------------
+  Space              Hold: draw weapon / take aim   (right trigger)
+  Space + LMB        With weapon drawn: fire / hit  (A button combo)
+  Control            Hold: hold breath / lock on    (left trigger)
+  Z                  Strafe left                    (left bumper)
+  X                  Strafe right                   (right bumper)
+
+MENUS AND SYSTEM
+----------------
+  Enter              Pause menu                     (Start)
+  M                  Navigation / Map               (Back)
+  F4                 Emulator settings overlay (rebind keys here)
+  ` (backtick)       Emulator console (debug, normally not needed)
+
+QUITTING THE GAME
+-----------------
+  Press Enter -> "Quit Game" from the pause menu
+  ...or just close the window (Alt+F4 works too)
+
+REBINDING A KEY
+---------------
+1. Press F4 inside the game to open the settings overlay.
+2. In the left tree, open Input -> Keybinds -> Controller.
+3. Click any action and type the new key.
+4. Click "Save to config" at the bottom -- changes persist to
+   deadlyprem.toml and take effect immediately.
+
+You can also edit deadlyprem.toml next to deadlyprem.exe directly.
+Valid key names include: A-Z, 0-9, F1-F12, Space, Return (Enter),
+Tab, Escape, Backspace, Shift, Control, Alt, PageUp, PageDown,
+Home, End, Insert, Delete, arrow keys (Up/Down/Left/Right), LMB,
+RMB, MMB, WheelUp, WheelDown.
+
+Combo syntax: a comma separates OR-groups, a "+" inside a group is
+an AND. For example, `keybind_a = "E,Space+LMB"` means "A fires
+on E alone, OR when Space and LMB are held together". That's how
+combat-mode shooting works (hold Space to draw the weapon, click
+LMB to fire).
+
+FREQUENTLY ASKED QUESTIONS
+--------------------------
+**Mouse feels too fast / too slow**
+F4 -> Input -> `mnk_sensitivity` -> adjust (0.1 slow, 0.5 fast).
+
+**Camera won't do a full 360 spin**
+This is normal for mouse-as-stick emulation. Make a short fast
+flick of the mouse -- the simulated stick coasts for ~0.25s after
+you stop moving, so you don't have to drag the mouse continuously.
+
+**I want to use a game controller instead**
+F4 -> Input -> uncheck `mnk_mode`. Plug in any Xbox / DualSense /
+XInput-compatible pad and play.
+
+**Game opens in a window / wrong size**
+Open `deadlyprem.toml`, edit `fullscreen` (true / false) and
+`window_width` / `window_height`, then restart the game.
+
+**Mouse cursor invisible in the F4 overlay**
+Already fixed in this build. If you still see it, let the author know.

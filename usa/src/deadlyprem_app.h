@@ -49,9 +49,9 @@ class DeadlypremApp : public rex::ReXApp {
     // stamp>" in SetupPresentation; this hook runs right after it.
     // F3 debug overlay watermark (ASCII only: the overlay font has no special glyphs).
     rex::ui::SetDebugOverlayBuildStamp(
-        "Deadly Premonition Recompilation 1.0 (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+        "Deadly Premonition Recompilation 1.0 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
     if (window()) {
-      window()->SetTitle("Deadly Premonition Recompilation | 1.0 «Little Bit»");
+      window()->SetTitle("Deadly Premonition Recompilation (USA) | 1.0 «Little Bit»");
     }
     rex::PathConfig runtime_paths = defaults;
     const auto& game_root = runtime_paths.game_data_root;

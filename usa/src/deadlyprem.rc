@@ -1,0 +1,5 @@
+// Windows resource script for deadlyprem.exe (DP1, 2026-09-06).
+// Embeds the game icon (user-supplied red mask art, same icon.ico as the
+// launcher) so the exe shows it in Explorer, the taskbar and Alt-Tab.
+// Windows uses the lowest-numbered icon (ID 1) as the application icon.
+IDI_ICON1 ICON "deadlyprem.ico"

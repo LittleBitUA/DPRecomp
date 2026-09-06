@@ -11,9 +11,7 @@
 
 ![York in the rain — Deadly Premonition Recompilation 1.0](docs/screenshots/york.jpg)
 
-## 1.0 is coming very soon — this README is the preview of what ships.
-
-*(The old [v0.1.1 preview](https://github.com/LittleBitUA/DPRecomp/releases/latest) is still downloadable, but 1.0 replaces it completely.)*
+## [⬇  Download 1.0 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
 **by «Little Bit»**
 

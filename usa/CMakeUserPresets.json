@@ -1,0 +1,18 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "user-env",
+            "hidden": true,
+            "cacheVariables": { "REXSDK": "E:/XboxDP/DPProject/rexglue-sdk/out/install/win-amd64" }
+        },
+        { "name": "dp-debug",          "inherits": ["win-amd64-debug",          "user-env"], "displayName": "DP Debug (local SDK)" },
+        { "name": "dp-release",        "inherits": ["win-amd64-release",        "user-env"], "displayName": "DP Release (local SDK)" },
+        { "name": "dp-relwithdebinfo", "inherits": ["win-amd64-relwithdebinfo", "user-env"], "displayName": "DP RelWithDebInfo (local SDK)" }
+    ],
+    "buildPresets": [
+        { "name": "dp-debug",          "configurePreset": "dp-debug" },
+        { "name": "dp-release",        "configurePreset": "dp-release" },
+        { "name": "dp-relwithdebinfo", "configurePreset": "dp-relwithdebinfo" }
+    ]
+}
