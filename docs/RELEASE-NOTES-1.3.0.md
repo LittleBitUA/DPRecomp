@@ -26,6 +26,9 @@ This one needs testers. Most of it is verified on one machine and one save; the 
 - We found the game's animation event dispatcher. Every motion carries keyframe events (play sound, attach the cup to the hand, footstep...) with a start and an end frame, and the dispatcher re-picks whatever crossed or sits inside that range on every update, with no memory of what already fired. At 60 FPS that visits things twice that the 30 FPS tick used to cross in one step.
 - There is an experimental hook: `dp_anim_event_dedupe = true` in `deadlyprem.toml` lets one-shot events fire only when their start frame is crossed. It is **off by default** because in our own test session every sound event was picked three times in the *same* update, a pattern the hook does not cover yet - we are still mapping who the third caller is. `dp_anim_event_log = true` writes every pick to the log; if you have the coffee or the cigarette-jar save, a log with the switch on and off would tell us more than anything else.
 
+### 🎨 Steam artwork
+- A second asset on this release, `DPRecomp-Steam-artwork.zip`: a 600×900 vertical capsule, a 1920×620 hero banner and a transparent logo for the game added to Steam as a non-Steam shortcut, plus a README with the two ways to apply them (the Steam client's *Set custom artwork / background / logo*, or the `userdata\<id>\config\grid` files). Example of the result: https://raw.githubusercontent.com/LittleBitUA/DPRecomp/master/docs/steam/example.jpg
+
 ### 🧩 Under the hood
 - Pipeline (PSO) library entries are salted with a version: the first launch after this update recompiles the pipelines once (a slower first minute, the compile indicator shows it), after that they cache again. This was needed because the shader translator changed and Direct3D refuses to store a changed pipeline under an old name.
 - The audio driver logs silence fills every 10 s when they happen (`SDLAudioDriver: N silence fills`) - diagnostics for the audio loss reports (#16).

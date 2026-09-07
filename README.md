@@ -121,6 +121,10 @@ Full 1.2 notes: [docs/RELEASE-NOTES-1.2.0.md](docs/RELEASE-NOTES-1.2.0.md).
 - **Saves and shader cache next to the game — for real.** In 1.0 the runtime kept using `Documents\deadlyprem`. 1.1 uses `userdata\` and copies your existing saves and shader storage from Documents on first launch.
 - **Shader / PSO cache:** the storage never grew after its first session (fixed); driver-compiled pipelines are cached on disk (`userdata\cache\shaders\local`), and a "Preparing shaders" toast at launch plus a corner badge during play show when pipelines are being built.
 - **Steam:** launcher → Advanced → *Steam Overlay* `off` for the black-screen / tinted-quarter-frame problem when starting through Steam.
+- **Adding the game to Steam, with artwork:** add `PlayDeadlyPremonition.exe` as a non-Steam game, then apply the artwork pack ([DPRecomp-Steam-artwork.zip](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip), also in [docs/steam](docs/steam)): a 600×900 vertical capsule, a 1920×620 hero banner and a transparent logo, with a README that says where each one goes (right-click → *Set custom artwork* / *Set custom background* / *Set custom logo*). This is what the game page looks like with it:
+
+  ![The game page in Steam with the hero banner and logo applied](docs/steam/example.jpg)
+
 - **Opt-in shader cache sharing:** the launcher asks once whether it may send your shader cache (anonymous, shader microcode and pipeline descriptions only) to the project; merged caches ship with the next release. `tools/merge_shader_storage.py` merges the collected files.
 - **Steam Deck preset:** the launcher recognises a Deck (Steam sets `SteamDeck=1`; the APU reports as AMD Custom GPU 0405/0932) and applies the community-tested settings once: RTV, 1×, 2× MSAA, 16× AF, FXAA + CAS, 30 FPS, VSync, fullscreen 1280×800. Everything stays editable.
 - **Keyboard stick with travel time** (60 ms to full deflection, like the PC port), so stick-shake QTEs ("Get it off!") count every A > D tap.
