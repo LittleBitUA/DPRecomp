@@ -19,7 +19,7 @@
 
 [Release notes](docs/RELEASE-NOTES-1.3.0.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
-**by «Little Bit» — Dmytro Bidlov &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
+**by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
 </div>
 
@@ -245,7 +245,7 @@ The AI reads thousands of lines of runtime and game listings faster than a perso
 
 **First of all, to the people who made the game.** *Deadly Premonition* is the work of **Hidetaka "Swery" Suehiro** and the team at **Access Games**, published by Rising Star Games, Ignition Entertainment and Marvelous. Greenvale, York, Zach, the coffee, the rain: none of this exists without them. This project is a way of keeping that game playable, and it is made with respect for their work. Please buy the game.
 
-- **«Little Bit» (Dmytro Bidlov)** — the port, the launcher, the SDK fixes. Made in Ukraine.
+- **«Little Bit»** — the team behind the port: the recompilation, the launcher, the SDK fixes. Made in Ukraine.
 - **[ehw](https://github.com/ehw/game-patches)** — the 60 FPS patch (originally for Xenia), the starting point of the 60 FPS path.
 - **[Alexbeav](https://github.com/Alexbeav)** — the first-run disc image installer (contributed to DownpourRecomp, ported here).
 - **[ReXGlue](https://github.com/rexglue/rexglue-sdk)** and **[Xenia](https://xenia.jp/)** — the runtime this port stands on; **[XenonRecomp](https://github.com/hedge-dev/XenonRecomp)** and the recompilation projects that showed the way.

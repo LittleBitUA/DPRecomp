@@ -35,4 +35,4 @@ Fixes for the three reports that came in right after 1.0. Installs in place from
 ### 🔢 Versions
 - Game builds (PAL and USA), launcher and F3 watermark all report 1.1. The launcher's auto-updater now targets releases ≥ v1.1.0.
 
-— «Little Bit» (Dmytro Bidlov) · 🇺🇦 MADE IN UKRAINE
+— the «Little Bit» team · 🇺🇦 MADE IN UKRAINE

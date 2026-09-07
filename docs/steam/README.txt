@@ -2,7 +2,7 @@ Deadly Premonition Recompilation - Steam artwork
 https://github.com/LittleBitUA/DPRecomp
 
 Custom artwork for the game added to Steam as a non-Steam shortcut, by
-<<Little Bit>> (Dmytro Bidlov).
+the <<Little Bit>> team.
 
   grid.png   600 x 900    vertical capsule (library grid, "portrait")
   hero.png   1920 x 620   hero banner (the wide image at the top of the game page)
