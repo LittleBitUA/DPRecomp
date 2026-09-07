@@ -355,7 +355,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.3.0";
+constexpr const wchar_t* kLauncherVersion = L"v1.3.1";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +

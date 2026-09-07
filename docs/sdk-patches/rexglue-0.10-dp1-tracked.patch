@@ -397,6 +397,91 @@ index 20a2cd8..434f4e3 100644
    while (additional_amount > 0) {
      static uint32_t sdl_callback_count = 0;
      std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 11b83be..e115c37 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -117,6 +117,10 @@ bool XmaContext::Work() {
+     }
+     Consume(&output_rb, &data);
+     data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
++    // xenia-canary 7e98ae6d: nothing left to process, tell the game so.
++    if (output_rb.empty()) {
++      data.output_buffer_valid = 0;
++    }
+     StoreContextMerged(data, initial_data, context_ptr);
+     return true;
+   }
+@@ -133,17 +137,48 @@ bool XmaContext::Work() {
+   }
+ 
+   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
++    const uint32_t pre_decode_offset = data.input_buffer_read_offset;
++    const uint8_t pre_remaining_subframes = current_frame_remaining_subframes_;
++
+     Decode(&data);
+     Consume(&output_rb, &data);
+ 
+-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
++    // xenia-canary 6bef1fbe: don't abandon a partially consumed frame. Consume()
++    // hands over at most subframe_decode_count blocks per pass, so the pass that
++    // exhausts the input typically leaves the rest of the frame undelivered.
++    // Work() has already cleared is_enabled_ and only XMAEnableContext sets it
++    // again; a game polling for the remainder never kicks, so nothing else could
++    // ever deliver it (guest audio thread deadlock). Keep draining until the
++    // frame is out.
++    if ((!data.IsAnyInputBufferValid() || data.error_status == 4) &&
++        current_frame_remaining_subframes_ == 0) {
++      break;
++    }
++
++    // If Decode didn't advance the read offset and produced no new frame, we
++    // can't make progress; break instead of spinning. Only checked when there
++    // were no pending subframes: with subframes pending Decode() intentionally
++    // skips (offset unchanged) while Consume() drains the frame.
++    if (pre_remaining_subframes == 0 && data.input_buffer_read_offset == pre_decode_offset &&
++        current_frame_remaining_subframes_ == 0) {
+       break;
+     }
+   }
+ 
+-  data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
++  // xenia-canary 09dbe2cd / 505697f9: don't invalidate the output prematurely.
++  if (initial_data.IsAnyInputBufferValid()) {
++    data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
++  } else {
++    // Some titles use write_offset as a stall detector; make the offsets equal
++    // when starved on input.
++    if (data.output_buffer_write_offset != data.output_buffer_read_offset) {
++      data.output_buffer_write_offset = data.output_buffer_read_offset;
++      data.output_buffer_valid = 0;
++    }
++  }
+ 
+-  if (output_rb.empty()) {
++  // Signal the game that the output buffer is full.
++  if (remaining_subframe_blocks_in_output_buffer_ == 0 && output_rb.empty()) {
+     data.output_buffer_valid = 0;
+   }
+ 
+@@ -316,7 +351,16 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
+     if (packet_frame_offset <= kMaxFrameSizeinBits) {
+       return (next_packet_index * kBitsPerPacket) + packet_frame_offset;
+     }
+-    next_packet_index++;
++    // xenia-canary 7015473a: no frame *starts* in this packet, it is entirely
++    // the continuation of a frame split across the packet boundary. Follow this
++    // packet's own skip count to the next packet of the same sub-stream instead
++    // of stepping onto the next sequential packet, which in an interleaved
++    // buffer belongs to a different stream.
++    const uint8_t next_skip = xma::GetPacketSkipCount(next_packet);
++    if (next_skip == 0xFF) {
++      break;
++    }
++    next_packet_index += next_skip + 1;
+   }
+ 
+   return kBitsPerPacketHeader;
 diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
 index 896dfec..123c093 100644
 --- a/src/core/threading_win.cpp

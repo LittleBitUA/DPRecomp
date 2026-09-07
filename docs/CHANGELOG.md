@@ -1,6 +1,10 @@
 # Changelog
 
-Release notes for each version: [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.3.1 (September 2026)
+
+Hotfix: all sound stopped a few seconds into some cutscenes (the morgue after examining Anna, the tree profiling, the lumbermill nightmare, #16) while the game kept running. The XMA decoder was a pre-May-2026 snapshot of Xenia-canary's; five upstream fixes to the decoder / audio-engine handshake are ported (early output-buffer invalidation, the last partial frame never being delivered so the game's audio thread waited forever, the stall detector, the packet walk crossing into another sub-stream). Verified on the reporter's save. Runtime DLL only.
 
 ## 1.3 (September 2026)
 

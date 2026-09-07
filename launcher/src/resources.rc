@@ -129,8 +129,8 @@ IDR_BUNDLE_54 RCDATA "../assets/textures/README.txt"
 // these.** Format: MAJOR,MINOR,PATCH,0 (e.g. v0.2.0 → 0,2,0,0). Keep the
 // string values in sync with kLauncherVersion in main.cpp.
 1 VERSIONINFO
-FILEVERSION     1,3,0,0
-PRODUCTVERSION  1,3,0,0
+FILEVERSION     1,3,1,0
+PRODUCTVERSION  1,3,1,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          0x40004L
@@ -143,11 +143,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "LittleBitUA"
             VALUE "FileDescription",  "Deadly Premonition launcher"
-            VALUE "FileVersion",      "1.3.0.0"
+            VALUE "FileVersion",      "1.3.1.0"
             VALUE "InternalName",     "DPLauncher"
             VALUE "OriginalFilename", "PlayDeadlyPremonition.exe"
             VALUE "ProductName",      "Deadly Premonition (rexglue port)"
-            VALUE "ProductVersion",   "1.3.0.0"
+            VALUE "ProductVersion",   "1.3.1.0"
         END
     END
     BLOCK "VarFileInfo"

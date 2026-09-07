@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.3.1 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.3.0.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.3.1.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -54,6 +54,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 
 ## What's new in 1.3
 
+**1.3.1 (hotfix):** sound that stopped a few seconds into some cutscenes and never came back (the morgue, the tree profiling, the lumbermill nightmare, #16) is fixed. The XMA decoder was a pre-May-2026 snapshot of Xenia-canary's; five upstream fixes to the decoder / audio-engine handshake are ported. Verified on the reporter's save. [Notes](docs/RELEASE-NOTES-1.3.1.md).
+
 ![Sky, tree crowns and car glass after the fix (ROV path, 2×)](docs/screenshots/sky_fix.jpg)
 
 - **The sky is fixed.** The console's HDR scene format keeps only 2 bits of alpha, and the game draws its sky and fog masks into them, so the console-faithful ROV path showed a stair-stepped sky and hard contours on tree crowns and glass. 1.3 keeps a 16-bit shadow alpha next to the EDRAM buffer, validated by a tag so it can never go stale. ROV is the recommended render path now.
@@ -74,7 +76,7 @@ Most of 1.3 is verified on one machine and a handful of saves. A 30-hour game wi
 - **Cutscene sync:** the scene where York meets Emily and George is the reference. In sync or not, with 60 FPS on?
 - **The sky, tree edges, glass, fog:** any scene where the ROV path still shows hard contours or blue polygonal patches on characters. Screenshot plus the scene name.
 - **FSR 3:** frame-to-frame flicker or brightness flashes with `fsr3`, and whether `fsr` in the launcher makes it go away.
-- **Audio loss** (the morgue scene, #16): a log from that session, 1.3 records audio underruns every 10 s.
+- **Audio loss** (#16) is fixed in 1.3.1. If any scene still goes silent, the log from that session (`logs\deadlyprem_XXX.log`) plus the scene name.
 - **Steam Deck / AMD integrated graphics:** frame rates with ROV vs RTV, 1× vs 2×.
 - **Crashes:** GPU and driver, render path, internal resolution, a screenshot, the newest file in `logs\`, and whether `Internal Resolution 1×` or `RTV` changed anything.
 
