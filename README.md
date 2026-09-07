@@ -15,6 +15,8 @@
 
 ## [⬇  Download 1.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
+**[🎮 Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip)** — vertical capsule, hero banner and logo for the game added to Steam as a non-Steam shortcut ([how to apply it](#how-do-i-add-the-game-to-steam-with-proper-artwork))
+
 **by «Little Bit» — Dmytro Bidlov**
 
 **🇺🇦 MADE IN UKRAINE**
@@ -241,6 +243,15 @@ No. An emulator runs Xbox 360 instructions on a virtual CPU at runtime. Here the
 </details>
 
 <details>
+<summary><b>How do I add the game to Steam, with proper artwork?</b></summary>
+
+Steam → *Games* → *Add a Non-Steam Game to My Library* → *Browse...* → pick `PlayDeadlyPremonition.exe` from your DPRecomp folder, and name the entry *Deadly Premonition Recompilation*. Then download the [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) (also in [docs/steam](docs/steam)): right-click the game in the library grid → *Manage* → *Set custom artwork* → `grid.png` (600×900 vertical capsule); on the game's page right-click the banner → *Set custom background* → `hero.png` (1920×620), and right-click the logo area → *Set custom logo* → `logo.png` (transparent, drag it to the centre). The README inside the pack also has the file-based way (`userdata\<id>\config\grid`). If starting through Steam gives a black screen or a tinted quarter frame, set *Steam Overlay* to `off` in the launcher (Advanced). Result:
+
+![The game page in Steam with the hero banner and logo applied](docs/steam/example.jpg)
+
+</details>
+
+<details>
 <summary><b>Does the USA (NTSC) version work?</b></summary>
 
 Yes. The USA disc ships a different executable (that is why v0.1.1 failed with `No function registered at 824E9558`), so 1.0 contains two recompiled builds: `deadlyprem.exe` for PAL and `deadlyprem_usa.exe` for USA. The launcher and the built-in installer start the right one automatically from the size of your `default.xex`; you never have to choose.
@@ -249,7 +260,7 @@ Yes. The USA disc ships a different executable (that is why v0.1.1 failed with `
 <details>
 <summary><b>Is 60 FPS safe?</b></summary>
 
-It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.1 the logic tick follows the real frame time, so frame drops and long cutscenes stay in sync with the audio (the 1.0 build could drift, issue #12); 1.2 also lets the tick go below 1.0 (`dp_60fps_tick_min`), which stops the game from running slightly ahead of the audio when the limiter releases a frame early. If you ever see something time-related misbehave, switch it off (Graphics → *60 FPS (ehw patch)*) and please open an issue with the location.
+It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.3 the game gets whole logic ticks with an error accumulator, exactly like the console's vblank count: 1, 1, 1, ... and a 2 every few hundred frames, so long cutscenes stay in sync with the audio (the 1.0 build drifted, issue #12) and the scripted scenes never see the fractional ticks of 1.1 / 1.2, which they did not like. If you ever see something time-related misbehave, switch it off (Graphics → *60 FPS (ehw patch)*) and please open an issue with the location.
 </details>
 
 <details>
