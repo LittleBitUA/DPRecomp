@@ -4,7 +4,7 @@ The sky is fixed, FSR 3 stopped flickering, and 60 FPS runs on whole ticks like 
 
 This one needs testers. Most of it is verified on one machine and one save; the notes say what to look at and where to report.
 
-![Sky, tree crowns and car glass after the fix, ROV path at 2x](screenshots/sky_fix.jpg)
+![Sky, tree crowns and car glass after the fix, ROV path at 2x](https://raw.githubusercontent.com/LittleBitUA/DPRecomp/master/docs/screenshots/sky_fix.jpg)
 
 ### 🌅 The sky, tree crowns and glass edges (ROV render path)
 - The game renders its HDR scene in the console's 7e3 colour format, which stores **2 bits of alpha**. The game writes a smooth mask into that alpha (sky, fog, the final composite), and the console-faithful ROV path kept exactly those 2 bits: four levels, so the sky showed a stair-stepped diagonal and tree crowns and car glass had hard contours. Proven with a RenderDoc capture of the resolved scene: the alpha channel had the staircase, the colour did not.
