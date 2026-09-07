@@ -288,6 +288,33 @@ name = "DP60FpsTickHook"
 registers = ["f0"]
 after_instruction = false
 
+[[midasm_hook]]
+address = 0x8252A344          # bge cr6,0x8252A350 -> b 0x8252A350: skip the game's own tick >= 1.0 clamp (f28 = 1.0f), #12
+name = "DP60FpsTickClampHook"
+jump_address_on_true = 0x8252A350
+
+# DP1 2026-09-07 (#17/#18): animation keyframe events fire once per start-frame
+# crossing (src/deadlyprem_anim_event_hook.cpp). Hooks sit before the
+# `stwx r11,r7,rTHIS` that copies a picked event into the animation controller;
+# true = skip the copy (jump past the count increment).
+[[midasm_hook]]
+address = 0x82541ED0          # standalone dispatcher sub_82541CF0 (layered motions), this = r30
+name = "DPAnimEventPickHook"
+registers = ["r11", "f30", "f31", "r28", "r30"]
+jump_address_on_true = 0x82541EE0
+
+[[midasm_hook]]
+address = 0x825455DC          # sub_82545190 main update, inlined dispatcher copy 1, this = r28
+name = "DPAnimEventPickHookMain"
+registers = ["r11", "f30", "f31", "r25", "r28"]
+jump_address_on_true = 0x825455EC
+
+[[midasm_hook]]
+address = 0x82545B00          # sub_82545190 main update, inlined dispatcher copy 2
+name = "DPAnimEventPickHookMain2"
+registers = ["r11", "f30", "f31", "r25", "r28"]
+jump_address_on_true = 0x82545B10
+
 # Jump tables (sp00nznet/360tools extract_switch_tables.py on the USA image, 2026-09-06): 9 tables.
 [[switch_tables]]
 address = 0x824DEB00

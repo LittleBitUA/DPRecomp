@@ -41,6 +41,7 @@ set(DEADLYPREM_SOURCES
     src/main.cpp
     src/deadlyprem_hooks.cpp
     src/deadlyprem_camera_hook.cpp
+    src/deadlyprem_anim_event_hook.cpp
     src/deadlyprem_iso_installer.cpp
     src/deadlyprem_acquire_wizard.cpp
 )

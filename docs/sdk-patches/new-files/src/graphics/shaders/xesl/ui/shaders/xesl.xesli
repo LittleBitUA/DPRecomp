@@ -1,0 +1,1178 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_UI_SHADERS_XESL_XESLI_
+#define XENIA_UI_SHADERS_XESL_XESLI_
+
+// SHADING_LANGUAGE_GLSL/HLSL/MSL_XE 1 is expected to be defined via compiler
+// arguments.
+
+// Required GLSL extensions:
+// - GL_EXT_control_flow_attributes
+// - GL_EXT_samplerless_texture_functions
+
+// For functions, it's preferable to take the identifiers here from an existing
+// target language, such as GLSL or HLSL, add the `_xe` suffix, rename them from
+// camelCase to snake_case for consistency, and if altering (generalizing or
+// specializing usually) the functionality compared to that of the original
+// function, modify the name accordingly. The preferred name choice from all the
+// shading languages is the name that reflects the functionality the closest,
+// especially if some languages have a narrower input domain (for instance, HLSL
+// has `asuint` that can accept both `float` and `int`, while GLSL has
+// `floatBitsToUint` that accepts only `float` - there are two options here, a
+// `float_bits_to_uint_xe` alias, or `asuint_xe` overloads, but the former
+// describes the operation more precisely, so it's preferred; `lerp_xe` is
+// preferred over `mix_xe` because the former describes how exactly the mixing
+// will be performed), and / or that is the most visually consistent
+// (`float4_xe` over `vec4_xe` because it's a vector of `float`s).
+
+#if SHADING_LANGUAGE_MSL_XE
+  #include <metal_stdlib>
+  using namespace metal;
+#endif
+
+// Vectors.
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define bool2_xe bvec2
+  #define bool3_xe bvec3
+  #define bool4_xe bvec4
+  #define int2_xe ivec2
+  #define int3_xe ivec3
+  #define int4_xe ivec4
+  #define uint2_xe uvec2
+  #define uint3_xe uvec3
+  #define uint4_xe uvec4
+  #define float2_xe vec2
+  #define float3_xe vec3
+  #define float4_xe vec4
+#else
+  #define bool2_xe bool2
+  #define bool3_xe bool3
+  #define bool4_xe bool4
+  #define int2_xe int2
+  #define int3_xe int3
+  #define int4_xe int4
+  #define uint2_xe uint2
+  #define uint3_xe uint3
+  #define uint4_xe uint4
+  #define float2_xe float2
+  #define float3_xe float3
+  #define float4_xe float4
+#endif  // SHADING_LANGUAGE_GLSL_XE
+
+bool2_xe bool_x2_xe(bool x) { return bool2_xe(x, x); }
+bool3_xe bool_x3_xe(bool x) { return bool3_xe(x, x, x); }
+bool4_xe bool_x4_xe(bool x) { return bool4_xe(x, x, x, x); }
+int2_xe int_x2_xe(int x) { return int2_xe(x, x); }
+int3_xe int_x3_xe(int x) { return int3_xe(x, x, x); }
+int4_xe int_x4_xe(int x) { return int4_xe(x, x, x, x); }
+uint2_xe uint_x2_xe(uint x) { return uint2_xe(x, x); }
+uint3_xe uint_x3_xe(uint x) { return uint3_xe(x, x, x); }
+uint4_xe uint_x4_xe(uint x) { return uint4_xe(x, x, x, x); }
+float2_xe float_x2_xe(float x) { return float2_xe(x, x); }
+float3_xe float_x3_xe(float x) { return float3_xe(x, x, x); }
+float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
+
+// Declarations.
+//
+// Resource binding is very different between shading languages, so any
+// customizations are fine in it. All binding slots for all APIs, however,
+// should be explicitly specified by the shader for ease of manual lookup and
+// tweaking. They should be alphabetically ordered by the name of the target
+// shading language in the argument lists (GLSL before HLSL). For readability,
+// the `set=` and `binding=` specifiers, and register types and the `space`
+// prefix in HLSL, are exposed to the shader, even though they're redundant.
+//
+// The `_xe_*` suffix (with context-specific suffixes, like `_xe_block`) can be
+// used to create internal derivative identifiers (such as buffer block names
+// from instance names, or separate texture and sampler from a combined
+// texture / sampler for languages not supporting the latter).
+
+// Non-compute shader entry point must be declared as:
+// entry_outputs_begin_xe
+//   - Linked stage outputs.
+//   - Linked system stage outputs (like vertex position).
+//   - System stage outputs.
+// entry_outputs_end_stage_inputs_begin_xe
+//   - Linked stage inputs (vertex attributes, interpolants).
+// entry_stage_inputs_end_bindings_begin_[stage]_xe (vertex, pixel)
+//   Everything here must be separated with entry_binding_next_xe, with no
+//   leading or trailing separators.
+//   - Buffer, texture, sampler bindings.
+// entry_bindings_end_inputs_begin_xe
+// (or entry_bindings_empty_end_inputs_begin_xe if there are no bindings).
+//   Everything here must be separated with entry_input_next_xe, with no leading
+//   or trailing separators.
+//   - entry_in_stage_inputs_xe if any linked stage inputs are used.
+//   - Linked system inputs (like pixel position).
+//   - System inputs.
+// entry_inputs_end_code_begin_xe
+//   - Main function code.
+// entry_code_end_xe
+//
+// Compute shader entry point must be declared as:
+// #define LOCAL_SIZE_X_XE ...
+// #define LOCAL_SIZE_Y_XE ...
+// #define LOCAL_SIZE_Z_XE ...
+// entry_bindings_begin_compute_xe
+//   Everything here must be separated with entry_binding_next_xe, with no
+//   leading or trailing separators.
+//   - Buffer, texture, sampler bindings.
+// entry_bindings_end_inputs_begin_compute_xe
+//   Everything here must be separated with entry_input_next_xe, with no leading
+//   or trailing separators.
+//   - System inputs.
+// entry_inputs_end_code_begin_compute_xe
+//   - Main function code.
+// entry_code_end_compute_xe
+//
+// Bindings are in the entry point because they are passed this way in MSL. For
+// this reason, constant and storage buffer declarations are also split into the
+// declaration itself and the binding (because blocks can't be passed as
+// function arguments in GLSL, for instance, so they must be fully declared
+// before functions referencing them in headers, for example - but in MSL, their
+// structure has to be forward-declared for this purpose, and the reference to
+// the binding should be passed to the function).
+//
+// Note that for the stage inputs / outputs, the order must be the same as in
+// HLSL linkage. For this reason, the position and the fragment coordinate also
+// must be after the stage inputs structure in the input list.
+//
+// Both input / output and binding names may be placed in the global scope in
+// the target language, make sure they don't collide with anything there.
+//
+// In compute shaders, the total group size must not exceed 128 threads (unless
+// the shader is used with the appropriate conditionals), as that's the minimum
+// maxComputeWorkGroupInvocations requirement on Vulkan. 128 threads exactly is
+// the recommended group size overall, especially for shaders not using the
+// group functionality, as it's the maximum wave size supported by DXIL and
+// SPIR-V wave operations, and there are PowerVR GPUs with 128-lane waves, so
+// it provides balance between wave utilization and excess thread (and, on GPUs
+// with smaller waves, wave) count if the size of the actual work domain is not
+// aligned to the group size.
+//
+// System outputs and inputs (declared via the respective entry_out_*_xe and
+// entry_in_*_xe):
+// - Vertex shaders:
+//   - out float4_xe out_position_xe
+//   - in uint in_vertex_id_xe
+// - Pixel shaders:
+//   - in float4_xe in_pixel_coord_xe
+//     in_pixel_coord_xe.w is 1/W if PIXEL_COORD_W_IS_INVERSE_XE, W otherwise.
+// - Compute shaders:
+//   - in uint3_xe in_group_id_xe
+//   - in uint3_xe in_local_thread_id_xe
+//   - in uint3_xe in_global_thread_id_xe
+//   - in uint in_local_thread_index_xe
+#if SHADING_LANGUAGE_GLSL_XE
+  #define entry_out_xe(type, name, index, semantic) \
+      layout(location=index) out type name;
+  #define entry_out_target_xe(type, name, index) \
+      layout(location=index) out type name;
+  #define out_xe(name) name
+  #define out_position_xe gl_Position
+  #define entry_in_stage_xe(type, name, index, semantic) \
+      layout(location=index) in type name;
+  #define entry_bindings_end_inputs_begin_compute_xe                         \
+      layout(local_size_x=(LOCAL_SIZE_X_XE), local_size_y=(LOCAL_SIZE_Y_XE), \
+             local_size_z=(LOCAL_SIZE_Z_XE)) in;
+  #define in_xe(name) name
+  #define in_vertex_id_xe (uint(gl_VertexIndex))
+  #define PIXEL_COORD_W_IS_INVERSE_XE 1
+  #define in_pixel_coord_xe gl_FragCoord
+  #define in_group_id_xe gl_WorkGroupID
+  #define in_local_thread_id_xe gl_LocalInvocationID
+  #define in_global_thread_id_xe gl_GlobalInvocationID
+  #define in_local_thread_index_xe gl_LocalInvocationIndex
+  #define entry_inputs_end_code_begin_xe void main() {
+  #define entry_inputs_end_code_begin_compute_xe void main() {
+  #define entry_return_xe return;
+#elif SHADING_LANGUAGE_HLSL_XE
+  #define entry_outputs_begin_xe struct entry_outputs_struct_xe {
+  #define entry_out_xe(type, name, index, semantic) type name : semantic;
+  #define entry_out_target_xe(type, name, index) type name : SV_Target##index;
+  #define out_xe(name) entry_outputs_xe.name
+  #define entry_out_position_xe float4 out_position_var_xe : SV_Position;
+  #define out_position_xe entry_outputs_xe.out_position_var_xe
+  #define entry_outputs_end_stage_inputs_begin_xe \
+      };                                          \
+      struct entry_stage_inputs_struct_xe {
+  #define entry_in_stage_xe(type, name, index, semantic) type name : semantic;
+  #define entry_stage_inputs_end_bindings_begin_vertex_xe };
+  #define entry_stage_inputs_end_bindings_begin_pixel_xe };
+  #define entry_bindings_end_inputs_begin_xe entry_outputs_struct_xe main(
+  #define entry_bindings_empty_end_inputs_begin_xe \
+      entry_outputs_struct_xe main(
+  #define entry_bindings_end_inputs_begin_compute_xe                  \
+      [numthreads(LOCAL_SIZE_X_XE, LOCAL_SIZE_Y_XE, LOCAL_SIZE_Z_XE)] \
+      void main(
+  #define entry_input_next_xe ,
+  #define entry_in_stage_inputs_xe \
+      entry_stage_inputs_struct_xe entry_stage_inputs_xe
+  #define in_xe(name) entry_stage_inputs_xe.name
+  #define entry_in_vertex_id_xe uint in_vertex_id_xe : SV_VertexID
+  #define entry_in_pixel_coord_xe float4_xe in_pixel_coord_xe : SV_Position
+  #define entry_in_group_id_xe uint3_xe in_group_id_xe : SV_GroupID
+  #define entry_in_local_thread_id_xe \
+      uint3_xe in_local_thread_id_xe : SV_GroupThreadID
+  #define entry_in_global_thread_id_xe \
+      uint3_xe in_global_thread_id_xe : SV_DispatchThreadID
+  #define entry_in_local_thread_index_xe \
+      uint in_local_thread_index_xe : SV_GroupIndex
+  #define entry_inputs_end_code_begin_xe \
+      ) {                                \
+          entry_outputs_struct_xe entry_outputs_xe;
+  #define entry_inputs_end_code_begin_compute_xe ) {
+  #define entry_return_xe return entry_outputs_xe;
+#elif SHADING_LANGUAGE_MSL_XE
+  #define entry_outputs_begin_xe struct entry_outputs_struct_xe {
+  #define entry_out_xe(type, name, index, semantic) \
+      type name [[user(semantic)]];
+  #define entry_out_target_xe(type, name, index) type name [[color(index)]];
+  #define out_xe(name) entry_outputs_xe.name
+  #define entry_out_position_xe float4_xe out_position_var_xe [[position]];
+  #define out_position_xe entry_outputs_xe.out_position_var_xe
+  #define entry_outputs_end_stage_inputs_begin_xe \
+      };                                          \
+      struct entry_stage_inputs_struct_xe {
+  #define entry_in_stage_xe(type, name, index, semantic) \
+      type name [[user(semantic)]];
+  #define entry_in_stage_vertex_xe(type, name, index, semantic) \
+      type name [[attribute(index)]];
+  #define entry_stage_inputs_end_bindings_begin_vertex_xe \
+      };                                                  \
+      vertex entry_outputs_struct_xe entry_xe(
+  #define entry_stage_inputs_end_bindings_begin_pixel_xe \
+      };                                                 \
+      fragment entry_outputs_struct_xe entry_xe(
+  #define entry_bindings_begin_compute_xe kernel void entry_xe(
+  #define entry_binding_next_xe ,
+  #define entry_bindings_end_inputs_begin_xe ,
+  #define entry_bindings_end_inputs_begin_compute_xe ,
+  #define entry_input_next_xe ,
+  #define entry_in_stage_inputs_xe \
+      entry_stage_inputs_struct_xe entry_stage_inputs_xe [[stage_in]]
+  #define in_xe(name) entry_stage_inputs_xe.name
+  #define entry_in_vertex_id_xe uint in_vertex_id_xe [[vertex_id]]
+  #define PIXEL_COORD_W_IS_INVERSE_XE 1
+  #define entry_in_pixel_coord_xe float4_xe in_pixel_coord_xe [[position]]
+  #define entry_in_group_id_xe \
+      uint3_xe in_group_id_xe [[threadgroup_position_in_grid]]
+  #define entry_in_local_thread_id_xe \
+      uint3_xe in_local_thread_id_xe [[thread_position_in_threadgroup]]
+  #define entry_in_global_thread_id_xe \
+      uint3_xe in_global_thread_id_xe [[thread_position_in_grid]]
+  #define entry_in_local_thread_index_xe \
+      uint in_local_thread_index_xe [[thread_index_in_threadgroup]]
+  #define entry_inputs_end_code_begin_xe \
+      ) {                                \
+          entry_outputs_struct_xe entry_outputs_xe;
+  #define entry_inputs_end_code_begin_compute_xe ) {
+  #define entry_return_xe return entry_outputs_xe;
+#else
+  #error entry_*_xe not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+#ifndef entry_outputs_begin_xe
+  #define entry_outputs_begin_xe
+#endif  // !entry_outputs_begin_xe
+#ifndef entry_out_position_xe
+  #define entry_out_position_xe
+#endif  // !entry_out_position_xe
+#ifndef entry_outputs_end_stage_inputs_begin_xe
+  #define entry_outputs_end_stage_inputs_begin_xe
+#endif  // !entry_outputs_end_stage_inputs_begin_xe
+#ifndef entry_in_stage_vertex_xe
+  #define entry_in_stage_vertex_xe(type, name, index, semantic) \
+      entry_in_stage_xe(type, name, index, semantic)
+#endif  // !entry_in_stage_vertex_xe
+#ifndef entry_stage_inputs_end_bindings_begin_vertex_xe
+  #define entry_stage_inputs_end_bindings_begin_vertex_xe
+#endif  // !entry_stage_inputs_end_bindings_begin_vertex_xe
+#ifndef entry_stage_inputs_end_bindings_begin_pixel_xe
+  #define entry_stage_inputs_end_bindings_begin_pixel_xe
+#endif  // !entry_stage_inputs_end_bindings_begin_pixel_xe
+#ifndef entry_bindings_begin_compute_xe
+  #define entry_bindings_begin_compute_xe
+#endif  // !entry_bindings_begin_compute_xe
+#ifndef entry_binding_next_xe
+  #define entry_binding_next_xe
+#endif  // !entry_binding_next_xe
+#ifndef entry_bindings_end_inputs_begin_xe
+  #define entry_bindings_end_inputs_begin_xe
+#endif  // !entry_bindings_end_inputs_begin_xe
+#ifndef entry_bindings_empty_end_inputs_begin_xe
+  #define entry_bindings_empty_end_inputs_begin_xe
+#endif  // !entry_bindings_empty_end_inputs_begin_xe
+#ifndef entry_bindings_end_inputs_begin_compute_xe
+  #define entry_bindings_end_inputs_begin_compute_xe
+#endif  // !entry_bindings_end_inputs_begin_compute_xe
+#ifndef entry_input_next_xe
+  #define entry_input_next_xe
+#endif  // !entry_input_next_xe
+#ifndef entry_in_stage_inputs_xe
+  #define entry_in_stage_inputs_xe
+#endif  // !entry_in_stage_inputs_xe
+#ifndef entry_in_vertex_id_xe
+  #define entry_in_vertex_id_xe
+#endif  // !entry_in_vertex_id_xe
+#ifndef entry_in_pixel_coord_xe
+  #define entry_in_pixel_coord_xe
+#endif  // !entry_in_pixel_coord_xe
+#ifndef entry_in_group_id_xe
+  #define entry_in_group_id_xe
+#endif  // !entry_in_group_id_xe
+#ifndef entry_in_local_thread_id_xe
+  #define entry_in_local_thread_id_xe
+#endif  // !entry_in_local_thread_id_xe
+#ifndef entry_in_global_thread_id_xe
+  #define entry_in_global_thread_id_xe
+#endif  // !entry_in_global_thread_id_xe
+#ifndef entry_in_local_thread_index_xe
+  #define entry_in_local_thread_index_xe
+#endif  // !entry_in_local_thread_index_xe
+#ifndef entry_code_end_xe
+  #define entry_code_end_xe \
+        entry_return_xe     \
+      }
+#endif  // !entry_code_end_xe
+#ifndef entry_code_end_compute_xe
+  #define entry_code_end_compute_xe }
+#endif  // !entry_code_end_compute_xe
+
+// NDC_DIRECTION_Y_XE, assuming a positive viewport height, is:
+// *  1.0 if +out_position_xe.y is towards +in_pixel_coord_xe.y,
+// * -1.0 if +out_position_xe.y is towards -in_pixel_coord_xe.y.
+#if SHADING_LANGUAGE_GLSL_XE
+  #define NDC_DIRECTION_Y_XE 1.0f
+#else
+  #define NDC_DIRECTION_Y_XE -1.0f
+#endif  // SHADING_LANGUAGE_GLSL_XE
+
+#if SHADING_LANGUAGE_GLSL_XE
+  // GLSL requires just const for declaring a constant in the global scope.
+  #define static_const_xe const
+#elif SHADING_LANGUAGE_HLSL_XE
+  // HLSL requires static const for declaring a constant in the global scope so
+  // it doesn't go to $Globals instead.
+  #define static_const_xe static const
+#elif SHADING_LANGUAGE_MSL_XE
+  #define static_const_xe constexpr constant
+#else
+  #error static_const_xe not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define block_offset_member_xe(glsl_offset_bytes, hlsl_packoffset, type, \
+                                 name_element_count)                       \
+      layout(offset=glsl_offset_bytes) type name_element_count;
+#elif SHADING_LANGUAGE_HLSL_XE
+  #define block_offset_member_xe(glsl_offset_bytes, hlsl_packoffset, type, \
+                                 name_element_count)                       \
+      type name_element_count : packoffset(hlsl_packoffset);
+#elif SHADING_LANGUAGE_MSL_XE
+  // Explicit offset is not supported by MSL.
+  #define block_offset_member_xe(glsl_offset_bytes, hlsl_packoffset, type, \
+                                 name_element_count)                       \
+      type name_element_count;
+#else
+  #error block_offset_member_xe not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+
+// Structures of constant and structured buffer bindings must be declared before
+// the entry point declaration.
+
+// Constant buffers and push constants must be manually packed as std140 (which
+// is stricter than HLSL packing) due to the GLSL requirement. This means that
+// 32x4 and 32x3 vectors must start at 16-byte alignment, 32x2 at 8-byte, and a
+// single 32-bit value can be placed immediately after a 32x3 vector (the Vulkan
+// definition of this behavior). Specifically, all alignment padding must be
+// inserted explicitly (or block_offset_member_xe must be used), as by default
+// HLSL doesn't have the alignment requirement, only the rule that elements
+// (array elements, or single non-array members) must not cross 32x4 vector
+// boundaries, so something like float|float3 or float|float2|float will be
+// packed differently in GLSL (float|pad3|float3 or float|pad|float2|float) and
+// HLSL (float|float3 or float|float2|float).
+
+// Constant buffer and push constant member names will be in the global scope in
+// some target languages - they must not collide with anything else there. To
+// access a constant, use constant_xe or push_const_xe.
+
+// Push constants, even though may be spread across multiple constant buffers in
+// the Direct3D 12 API, must be declared in a single structure in XeSL - the
+// reason is that layout qualifiers in GLSL can't be used in regular structures,
+// only in blocks, and sub-blocks can't be declared in a block, so there's no
+// way to create separate identifiers for push constant ranges in GLSL. Though
+// both GLSL and HLSL support anonymous push constants / cbuffers, MSL requires
+// a name for the buffer binding.
+// In GLSL, the offsets in the push constants are global across shader stages.
+// In HLSL, they're local to the specific root constant buffer.
+#if SHADING_LANGUAGE_GLSL_XE
+  #define const_buffer_begin_xe(name, glsl_set, glsl_binding, hlsl_b, \
+                                hlsl_b_space)                         \
+      layout(std140, glsl_set, glsl_binding)                          \
+      uniform name##_xe_block {
+  #define const_buffer_end_xe(name) \
+      } name;
+  #define constant_xe(const_buffer_name, constant_name) \
+      const_buffer_name.constant_name
+  #define push_const_begin_xe(hlsl_b, hlsl_b_space) \
+      layout(push_constant) uniform push_const_block_xe {
+  #define push_const_end_xe \
+      } push_consts_xe;
+  #define push_const_xe(name) push_consts_xe.name
+#elif SHADING_LANGUAGE_HLSL_XE
+  #define const_buffer_begin_xe(name, glsl_set, glsl_binding, hlsl_b, \
+                                hlsl_b_space)                         \
+      cbuffer name : register(hlsl_b, hlsl_b_space) {
+  #define const_buffer_end_xe(name) \
+      };
+  #define constant_xe(const_buffer_name, constant_name) constant_name
+  #define push_const_begin_xe(hlsl_b, hlsl_b_space) \
+      cbuffer push_consts_xe : register(hlsl_b, hlsl_b_space) {
+  #define push_const_end_xe \
+      };
+  #define push_const_xe(name) name
+#elif SHADING_LANGUAGE_MSL_XE
+  #define const_buffer_begin_xe(name, glsl_set, glsl_binding, hlsl_b, \
+                                hlsl_b_space)                         \
+      struct name##_xe_struct {
+  #define const_buffer_end_xe(name) \
+      };
+  #define const_buffer_binding_xe(name, msl_buffer) \
+      constant name##_xe_struct& name [[msl_buffer]]
+  #define constant_xe(const_buffer_name, constant_name) \
+      const_buffer_name.constant_name
+  #define push_const_begin_xe(hlsl_b, hlsl_b_space) \
+      struct push_const_struct_xe {
+  #define push_const_end_xe \
+      };
+  #define push_const_binding_xe(msl_buffer) \
+      constant push_const_struct_xe& push_consts_xe [[msl_buffer]]
+  #define push_const_xe(name) push_consts_xe.name
+#else
+  #error Constant buffers not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+#ifndef const_buffer_binding_xe
+  #define const_buffer_binding_xe(name, msl_buffer)
+#endif  // !const_buffer_binding_xe
+#ifndef push_const_binding_xe
+  #define push_const_binding_xe(msl_buffer)
+#endif  // !push_const_binding_xe
+
+// Declarations of typed storage buffers and dword buffers (_declare) must be
+// outside the entry point, but their bindings (_binding) must also be specified
+// in the entry point binding declarations.
+//
+// An array buffer is a buffer limited to 1/2/4-component vectors of 32-bit
+// integers and floats, a typed buffer on Direct3D, but a storage buffer (as
+// opposed to a texel buffer, which has a very small minimum requirement for the
+// maximum size) on Vulkan.
+//
+// A UInt vector buffer is a buffer containing 32-bit values, but loading or
+// storing may be done for 2, 3 or 4 consecutive values that are still
+// 32-bit-aligned, and depending on the language and hardware support, access
+// of multiple elements may or may not be compiled into a single hardware
+// instruction instead of separate accesses of individual elements. Each index
+// value corresponds to a 32-bit element. Implementations for languages without
+// native support must use functions, not macros, for adding the component
+// offset to the index to avoid evaluating the address multiple times.
+#if SHADING_LANGUAGE_GLSL_XE
+  // Binding declarations.
+  #define array_buffer_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                  hlsl_t, hlsl_t_space)                     \
+      layout(std430, glsl_set, glsl_binding)                                \
+      readonly buffer name##_xe_block {                                     \
+        value_type data[];                                                  \
+      } name;
+  #define array_buffer_wo_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                     hlsl_u, hlsl_u_space)                     \
+      layout(std430, glsl_set, glsl_binding)                                   \
+      writeonly buffer name##_xe_block {                                       \
+        value_type data[];                                                     \
+      } name;
+  #define uint_vector_buffer_declare_xe(name, glsl_set, glsl_binding, hlsl_t, \
+                                        hlsl_t_space)                         \
+      layout(std430, glsl_set, glsl_binding)                                  \
+      readonly buffer name##_xe_block {                                       \
+        uint data[];                                                          \
+      } name;                                                                 \
+      uint2_xe name##_xe_load2(uint position) {                               \
+        return uint2_xe(name.data[position], name.data[position + 1u]);       \
+      }                                                                       \
+      uint3_xe name##_xe_load3(uint position) {                               \
+        return uint3_xe(name.data[position], name.data[position + 1u],        \
+                        name.data[position + 2u]);                            \
+      }                                                                       \
+      uint4_xe name##_xe_load4(uint position) {                               \
+        return uint4_xe(name.data[position], name.data[position + 1u],        \
+                        name.data[position + 2u], name.data[position + 3u]);  \
+      }
+  // Loading and storing.
+  #define array_buffer_load_xe(name, position) ((name).data[uint(position)])
+  #define array_buffer_store_xe(name, position, value) \
+      ((name).data[uint(position)] = (value))
+  #define uint_vector_buffer_load1_xe(name, position) \
+      ((name).data[uint(position)])
+  #define uint_vector_buffer_load2_xe(name, position) \
+      name##_xe_load2(uint(position))
+  #define uint_vector_buffer_load3_xe(name, position) \
+      name##_xe_load3(uint(position))
+  #define uint_vector_buffer_load4_xe(name, position) \
+      name##_xe_load4(uint(position))
+#elif SHADING_LANGUAGE_HLSL_XE
+  // Binding declarations.
+  #define array_buffer_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                  hlsl_t, hlsl_t_space) \
+      Buffer<value_type> name : register(hlsl_t, hlsl_t_space);
+  #define array_buffer_wo_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                     hlsl_u, hlsl_u_space)                     \
+      RWBuffer<value_type> name : register(hlsl_u, hlsl_u_space);
+  #define uint_vector_buffer_declare_xe(name, glsl_set, glsl_binding, hlsl_t, \
+                                        hlsl_t_space)                         \
+      ByteAddressBuffer name : register(hlsl_t, hlsl_t_space);
+  // Loading and storing.
+  #define array_buffer_load_xe(name, position) ((name)[uint(position)])
+  #define array_buffer_store_xe(name, position, value) \
+      ((name)[uint(position)] = (value))
+  #define uint_vector_buffer_load1_xe(name, position) \
+      ((name).Load(int(position) << 2))
+  #define uint_vector_buffer_load2_xe(name, position) \
+      ((name).Load2(int(position) << 2))
+  #define uint_vector_buffer_load3_xe(name, position) \
+      ((name).Load3(int(position) << 2))
+  #define uint_vector_buffer_load4_xe(name, position) \
+      ((name).Load4(int(position) << 2))
+#elif SHADING_LANGUAGE_MSL_XE
+  // Binding declarations.
+  #define array_buffer_binding_xe(value_type, name, msl_buffer) \
+      const device value_type* name [[msl_buffer]]
+  #define array_buffer_wo_binding_xe(value_type, name, msl_buffer) \
+      device value_type* name [[msl_buffer]]
+  #define uint_vector_buffer_binding_xe(name, msl_buffer) \
+      const device uint* name [[msl_buffer]]
+  // Loading and storing.
+  #define array_buffer_load_xe(name, position) ((name)[size_t(position)])
+  #define array_buffer_store_xe(name, position, value) \
+      ((name)[size_t(position)] = (value))
+  #define uint_vector_buffer_load1_xe(name, position) ((name)[size_t(position)])
+  #define uint_vector_buffer_load2_xe(name, position)         \
+      uint2_xe(*reinterpret_cast<const device packed_uint2*>( \
+                   &((name)[size_t(position)])))
+  #define uint_vector_buffer_load3_xe(name, position)         \
+      uint3_xe(*reinterpret_cast<const device packed_uint3*>( \
+                   &((name)[size_t(position)])))
+  #define uint_vector_buffer_load4_xe(name, position)         \
+      uint4_xe(*reinterpret_cast<const device packed_uint4*>( \
+                   &((name)[size_t(position)])))
+#else
+  #error Storage buffers not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+#ifndef array_buffer_declare_xe
+  #define array_buffer_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                  hlsl_t, hlsl_t_space)
+#endif  // !array_buffer_declare_xe
+#ifndef array_buffer_wo_declare_xe
+  #define array_buffer_wo_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                     hlsl_u, hlsl_u_space)
+#endif  // !array_buffer_wo_declare_xe
+#ifndef array_buffer_binding_xe
+  #define array_buffer_binding_xe(value_type, name, msl_buffer)
+#endif  // !array_buffer_binding_xe
+#ifndef array_buffer_wo_binding_xe
+  #define array_buffer_wo_binding_xe(value_type, name, msl_buffer)
+#endif  // !array_buffer_wo_binding_xe
+#ifndef uint_vector_buffer_declare_xe
+  #define uint_vector_buffer_declare_xe(name, glsl_set, glsl_binding, hlsl_t, \
+                                        hlsl_t_space)
+#endif  // !uint_vector_buffer_declare_xe
+#ifndef uint_vector_buffer_binding_xe
+  #define uint_vector_buffer_binding_xe(name, msl_buffer)
+#endif  // !uint_vector_buffer_binding_xe
+
+// Buffer, texture, sampler and image bindings must be in the entry point
+// bindings declaration.
+// - texture_xe is a separate texture.
+// - sampler_state_xe a separate sampler.
+// - sampler_xe is a combined texture / sampler where available, internally
+//   separate where not.
+#if SHADING_LANGUAGE_GLSL_XE
+  #define COMBINED_TEXTURE_SAMPLER_XE 1
+  // Types.
+  #define texture_buffer_xe textureBuffer
+  #define texture_buffer_uint_xe utextureBuffer
+  #define texture_2d_xe texture2D
+  #define texture_2d_ms_xe texture2DMS
+  #define sampler_2d_xe sampler2D
+  #define image_2d_xe image2D
+  #define image_format_rgb10_a2_xe rgb10_a2
+  #define image_format_rgba16f_xe rgba16f
+  // Binding declarations.
+  #define texture_xe(texture_type, name, glsl_set, glsl_binding, hlsl_t, \
+                     hlsl_t_space, msl_texture)                          \
+      layout(glsl_set, glsl_binding) uniform texture_type name;
+  #define sampler_state_xe(name, glsl_set, glsl_binding, hlsl_s, hlsl_s_space, \
+                           msl_sampler)                                        \
+      layout(glsl_set, glsl_binding) uniform sampler name;
+  #define sampler_xe(sampler_type, name, glsl_set, glsl_binding, hlsl_t, \
+                     hlsl_t_space, hlsl_s, hlsl_s_space, msl_texture,    \
+                     msl_sampler)                                        \
+      layout(glsl_set, glsl_binding) uniform sampler_type name;
+  #define image_wo_xe(type, format, name, glsl_set, glsl_binding, hlsl_u, \
+                      hlsl_u_space, msl_texture)                          \
+      layout(format, glsl_set, glsl_binding) uniform writeonly type name;
+  // Fetching and storing.
+  #define texel_fetch_buffer_xe(texture_name, position) \
+      texelFetch(texture_name, int(position))
+  #define texel_fetch_2d_xe(texture_name, position, lod) \
+      texelFetch(texture_name, int2_xe(position), int(lod))
+  #define texel_fetch_2d_ms_xe(texture_name, position, sample_index) \
+      texelFetch(texture_name, int2_xe(position), int(sample_index))
+  #define sample_sep_lod_2d_xe(texture_name, sampler_name, position, lod) \
+      textureLod(sampler2D(texture_name, sampler_name), position, lod)
+  #define sample_comb_lod_2d_xe(texture_sampler_name, position, lod) \
+      textureLod(texture_sampler_name, position, lod)
+  #define gather_sep_2d_r_xe(texture_name, sampler_name, position) \
+      textureGather(sampler2D(texture_name, sampler_name), position, 0)
+  #define gather_sep_2d_g_xe(texture_name, sampler_name, position) \
+      textureGather(sampler2D(texture_name, sampler_name), position, 1)
+  #define gather_sep_2d_b_xe(texture_name, sampler_name, position) \
+      textureGather(sampler2D(texture_name, sampler_name), position, 2)
+  #define gather_sep_2d_a_xe(texture_name, sampler_name, position) \
+      textureGather(sampler2D(texture_name, sampler_name), position, 3)
+  #define gather_comb_2d_r_xe(texture_sampler_name, position) \
+      textureGather(texture_sampler_name, position, 0)
+  #define gather_comb_2d_g_xe(texture_sampler_name, position) \
+      textureGather(texture_sampler_name, position, 1)
+  #define gather_comb_2d_b_xe(texture_sampler_name, position) \
+      textureGather(texture_sampler_name, position, 2)
+  #define gather_comb_2d_a_xe(texture_sampler_name, position) \
+      textureGather(texture_sampler_name, position, 3)
+  #define image_store_2d_rgba_xe(name, position, data) \
+      imageStore(name, int2_xe(position), data)
+#elif SHADING_LANGUAGE_HLSL_XE
+  // Types.
+  #define texture_buffer_xe Buffer<float4_xe>
+  #define texture_buffer_uint_xe Buffer<uint4_xe>
+  #define texture_2d_xe Texture2D<float4_xe>
+  #define texture_2d_ms_xe Texture2DMS<float4_xe>
+  #define image_2d_xe RWTexture2D
+  #define image_format_rgb10_a2_xe unorm float4
+  #define image_format_rgba16f_xe float4
+  // Binding declarations.
+  #define texture_xe(texture_type, name, glsl_set, glsl_binding, hlsl_t, \
+                     hlsl_t_space, msl_texture)                          \
+      texture_type name : register(hlsl_t, hlsl_t_space);
+  #define sampler_state_xe(name, glsl_set, glsl_binding, hlsl_s, hlsl_s_space, \
+                           msl_sampler)                                        \
+      SamplerState name : register(hlsl_s, hlsl_s_space);
+  #define image_wo_xe(type, format, name, glsl_set, glsl_binding, hlsl_u, \
+                      hlsl_u_space, msl_texture)                          \
+      type<format> name : register(hlsl_u, hlsl_u_space);
+  // Fetching and storing.
+  #define texel_fetch_buffer_xe(texture_name, position) \
+      ((texture_name).Load(int(position)))
+  #define texel_fetch_2d_xe(texture_name, position, lod) \
+      ((texture_name).Load(int3_xe(position, lod)))
+  #define texel_fetch_2d_ms_xe(texture_name, position, sample_index) \
+      ((texture_name).Load(int2_xe(position), int(sample_index)))
+  #define sample_sep_lod_2d_xe(texture_name, sampler_name, position, lod) \
+      ((texture_name).SampleLevel(sampler_name, position, lod))
+  #define gather_sep_2d_r_xe(texture_name, sampler_name, position) \
+      ((texture_name).GatherRed(sampler_name, position))
+  #define gather_sep_2d_g_xe(texture_name, sampler_name, position) \
+      ((texture_name).GatherGreen(sampler_name, position))
+  #define gather_sep_2d_b_xe(texture_name, sampler_name, position) \
+      ((texture_name).GatherBlue(sampler_name, position))
+  #define gather_sep_2d_a_xe(texture_name, sampler_name, position) \
+      ((texture_name).GatherAlpha(sampler_name, position))
+  #define image_store_2d_rgba_xe(name, position, data) \
+      ((name)[int2_xe(position)] = (data))
+#elif SHADING_LANGUAGE_MSL_XE
+  // Types.
+  #define texture_buffer_xe texture_buffer<float>
+  #define texture_buffer_uint_xe texture_buffer<uint>
+  #define texture_2d_xe texture2d<float>
+  #define texture_2d_ms_xe texture2d_ms<float>
+  #define image_2d_xe texture2d
+  #define image_format_rgb10_a2_xe float
+  #define image_format_rgba16f_xe float
+  // Binding declarations.
+  #define texture_xe(texture_type, name, glsl_set, glsl_binding, hlsl_t, \
+                     hlsl_t_space, msl_texture)                          \
+      texture_type name [[msl_texture]]
+  #define sampler_state_xe(name, glsl_set, glsl_binding, hlsl_s, hlsl_s_space, \
+                           msl_sampler)                                        \
+      sampler name [[msl_sampler]]
+  #define image_wo_xe(type, format, name, glsl_set, glsl_binding, hlsl_u, \
+                      hlsl_u_space, msl_texture)                          \
+      type<format, access::write> name [[msl_texture]]
+  // Fetching and storing.
+  #define texel_fetch_buffer_xe(texture_name, position) \
+      ((texture_name).read(uint(position)))
+  #define texel_fetch_2d_xe(texture_name, position, lod) \
+      ((texture_name).read(uint2_xe(position), uint(lod)))
+  #define texel_fetch_2d_ms_xe(texture_name, position, sample_index) \
+      ((texture_name).read(uint2_xe(position), uint(sample_index)))
+  #define sample_sep_lod_2d_xe(texture_name, sampler_name, position, lod) \
+      ((texture_name).sample(sampler_name, position, level(lod)))
+  #define gather_sep_2d_r_xe(texture_name, sampler_name, position) \
+      ((texture_name).gather(sampler_name, position, int2_xe(0), component::x))
+  #define gather_sep_2d_g_xe(texture_name, sampler_name, position) \
+      ((texture_name).gather(sampler_name, position, int2_xe(0), component::y))
+  #define gather_sep_2d_b_xe(texture_name, sampler_name, position) \
+      ((texture_name).gather(sampler_name, position, int2_xe(0), component::z))
+  #define gather_sep_2d_a_xe(texture_name, sampler_name, position) \
+      ((texture_name).gather(sampler_name, position, int2_xe(0), component::w))
+  #define image_store_2d_rgba_xe(name, position, data) \
+      ((name).write(data, uint2_xe(position)))
+#else
+  #error Buffers and textures not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+// If there's no language specialization doing this already, implement combined
+// textures / samplers as separate, with the `_xe_sampler` suffix for samplers.
+// The sampler types become the texture types.
+#if !COMBINED_TEXTURE_SAMPLER_XE
+  #ifndef sampler_2d_xe
+    #define sampler_2d_xe texture_2d_xe
+  #endif  // !sampler_2d_xe
+  #ifndef sampler_xe
+    #define sampler_xe(sampler_type, name, glsl_set, glsl_binding, hlsl_t,   \
+                       hlsl_t_space, hlsl_s, hlsl_s_space, msl_texture,      \
+                       msl_sampler)                                          \
+        texture_xe(sampler_type, name, glsl_set, glsl_binding, hlsl_t,       \
+                   hlsl_t_space, msl_texture)                                \
+        entry_binding_next_xe                                                \
+        sampler_state_xe(name##_xe_sampler, glsl_set, glsl_binding, hlsl_s, \
+                         hlsl_s_space, msl_sampler)
+  #endif  // !sampler_xe
+  #ifndef sample_comb_lod_2d_xe
+    #define sample_comb_lod_2d_xe(texture_sampler_name, position, lod)         \
+        sample_sep_lod_2d_xe(texture_sampler_name,                             \
+                             texture_sampler_name##_xe_sampler, position, lod)
+  #endif  // !sample_comb_lod_2d_xe
+  #ifndef gather_comb_2d_r_xe
+    #define gather_comb_2d_r_xe(texture_sampler_name, position) \
+        gather_sep_2d_r_xe(texture_sampler_name,                \
+                           texture_sampler_name##_xe_sampler, position)
+  #endif  // !gather_comb_2d_r_xe
+  #ifndef gather_comb_2d_g_xe
+    #define gather_comb_2d_g_xe(texture_sampler_name, position) \
+        gather_sep_2d_g_xe(texture_sampler_name,                \
+                           texture_sampler_name##_xe_sampler, position)
+  #endif  // !gather_comb_2d_g_xe
+  #ifndef gather_comb_2d_b_xe
+    #define gather_comb_2d_b_xe(texture_sampler_name, position) \
+        gather_sep_2d_b_xe(texture_sampler_name,                \
+                           texture_sampler_name##_xe_sampler, position)
+  #endif  // !gather_comb_2d_b_xe
+  #ifndef gather_comb_2d_a_xe
+    #define gather_comb_2d_a_xe(texture_sampler_name, position) \
+        gather_sep_2d_a_xe(texture_sampler_name,                \
+                           texture_sampler_name##_xe_sampler, position)
+  #endif  // !gather_comb_2d_a_xe
+#endif  // !COMBINED_TEXTURE_SAMPLER_XE
+
+// Passing bindings to functions, and also output and input / output parameters.
+
+#if SHADING_LANGUAGE_MSL_XE
+  #define out_param_xe(type, name) thread type& name
+  #define inout_param_xe(type, name) thread type& name
+#else
+  #define out_param_xe(type, name) out type name
+  #define inout_param_xe(type, name) inout type name
+#endif  // SHADING_LANGUAGE_MSL_XE
+
+#if SHADING_LANGUAGE_MSL_XE
+  // Prototype parameters.
+  #define param_const_buffer_xe(name) constant name##_xe_struct& name
+  #define param_next_after_const_buffer_xe ,
+  #define param_push_consts_xe constant push_const_struct_xe& push_consts_xe
+  #define param_next_after_push_consts_xe ,
+  #define param_uint_vector_buffer_xe(name) const device uint* name
+  #define param_next_after_uint_vector_buffer_xe ,
+  // Call arguments.
+  #define pass_const_buffer_xe(name) (name)
+  #define pass_next_after_const_buffer_xe ,
+  #define pass_push_consts_xe push_consts_xe
+  #define pass_next_after_push_consts_xe ,
+  #define pass_uint_vector_buffer_xe(name) (name)
+  #define pass_next_after_uint_vector_buffer_xe ,
+#endif  // SHADING_LANGUAGE_*_XE
+
+// Prototype parameters.
+#ifndef param_const_buffer_xe
+  #define param_const_buffer_xe(name)
+#endif  // !param_const_buffer_xe
+#ifndef param_next_after_const_buffer_xe
+  #define param_next_after_const_buffer_xe
+#endif  // !param_next_after_const_buffer_xe
+#ifndef param_push_consts_xe
+  #define param_push_consts_xe
+#endif  // !param_push_consts_xe
+#ifndef param_next_after_push_consts_xe
+  #define param_next_after_push_consts_xe
+#endif  // !param_next_after_push_consts_xe
+#ifndef param_uint_vector_buffer_xe
+  #define param_uint_vector_buffer_xe(name)
+#endif  // !param_uint_vector_buffer_xe
+#ifndef param_next_after_uint_vector_buffer_xe
+  #define param_next_after_uint_vector_buffer_xe
+#endif  // !param_next_after_uint_vector_buffer_xe
+// Call arguments.
+#ifndef pass_const_buffer_xe
+  #define pass_const_buffer_xe(name)
+#endif  // !pass_const_buffer_xe
+#ifndef pass_next_after_const_buffer_xe
+  #define pass_next_after_const_buffer_xe
+#endif  // !pass_next_after_const_buffer_xe
+#ifndef pass_push_consts_xe
+  #define pass_push_consts_xe
+#endif  // !pass_push_consts_xe
+#ifndef pass_next_after_push_consts_xe
+  #define pass_next_after_push_consts_xe
+#endif  // !pass_next_after_push_consts_xe
+#ifndef pass_uint_vector_buffer_xe
+  #define pass_uint_vector_buffer_xe(name)
+#endif  // !pass_uint_vector_buffer_xe
+#ifndef pass_next_after_uint_vector_buffer_xe
+  #define pass_next_after_uint_vector_buffer_xe
+#endif  // !pass_next_after_uint_vector_buffer_xe
+
+// Attributes.
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define unroll_xe [[unroll]]
+  #define dont_unroll [[dont_unroll]]
+  #define flatten_xe [[flatten]]
+  #define dont_flatten_xe [[dont_flatten]]
+#elif SHADING_LANGUAGE_HLSL_XE
+  #define unroll_xe [unroll]
+  #define dont_unroll [loop]
+  #define flatten_xe [flatten]
+  #define dont_flatten_xe [branch]
+#endif  // SHADING_LANGUAGE_*_XE
+#ifndef unroll_xe
+  #define unroll_xe
+#endif  // !unroll_xe
+#ifndef dont_unroll
+  #define dont_unroll
+#endif  // !dont_unroll
+#ifndef flatten_xe
+  #define flatten_xe
+#endif  // !flatten_xe
+#ifndef dont_flatten_xe
+  #define dont_flatten_xe
+#endif  // !dont_flatten_xe
+
+// Function aliases.
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define less_than_xe lessThan
+  #define less_than_equal_xe lessThanEqual
+  #define greater_than_xe greaterThan
+  #define greater_than_equal_xe greaterThanEqual
+  #define equal_xe equal
+  #define not_equal_xe notEqual
+  #define not_xe not
+#else
+  #define less_than_xe(x, y) ((x) < (y))
+  #define less_than_equal_xe(x, y) ((x) <= (y))
+  #define greater_than_xe(x, y) ((x) > (y))
+  #define greater_than_equal_xe(x, y) ((x) >= (y))
+  #define equal_xe(x, y) ((x) == (y))
+  #define not_equal_xe(x, y) ((x) != (y))
+  #define not_xe(x) (!(x))
+#endif  // SHADING_LANGUAGE_GLSL_XE
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define select_xe(condition, true_result, false_result) \
+      mix(false_result, true_result, condition)
+#elif SHADING_LANGUAGE_HLSL_XE
+  #define select_xe(condition, true_result, false_result) \
+      ((condition) ? (true_result) : (false_result))
+#elif SHADING_LANGUAGE_MSL_XE
+  #define select_xe(condition, true_result, false_result) \
+      select(false_result, true_result, condition)
+#else
+  #error select_xe not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define float_bits_to_int_xe floatBitsToInt
+  #define float_bits_to_uint_xe floatBitsToUint
+  #define int_bits_to_float_xe intBitsToFloat
+  #define uint_bits_to_float_xe uintBitsToFloat
+#elif SHADING_LANGUAGE_HLSL_XE
+  // Using functions instead of #define for implicit argument conversion.
+  int float_bits_to_int_xe(float value) { return asint(value); }
+  int2_xe float_bits_to_int_xe(float2_xe value) { return asint(value); }
+  int3_xe float_bits_to_int_xe(float3_xe value) { return asint(value); }
+  int4_xe float_bits_to_int_xe(float4_xe value) { return asint(value); }
+  uint float_bits_to_uint_xe(float value) { return asuint(value); }
+  uint2_xe float_bits_to_uint_xe(float2_xe value) { return asuint(value); }
+  uint3_xe float_bits_to_uint_xe(float3_xe value) { return asuint(value); }
+  uint4_xe float_bits_to_uint_xe(float4_xe value) { return asuint(value); }
+  float int_bits_to_float_xe(int value) { return asfloat(value); }
+  float2_xe int_bits_to_float_xe(int2_xe value) { return asfloat(value); }
+  float3_xe int_bits_to_float_xe(int3_xe value) { return asfloat(value); }
+  float4_xe int_bits_to_float_xe(int4_xe value) { return asfloat(value); }
+  float uint_bits_to_float_xe(uint value) { return asfloat(value); }
+  float2_xe uint_bits_to_float_xe(uint2_xe value) { return asfloat(value); }
+  float3_xe uint_bits_to_float_xe(uint3_xe value) { return asfloat(value); }
+  float4_xe uint_bits_to_float_xe(uint4_xe value) { return asfloat(value); }
+#elif SHADING_LANGUAGE_MSL_XE
+  // Using functions instead of #define for implicit argument conversion.
+  int float_bits_to_int_xe(float value) {
+    return as_type<int>(value);
+  }
+  int2_xe float_bits_to_int_xe(float2_xe value) {
+    return as_type<int2_xe>(value);
+  }
+  int3_xe float_bits_to_int_xe(float3_xe value) {
+    return as_type<int3_xe>(value);
+  }
+  int4_xe float_bits_to_int_xe(float4_xe value) {
+    return as_type<int4_xe>(value);
+  }
+  uint float_bits_to_uint_xe(float value) {
+    return as_type<uint>(value);
+  }
+  uint2_xe float_bits_to_uint_xe(float2_xe value) {
+    return as_type<uint2_xe>(value);
+  }
+  uint3_xe float_bits_to_uint_xe(float3_xe value) {
+    return as_type<uint3_xe>(value);
+  }
+  uint4_xe float_bits_to_uint_xe(float4_xe value) {
+    return as_type<uint4_xe>(value);
+  }
+  float int_bits_to_float_xe(int value) {
+    return as_type<float>(value);
+  }
+  float2_xe int_bits_to_float_xe(int2_xe value) {
+    return as_type<float2_xe>(value);
+  }
+  float3_xe int_bits_to_float_xe(int3_xe value) {
+    return as_type<float3_xe>(value);
+  }
+  float4_xe int_bits_to_float_xe(int4_xe value) {
+    return as_type<float4_xe>(value);
+  }
+  float uint_bits_to_float_xe(uint value) {
+    return as_type<float>(value);
+  }
+  float2_xe uint_bits_to_float_xe(uint2_xe value) {
+    return as_type<float2_xe>(value);
+  }
+  float3_xe uint_bits_to_float_xe(uint3_xe value) {
+    return as_type<float3_xe>(value);
+  }
+  float4_xe uint_bits_to_float_xe(uint4_xe value) {
+    return as_type<float4_xe>(value);
+  }
+#else
+  #error Float bit casting not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+
+#if SHADING_LANGUAGE_GLSL_XE
+  float saturate_xe(float value) {
+    return clamp(value, 0.0f, 1.0f);
+  }
+  float2_xe saturate_xe(float2_xe value) {
+    return clamp(value, float_x2_xe(0.0f), float_x2_xe(1.0f));
+  }
+  float3_xe saturate_xe(float3_xe value) {
+    return clamp(value, float_x3_xe(0.0f), float_x3_xe(1.0f));
+  }
+  float4_xe saturate_xe(float4_xe value) {
+    return clamp(value, float_x4_xe(0.0f), float_x4_xe(1.0f));
+  }
+#else
+  #define saturate_xe saturate
+#endif  // SHADING_LANGUAGE_GLSL_XE
+
+// Returning a unsigned integer vector. The result is undefined for zero.
+#if SHADING_LANGUAGE_GLSL_XE
+  uint first_one_bit_low_xe(int value) {
+    return uint(findLSB(value));
+  }
+  uint2_xe first_one_bit_low_xe(int2_xe value) {
+    return uint2_xe(findLSB(value));
+  }
+  uint3_xe first_one_bit_low_xe(int3_xe value) {
+    return uint3_xe(findLSB(value));
+  }
+  uint4_xe first_one_bit_low_xe(int4_xe value) {
+    return uint4_xe(findLSB(value));
+  }
+  uint first_one_bit_low_xe(uint value) {
+    return uint(findLSB(value));
+  }
+  uint2_xe first_one_bit_low_xe(uint2_xe value) {
+    return uint2_xe(findLSB(value));
+  }
+  uint3_xe first_one_bit_low_xe(uint3_xe value) {
+    return uint3_xe(findLSB(value));
+  }
+  uint4_xe first_one_bit_low_xe(uint4_xe value) {
+    return uint4_xe(findLSB(value));
+  }
+  // GLSL findMSB finds the highest 0 for a negative value.
+  uint first_one_bit_high_xe(int value) {
+    return uint(findMSB(uint(value)));
+  }
+  uint2_xe first_one_bit_high_xe(int2_xe value) {
+    return uint2_xe(findMSB(uint2_xe(value)));
+  }
+  uint3_xe first_one_bit_high_xe(int3_xe value) {
+    return uint3_xe(findMSB(uint3_xe(value)));
+  }
+  uint4_xe first_one_bit_high_xe(int4_xe value) {
+    return uint4_xe(findMSB(uint4_xe(value)));
+  }
+  uint first_one_bit_high_xe(uint value) {
+    return uint(findMSB(value));
+  }
+  uint2_xe first_one_bit_high_xe(uint2_xe value) {
+    return uint2_xe(findMSB(value));
+  }
+  uint3_xe first_one_bit_high_xe(uint3_xe value) {
+    return uint3_xe(findMSB(value));
+  }
+  uint4_xe first_one_bit_high_xe(uint4_xe value) {
+    return uint4_xe(findMSB(value));
+  }
+#elif SHADING_LANGUAGE_HLSL_XE
+  uint first_one_bit_low_xe(int value) {
+    return uint(firstbitlow(value));
+  }
+  uint2_xe first_one_bit_low_xe(int2_xe value) {
+    return uint2_xe(firstbitlow(value));
+  }
+  uint3_xe first_one_bit_low_xe(int3_xe value) {
+    return uint3_xe(firstbitlow(value));
+  }
+  uint4_xe first_one_bit_low_xe(int4_xe value) {
+    return uint4_xe(firstbitlow(value));
+  }
+  uint first_one_bit_low_xe(uint value) {
+    return firstbitlow(value);
+  }
+  uint2_xe first_one_bit_low_xe(uint2_xe value) {
+    return firstbitlow(value);
+  }
+  uint3_xe first_one_bit_low_xe(uint3_xe value) {
+    return firstbitlow(value);
+  }
+  uint4_xe first_one_bit_low_xe(uint4_xe value) {
+    return firstbitlow(value);
+  }
+  // HLSL firstbithigh finds the highest 0 for a negative value.
+  uint first_one_bit_high_xe(int value) {
+    return uint(firstbithigh(uint(value)));
+  }
+  uint2_xe first_one_bit_high_xe(int2_xe value) {
+    return uint2_xe(firstbithigh(uint2_xe(value)));
+  }
+  uint3_xe first_one_bit_high_xe(int3_xe value) {
+    return uint3_xe(firstbithigh(uint3_xe(value)));
+  }
+  uint4_xe first_one_bit_high_xe(int4_xe value) {
+    return uint4_xe(firstbithigh(uint4_xe(value)));
+  }
+  uint first_one_bit_high_xe(uint value) {
+    return firstbithigh(value);
+  }
+  uint2_xe first_one_bit_high_xe(uint2_xe value) {
+    return firstbithigh(value);
+  }
+  uint3_xe first_one_bit_high_xe(uint3_xe value) {
+    return firstbithigh(value);
+  }
+  uint4_xe first_one_bit_high_xe(uint4_xe value) {
+    return firstbithigh(value);
+  }
+#elif SHADING_LANGUAGE_MSL_XE
+  uint first_one_bit_low_xe(int value) {
+    return uint(ctz(value));
+  }
+  uint2_xe first_one_bit_low_xe(int2_xe value) {
+    return uint2_xe(ctz(value));
+  }
+  uint3_xe first_one_bit_low_xe(int3_xe value) {
+    return uint3_xe(ctz(value));
+  }
+  uint4_xe first_one_bit_low_xe(int4_xe value) {
+    return uint4_xe(ctz(value));
+  }
+  uint first_one_bit_low_xe(uint value) {
+    return ctz(value);
+  }
+  uint2_xe first_one_bit_low_xe(uint2_xe value) {
+    return ctz(value);
+  }
+  uint3_xe first_one_bit_low_xe(uint3_xe value) {
+    return ctz(value);
+  }
+  uint4_xe first_one_bit_low_xe(uint4_xe value) {
+    return ctz(value);
+  }
+  uint first_one_bit_high_xe(int value) {
+    return 32u - uint(clz(value));
+  }
+  uint2_xe first_one_bit_high_xe(int2_xe value) {
+    return uint_x2_xe(32u) - uint2_xe(clz(value));
+  }
+  uint3_xe first_one_bit_high_xe(int3_xe value) {
+    return uint_x3_xe(32u) - uint3_xe(clz(value));
+  }
+  uint4_xe first_one_bit_high_xe(int4_xe value) {
+    return uint_x4_xe(32u) - uint4_xe(clz(value));
+  }
+  uint first_one_bit_high_xe(uint value) {
+    return 32u - clz(value);
+  }
+  uint2_xe first_one_bit_high_xe(uint2_xe value) {
+    return uint_x2_xe(32u) - clz(value);
+  }
+  uint3_xe first_one_bit_high_xe(uint3_xe value) {
+    return uint_x3_xe(32u) - clz(value);
+  }
+  uint4_xe first_one_bit_high_xe(uint4_xe value) {
+    return uint_x4_xe(32u) - clz(value);
+  }
+#else
+  #error Bit count operations not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #define pack_half_2x16_xe packHalf2x16
+  #define unpack_half_2x16_xe unpackHalf2x16
+#elif SHADING_LANGUAGE_HLSL_XE
+  uint pack_half_2x16_xe(float2_xe value) {
+    return f32tof16(value.x) | (f32tof16(value.y) << 16u);
+  }
+  float2_xe unpack_half_2x16_xe(uint value) {
+    return f16tof32(uint_x2_xe(value) >> uint2_xe(0u, 16u));
+  }
+#elif SHADING_LANGUAGE_MSL_XE
+  uint pack_half_2x16_xe(float2_xe value) {
+    return uint(as_type<ushort>(half(value.x))) |
+           (uint(as_type<ushort>(half(value.y))) << 16u);
+  }
+  float2_xe unpack_half_2x16_xe(uint value) {
+    return float2_xe(as_type<half2>(ushort2(uint_x2_xe(value) >>
+                                            uint2_xe(0u, 16u))));
+  }
+#else
+  #error pack_half_2x16_xe not defined for the target language.
+#endif  // SHADING_LANGUAGE_*_XE
+
+#endif  // XENIA_UI_SHADERS_XESL_XESLI_

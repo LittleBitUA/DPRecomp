@@ -309,6 +309,33 @@ name = "DP60FpsTickHook"
 registers = ["f0"]
 after_instruction = false
 
+[[midasm_hook]]
+address = 0x8252271C          # bge cr6,0x82522728 -> b 0x82522728: skip the game's own tick >= 1.0 clamp (f28 = 1.0f), #12
+name = "DP60FpsTickClampHook"
+jump_address_on_true = 0x82522728
+
+# DP1 2026-09-07 (#17/#18): animation keyframe events fire once per start-frame
+# crossing (src/deadlyprem_anim_event_hook.cpp). Hooks sit before the
+# `stwx r11,r7,rTHIS` that copies a picked event into the animation controller;
+# true = skip the copy (jump past the count increment).
+[[midasm_hook]]
+address = 0x8253A2A8          # standalone dispatcher sub_8253A0C8 (layered motions), this = r30
+name = "DPAnimEventPickHook"
+registers = ["r11", "f30", "f31", "r28", "r30"]
+jump_address_on_true = 0x8253A2B8
+
+[[midasm_hook]]
+address = 0x8253D9B4          # sub_8253D568 main update, inlined dispatcher copy 1, this = r28
+name = "DPAnimEventPickHookMain"
+registers = ["r11", "f30", "f31", "r25", "r28"]
+jump_address_on_true = 0x8253D9C4
+
+[[midasm_hook]]
+address = 0x8253DED8          # sub_8253D568 main update, inlined dispatcher copy 2
+name = "DPAnimEventPickHookMain2"
+registers = ["r11", "f30", "f31", "r25", "r28"]
+jump_address_on_true = 0x8253DEE8
+
 # DP1 2026-09-06: direct mouse camera control (src/deadlyprem_camera_hook.cpp).
 # Merge point in the camera update (PAL sub_82338A38) after the right-stick X
 # contribution; the hook adds the mouse deltas to the per-frame yaw/pitch.

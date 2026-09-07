@@ -1,0 +1,2 @@
+#define XE_RESOLVE_RESOLUTION_SCALED 1
+#include "resolve_full_32bpp.xesli"

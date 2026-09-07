@@ -9,17 +9,27 @@
 // so the same conversion has to be applied to the buffer contents themselves
 // right before the first 8888 draw over tiles still holding 7e3 data.
 //
+// DP1 shadow alpha (2026-09-07): the second half of the EDRAM buffer holds a
+// shadow dword per 32bpp sample for 7e3 render targets - 16-bit UNORM alpha in
+// the low half, a 16-bit tag of the main dword (low 16 bits XOR high 16 bits)
+// in the high half. When the tag matches and the 16-bit alpha quantizes to the
+// 2-bit alpha of the main dword, the 8-bit alpha is taken from the shadow
+// (smooth), otherwise from the 2 bits (0, 85, 170, 255).
+//
 // Bound with the resolve EDRAM clear root signature: root constants at b0,
 // uint4 UAV of the EDRAM buffer at u0.
 //
-// Build: fxc /T cs_5_1 /E main /O3 /Fh bytecode/d3d12_5_1/edram_7e3_to_8888_cs.h
-//            /Vn edram_7e3_to_8888_cs edram_7e3_to_8888_cs.hlsl
+// Build (PowerShell, not Git Bash):
+//   fxc /T cs_5_1 /E main /O3 /Fh bytecode/d3d12_5_1/edram_7e3_to_8888_cs.h
+//       /Vn edram_7e3_to_8888_cs edram_7e3_to_8888_cs.hlsl
 
 cbuffer push_consts_xe : register(b0) {
   // First uint4 (4 dwords = 4 32bpp samples) of the range in the EDRAM buffer.
   uint xe_convert_first_uint4;
   // Number of uint4 elements to convert.
   uint xe_convert_uint4_count;
+  // uint4 offset of the shadow alpha half of the buffer.
+  uint xe_convert_shadow_uint4_offset;
 };
 
 RWBuffer<uint4> xe_edram : register(u0);
@@ -35,12 +45,21 @@ float XeFloat7e3To32(uint f10) {
 
 uint XeUnorm8(float v) { return uint(saturate(v) * 255.0f + 0.5f); }
 
-uint XeConvert7e3To8888(uint p) {
+// 8-bit alpha from the shadow dword if it is valid for the main dword,
+// otherwise from the 2-bit alpha of the main dword.
+uint XeShadowAlpha8(uint p, uint shadow) {
+  uint tag = (p ^ (p >> 16u)) & 0xFFFFu;
+  uint alpha16 = shadow & 0xFFFFu;
+  bool valid = (shadow >> 16u) == tag &&
+               ((alpha16 * 3u + 32767u) / 65535u) == (p >> 30u);
+  return valid ? (alpha16 * 255u + 32767u) / 65535u : (p >> 30u) * 85u;
+}
+
+uint XeConvert7e3To8888(uint p, uint shadow) {
   uint r = XeUnorm8(XeFloat7e3To32(p & 0x3FFu));
   uint g = XeUnorm8(XeFloat7e3To32((p >> 10u) & 0x3FFu));
   uint b = XeUnorm8(XeFloat7e3To32((p >> 20u) & 0x3FFu));
-  // 2-bit alpha 0..3 -> 0, 85, 170, 255.
-  uint a = (p >> 30u) * 85u;
+  uint a = XeShadowAlpha8(p, shadow);
   return r | (g << 8u) | (b << 16u) | (a << 24u);
 }
 
@@ -59,10 +78,11 @@ void main(uint3 xe_group_id : SV_GroupID, uint3 xe_group_thread_id : SV_GroupThr
     }
     uint element = xe_convert_first_uint4 + index;
     uint4 v = xe_edram[element];
-    v.x = XeConvert7e3To8888(v.x);
-    v.y = XeConvert7e3To8888(v.y);
-    v.z = XeConvert7e3To8888(v.z);
-    v.w = XeConvert7e3To8888(v.w);
+    uint4 s = xe_edram[element + xe_convert_shadow_uint4_offset];
+    v.x = XeConvert7e3To8888(v.x, s.x);
+    v.y = XeConvert7e3To8888(v.y, s.y);
+    v.z = XeConvert7e3To8888(v.z, s.z);
+    v.w = XeConvert7e3To8888(v.w, s.w);
     xe_edram[element] = v;
   }
 }
