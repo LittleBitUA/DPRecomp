@@ -285,6 +285,44 @@ index c8751b7..d5a4e75 100644
    // UI thread only.
    int32_t prev_mouse_x_ = 0;
    int32_t prev_mouse_y_ = 0;
+diff --git a/include/rex/logging/api.h b/include/rex/logging/api.h
+index be0497b..6ee29df 100644
+--- a/include/rex/logging/api.h
++++ b/include/rex/logging/api.h
+@@ -193,6 +193,16 @@ void RemoveSink(spdlog::sink_ptr sink);
+  */
+ void RemoveSink(LogCategoryId category, spdlog::sink_ptr sink);
+ 
++/**
++ * DP1 diagnostics: the guest thread name printed by the `%*` pattern flag for
++ * every line logged from the calling thread (host threads print "host").
++ */
++void SetCurrentThreadLogName(std::string_view name);
++
++/** DP1 diagnostics: the frame number printed by the `%~` pattern flag. */
++void SetFrameNumber(uint32_t frame);
++uint32_t GetFrameNumber();
++
+ /**
+  * Replace the global console sink on every registered logger with `sink`.
+  * Pass nullptr to remove the console sink without replacement.
+diff --git a/include/rex/logging/types.h b/include/rex/logging/types.h
+index 984e28a..6368c39 100644
+--- a/include/rex/logging/types.h
++++ b/include/rex/logging/types.h
+@@ -74,10 +74,10 @@ struct LogConfig {
+   const char* log_file = nullptr;
+ 
+   /** spdlog pattern string for the stdout console sink. */
+-  std::string console_pattern = "[%^%l%$] [%n] [t%t] %v";
++  std::string console_pattern = "[%^%l%$] [%n] [%*] [f%~] %v";
+ 
+   /** spdlog pattern string for the file sink. */
+-  std::string file_pattern = "[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] [t%t] %v";
++  std::string file_pattern = "[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] [%*] [f%~] %v";
+ 
+   /** Messages at or above this level trigger an immediate flush. */
+   spdlog::level::level_enum flush_level = spdlog::level::info;
 diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
 index 1f52480..48d7478 100644
 --- a/include/rex/rex_app.h
@@ -316,6 +354,48 @@ index 1f52480..48d7478 100644
    std::unique_ptr<ui::ConsoleDialog> console_overlay_;
    std::unique_ptr<ui::SettingsDialog> settings_overlay_;
    std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;
+diff --git a/include/rex/system/xthread.h b/include/rex/system/xthread.h
+index a72911e..3e9b439 100644
+--- a/include/rex/system/xthread.h
++++ b/include/rex/system/xthread.h
+@@ -333,9 +333,15 @@ class XThread : public XObject {
+   bool is_running() const { return running_; }
+ 
+   uint32_t thread_id() const { return thread_id_; }
++  // DP1 diagnostics: the name given by the guest (SetThreadName) or the creator.
++  const std::string& name() const { return thread_name_; }
+   uint32_t last_error();
+   void set_last_error(uint32_t error_code);
+   void set_name(const std::string_view name);
++  // DP1 diagnostics: a game hook can announce the name of the thread the guest is
++  // about to create on this thread; ExCreateThread applies it to the new XThread.
++  static void SetPendingGuestThreadName(std::string_view name);
++  static std::string TakePendingGuestThreadName();
+ 
+   X_STATUS Create();
+   X_STATUS Exit(int exit_code);
+diff --git a/include/rex/ui/d3d12/d3d12_provider.h b/include/rex/ui/d3d12/d3d12_provider.h
+index 35035a4..0a93ce8 100644
+--- a/include/rex/ui/d3d12/d3d12_provider.h
++++ b/include/rex/ui/d3d12/d3d12_provider.h
+@@ -35,6 +35,9 @@ class D3D12Provider : public GraphicsProvider {
+   // nullptr if PIX not attached.
+   IDXGraphicsAnalysis* GetGraphicsAnalysis() const { return graphics_analysis_; }
+   ID3D12Device* GetDevice() const { return device_; }
++  // DP1 diagnostics: drains the debug layer's stored messages into the log
++  // (no-op unless d3d12_debug is on). Called once per frame by the swap.
++  void LogDebugLayerMessages() const;
+   ID3D12CommandQueue* GetDirectQueue() const { return direct_queue_; }
+ 
+   uint32_t GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const {
+@@ -138,6 +141,7 @@ class D3D12Provider : public GraphicsProvider {
+ 
+   HMODULE library_d3d12_ = nullptr;
+   PFN_D3D12_GET_DEBUG_INTERFACE pfn_d3d12_get_debug_interface_;
++  ID3D12InfoQueue* debug_info_queue_ = nullptr;
+   PFN_D3D12_CREATE_DEVICE pfn_d3d12_create_device_;
+   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE pfn_d3d12_serialize_root_signature_;
+ 
 diff --git a/include/rex/ui/overlay/debug_overlay.h b/include/rex/ui/overlay/debug_overlay.h
 index e15e410..c548be1 100644
 --- a/include/rex/ui/overlay/debug_overlay.h
@@ -482,6 +562,126 @@ index 11b83be..e115c37 100644
    }
  
    return kBitsPerPacketHeader;
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 1ddafd0..88aff18 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -39,6 +39,7 @@ if(WIN32)
+         clock_win.cpp
+         dbg_win.cpp
+         dynlib_win.cpp
++        crash_handler_win.cpp
+         exception_handler_win.cpp
+         filesystem_win.cpp
+         fiber_win32.cpp
+@@ -135,3 +136,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
+     target_compile_definitions(rexcore PUBLIC
+         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
+ endif()
++
++if(WIN32)
++    target_link_libraries(rexcore PRIVATE dbghelp)
++endif()
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 1645848..1aa49f7 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -18,6 +18,8 @@
+ #include <vector>
+ 
+ #include <spdlog/sinks/rotating_file_sink.h>
++#include <spdlog/pattern_formatter.h>
++#include <atomic>
+ #include <spdlog/sinks/stdout_color_sinks.h>
+ 
+ #include <toml++/toml.hpp>
+@@ -44,7 +46,7 @@ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets lev
+ 
+ REXCVAR_DEFINE_BOOL(log_noisy, false, "Log", "Enable noisy/high-frequency log macros");
+ 
+-REXCVAR_DEFINE_INT32(log_flush_interval, 0, "Log", "Periodic flush interval in seconds (0 = off)")
++REXCVAR_DEFINE_INT32(log_flush_interval, 5, "Log", "Periodic flush interval in seconds (0 = off)")
+     .range(0, 60)
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+@@ -131,6 +133,48 @@ spdlog::level::level_enum ResolveCategoryLevel(const std::string& name) {
+   return g_config.default_level;
+ }
+ 
++// ---------------------------------------------------------------------------
++// DP1 diagnostics: per-thread guest name and a global frame number, exposed as
++// custom spdlog pattern flags `%*` and `%~`.
++// ---------------------------------------------------------------------------
++thread_local std::string t_thread_log_name;
++std::atomic<uint32_t> g_frame_number{0};
++
++class ThreadNameFlag : public spdlog::custom_flag_formatter {
++ public:
++  void format(const spdlog::details::log_msg& msg, const std::tm&,
++              spdlog::memory_buf_t& dest) override {
++    if (t_thread_log_name.empty()) {
++      char buf[24];
++      int n = std::snprintf(buf, sizeof(buf), "host:%zu", msg.thread_id);
++      dest.append(buf, buf + (n > 0 ? n : 0));
++    } else {
++      dest.append(t_thread_log_name.data(), t_thread_log_name.data() + t_thread_log_name.size());
++    }
++  }
++  std::unique_ptr<custom_flag_formatter> clone() const override {
++    return spdlog::details::make_unique<ThreadNameFlag>();
++  }
++};
++
++class FrameNumberFlag : public spdlog::custom_flag_formatter {
++ public:
++  void format(const spdlog::details::log_msg&, const std::tm&, spdlog::memory_buf_t& dest) override {
++    char buf[16];
++    int n = std::snprintf(buf, sizeof(buf), "%u", g_frame_number.load(std::memory_order_relaxed));
++    dest.append(buf, buf + (n > 0 ? n : 0));
++  }
++  std::unique_ptr<custom_flag_formatter> clone() const override {
++    return spdlog::details::make_unique<FrameNumberFlag>();
++  }
++};
++
++void ApplyPattern(const spdlog::sink_ptr& sink, const std::string& pattern) {
++  auto formatter = std::make_unique<spdlog::pattern_formatter>();
++  formatter->add_flag<ThreadNameFlag>('*').add_flag<FrameNumberFlag>('~').set_pattern(pattern);
++  sink->set_formatter(std::move(formatter));
++}
++
+ // Create a logger and register it
+ std::shared_ptr<spdlog::logger> CreateCategoryLogger(const std::string& name) {
+   auto sinks = BuildCategorySinks(name);
+@@ -212,7 +256,7 @@ void InitLogging(const LogConfig& config) {
+   if (config.log_to_console) {
+     auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+     sink->set_level(spdlog::level::trace);
+-    sink->set_pattern(config.console_pattern);
++    ApplyPattern(sink, config.console_pattern);
+     g_console_sink = sink;
+   }
+ 
+@@ -230,7 +274,7 @@ void InitLogging(const LogConfig& config) {
+         resolved_path, static_cast<size_t>(REXCVAR_GET(log_max_file_size_mb)) * 1024 * 1024,
+         static_cast<size_t>(REXCVAR_GET(log_max_files)), false);
+     sink->set_level(spdlog::level::trace);
+-    sink->set_pattern(config.file_pattern);
++    ApplyPattern(sink, config.file_pattern);
+     g_file_sink = sink;
+   }
+ 
+@@ -561,4 +605,10 @@ std::map<std::string, std::string> ParseCategoryLevelsFromConfig(
+   return result;
+ }
+ 
++void SetCurrentThreadLogName(std::string_view name) { t_thread_log_name.assign(name.data(), name.size()); }
++
++void SetFrameNumber(uint32_t frame) { g_frame_number.store(frame, std::memory_order_relaxed); }
++
++uint32_t GetFrameNumber() { return g_frame_number.load(std::memory_order_relaxed); }
++
+ }  // namespace rex
 diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
 index 896dfec..123c093 100644
 --- a/src/core/threading_win.cpp
@@ -560,8 +760,20 @@ index 0d8f8af..e2f9b5e 100644
      ${REXGLUE_ROOT}  # For thirdparty/dxbc/DXBCChecksum.h include
  )
  
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..bdd819f 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -958,6 +958,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
+   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
+ 
++  rex::SetFrameNumber(rex::GetFrameNumber() + 1);
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+ 
+   ++counter_;
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..81706d6 100644
+index 19874a5..7b24b74 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -10,6 +10,8 @@
@@ -573,7 +785,15 @@ index 19874a5..81706d6 100644
  #include <cstdarg>
  #include <cstring>
  #include <sstream>
-@@ -2400,7 +2402,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -1894,6 +1896,7 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
++  GetD3D12Provider().LogDebugLayerMessages();
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+ 
+@@ -2400,7 +2403,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    }
    if (REXCVAR_GET(async_shader_compilation) &&
        pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
@@ -1774,7 +1994,7 @@ index a7d508a..58f46db 100644
        a_.OpEndIf();
  
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..f27602c 100644
+index 76f5600..d09719b 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
 @@ -10,7 +10,12 @@
@@ -1904,10 +2124,10 @@ index 76f5600..f27602c 100644
  bool TextureCache::LoadTextureData(Texture& texture) {
    PendingTextureLoad pending_load;
    PendingSharedMemoryRange pending_ranges[2];
-@@ -914,11 +992,28 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
-       if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
-         break;
-       }
+@@ -911,14 +989,38 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
+     case xenos::FetchConstantType::kTexture:
+       break;
+     case xenos::FetchConstantType::kInvalidTexture:
 +      {
 +        // DP1 (2026-09-06): Deadly Premonition binds the same three "invalid"
 +        // fetch constants every frame, flooding the log at 3 lines per frame.
@@ -1924,6 +2144,16 @@ index 76f5600..f27602c 100644
 +          reported.push_back(words);
 +        }
 +      }
+       if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
++        // DP1 (2026-09-13): still say it once, so the log shows which
++        // constants are being honoured despite the "invalid" type.
++        REXGPU_INFO("Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) has "
++                    "\"invalid\" type; honoured (gpu_allow_invalid_fetch_constants). Reported "
++                    "once per distinct constant.",
++                    fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4,
++                    fetch.dword_5);
+         break;
+       }
        REXGPU_WARN(
            "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) "
            "has \"invalid\" type! This is incorrect behavior, but you can try "
@@ -27141,6 +27371,275 @@ index c7c440d..19211ad 100644
    const int ordinal = static_cast<int>(controllers_.size()) - 1;
    SDL_SetGamepadPlayerIndex(controller, ordinal);
  
+diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
+index 86c4353..2cc7e8f 100644
+--- a/src/kernel/xam/xam_content.cpp
++++ b/src/kernel/xam/xam_content.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstring>
+ #include <rex/cvar.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/logging.h>
+@@ -211,6 +212,22 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+       result = content_manager->OpenContent(root_name, xuid, content_data, content_license);
+     }
+ 
++    // DP1 diagnostics (#21): every save-container step with its result.
++    {
++      std::string file_name(content_data.file_name_raw,
++                            strnlen(content_data.file_name_raw, sizeof(content_data.file_name_raw)));
++      if (result == X_ERROR_SUCCESS) {
++        REXKRNL_INFO("XamContent {}: root '{}' file '{}' type {:#x} -> ok",
++                     disposition == kDispositionState::Create ? "create" : "open",
++                     root_name, file_name, static_cast<uint32_t>(content_data.content_type.get()));
++      } else {
++        REXKRNL_WARN("XamContent {}: root '{}' file '{}' type {:#x} -> error {:#x}",
++                     disposition == kDispositionState::Create ? "create" : "open",
++                     root_name, file_name, static_cast<uint32_t>(content_data.content_type.get()),
++                     result);
++      }
++    }
++
+     if (license_mask_ptr && result == X_ERROR_SUCCESS) {
+       *license_mask_ptr = content_license;
+     }
+@@ -276,6 +293,11 @@ u32 XamContentFlush_entry(mapped_string root_name, mapped_void overlapped_ptr) {
+ u32 XamContentClose_entry(mapped_string root_name, mapped_void overlapped_ptr) {
+   // Closes a previously opened root from XamContentCreate*.
+   auto result = REX_KERNEL_STATE()->content_manager()->CloseContent(root_name.value());
++  if (result == X_ERROR_SUCCESS) {
++    REXKRNL_INFO("XamContent close: root '{}' -> ok", root_name.value());
++  } else {
++    REXKRNL_WARN("XamContent close: root '{}' -> error {:#x}", root_name.value(), result);
++  }
+ 
+   if (overlapped_ptr) {
+     REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(), result);
+@@ -382,6 +404,17 @@ u32 XamContentDelete_entry(u32 user_index, mapped_void content_data_ptr,
+   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+ 
+   auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
++  {
++    std::string file_name(content_data.file_name_raw,
++                          strnlen(content_data.file_name_raw, sizeof(content_data.file_name_raw)));
++    if (result == X_ERROR_SUCCESS) {
++      REXKRNL_INFO("XamContent delete: file '{}' type {:#x} -> ok", file_name,
++                   static_cast<uint32_t>(content_data.content_type.get()));
++    } else {
++      REXKRNL_WARN("XamContent delete: file '{}' type {:#x} -> error {:#x}", file_name,
++                   static_cast<uint32_t>(content_data.content_type.get()), result);
++    }
++  }
+ 
+   if (overlapped_ptr) {
+     REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(), result);
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
+index 86e7888..f2002be 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
+@@ -52,7 +52,7 @@ u32 XAudioEnableDucker_entry(u32 unk) {
+ }
+ 
+ u32 XAudioRegisterRenderDriverClient_entry(mapped_u32 callback_ptr, mapped_u32 driver_ptr) {
+-  REXKRNL_DEBUG("XAudioRegisterRenderDriverClient called! callback_ptr={:08X} driver_ptr={:08X}",
++  REXKRNL_INFO("XAudioRegisterRenderDriverClient: callback={:08X} driver={:08X}",
+                 callback_ptr.guest_address(), driver_ptr.guest_address());
+   if (!callback_ptr) {
+     return X_E_INVALIDARG;
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp
+index a84b5f5..414e8eb 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp
+@@ -71,8 +71,10 @@ u32 XMACreateContext_entry(mapped_u32 context_out_ptr) {
+   uint32_t context_ptr = xma_decoder->AllocateContext();
+   *context_out_ptr = context_ptr;
+   if (!context_ptr) {
++    REXKRNL_WARN("XMACreateContext: no free XMA context");
+     return X_STATUS_NO_MEMORY;
+   }
++  REXKRNL_DEBUG("XMACreateContext -> {:08X}", context_ptr);
+   return X_STATUS_SUCCESS;
+ }
+ 
+@@ -81,6 +83,7 @@ u32 XMAReleaseContext_entry(mapped_void context_ptr) {
+       static_cast<audio::AudioSystem*>(REX_KERNEL_STATE()->emulator()->audio_system())
+           ->xma_decoder();
+   xma_decoder->ReleaseContext(context_ptr.guest_address());
++  REXKRNL_DEBUG("XMAReleaseContext {:08X}", context_ptr.guest_address());
+   return 0;
+ }
+ 
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_debug.cpp b/src/kernel/xboxkrnl/xboxkrnl_debug.cpp
+index 670c446..a99cd24 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_debug.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_debug.cpp
+@@ -140,12 +140,18 @@ void RtlRaiseException_entry(ppc_ptr_t<X_EXCEPTION_RECORD> record) {
+ 
+   // TODO(benvanik): unwinding.
+   // This is going to suck.
++  REXKRNL_ERROR("RtlRaiseException: code {:#x} flags {:#x} address {:08X} - unhandled, breaking",
++                static_cast<uint32_t>(record->code), static_cast<uint32_t>(record->exception_flags),
++                static_cast<uint32_t>(record->exception_address));
++  rex::FlushLogging();
+   rex::debug::Break();
+ }
+ 
+ void KeBugCheckEx_entry(u32 code, u32 param1, u32 param2, u32 param3, u32 param4) {
+-  REXKRNL_DEBUG("*** STOP: 0x{:08X} (0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X})", code, param1, param2,
+-                param3, param4);
++  REXKRNL_ERROR("*** KeBugCheck STOP: 0x{:08X} (0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}) - the game "
++                "reported a fatal error (0xF4 = heap corruption, 0xF5 = D3D)",
++                code, param1, param2, param3, param4);
++  rex::FlushLogging();
+   fflush(stdout);
+   rex::debug::Break();
+   assert_always();
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+index cce4f65..babdfcf 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+@@ -12,6 +12,7 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <rex/cvar.h>
+ #include <rex/filesystem/device.h>
+ #include <rex/kernel/xboxkrnl/private.h>
+ #include <rex/logging.h>
+@@ -29,6 +30,11 @@
+ #include <rex/system/xtypes.h>
+ #include <rex/thread/mutex.h>
+ 
++REXCVAR_DEFINE_BOOL(vfs_log_opens, false, "VFS",
++                    "Log every successful NtCreateFile/NtOpenFile with its path and handle "
++                    "(DP1 diagnostics for missing-asset and streaming bugs)");
++
++
+ namespace rex::kernel::xboxkrnl {
+ using namespace rex::system;
+ 
+@@ -172,6 +178,9 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
+     REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
+   } else {
+     REXKRNL_IMPORT_RESULT("NtCreateFile", "{:#x} handle={:#x}", result, handle);
++    if (REXCVAR_GET(vfs_log_opens)) {
++      REXKRNL_INFO("[NtCreateFile] '{}' -> handle {:#x}", target_path, handle);
++    }
+   }
+   return result;
+ }
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_memory.cpp b/src/kernel/xboxkrnl/xboxkrnl_memory.cpp
+index 8684eda..684e56a 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_memory.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_memory.cpp
+@@ -173,6 +173,9 @@ u32 NtAllocateVirtualMemory_entry(mapped_u32 base_addr_ptr, mapped_u32 region_si
+   }
+   if (!address) {
+     // Failed - assume no memory available.
++    REXKRNL_WARN("[NtAllocateVirtualMemory] FAILED: size={:#x} type={:#x} protect={:#x} - "
++                 "guest virtual heap exhausted?",
++                 adjusted_size, alloc_type, protect);
+     return X_STATUS_NO_MEMORY;
+   }
+ 
+@@ -400,6 +403,9 @@ u32 MmAllocatePhysicalMemoryEx_entry(u32 flags, u32 region_size, u32 protect_bit
+   if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size, adjusted_alignment,
+                         allocation_type, protect, top_down, &base_address)) {
+     // Failed - assume no memory available.
++    REXKRNL_WARN("[MmAllocatePhysicalMemoryEx] FAILED: size={:#x} align={:#x} page={:#x} - "
++                 "guest physical heap exhausted?",
++                 adjusted_size, adjusted_alignment, page_size);
+     return 0;
+   }
+   REXKRNL_IMPORT_RESULT("MmAllocatePhysicalMemoryEx", "addr={:#x}", base_address);
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+index 57fd161..abd66ea 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+@@ -142,6 +142,13 @@ u32 ExCreateThread_entry(mapped_u32 handle_ptr, u32 stack_size, mapped_u32 threa
+   auto thread = object_ref<XThread>(new XThread(
+       REX_KERNEL_STATE(), actual_stack_size, xapi_thread_startup, start_address.guest_address(),
+       start_context.guest_address(), creation_flags, true, false, guest_process));
++  {
++    // DP1 diagnostics: name announced by the game's thread wrapper hook, if any.
++    std::string pending = XThread::TakePendingGuestThreadName();
++    if (!pending.empty()) {
++      thread->set_name(pending);
++    }
++  }
+ 
+   X_STATUS result = thread->Create();
+   if (XFAILED(result)) {
+diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
+index fc46d86..f9e97b2 100644
+--- a/src/system/CMakeLists.txt
++++ b/src/system/CMakeLists.txt
+@@ -8,6 +8,7 @@ set(REXSYSTEM_SOURCES
+     kernel_module.cpp
+     user_module.cpp
+     xthread.cpp
++    guest_crash_info.cpp
+     xevent.cpp
+     xfile.cpp
+     xmutant.cpp
+diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
+index 77bce25..07ce344 100644
+--- a/src/system/xthread.cpp
++++ b/src/system/xthread.cpp
+@@ -181,6 +181,22 @@ void XThread::set_name(const std::string_view name) {
+     // One the thread is ready it will handle it.
+     thread_->set_name(thread_name_);
+   }
++  if (XThread::IsInThread(this)) {
++    rex::SetCurrentThreadLogName(name);
++    REXSYS_INFO("Guest thread named: '{}' (handle {:08X}, id {})", name, handle(), thread_id_);
++  }
++}
++
++thread_local std::string t_pending_guest_thread_name;
++
++void XThread::SetPendingGuestThreadName(std::string_view name) {
++  t_pending_guest_thread_name.assign(name.data(), name.size());
++}
++
++std::string XThread::TakePendingGuestThreadName() {
++  std::string name = std::move(t_pending_guest_thread_name);
++  t_pending_guest_thread_name.clear();
++  return name;
+ }
+ 
+ static uint8_t next_cpu = 0;
+@@ -441,6 +457,7 @@ X_STATUS XThread::Create() {
+ 
+     // Set name immediately, if we have one.
+     thread_->set_name(thread_name_);
++    rex::SetCurrentThreadLogName(thread_name_);
+ 
+     PROFILE_THREAD_ENTER(thread_name_.c_str());
+     PROFILE_THREAD_CREATED();
+@@ -537,6 +554,8 @@ X_STATUS XThread::Exit(int exit_code) {
+   ReleaseHandle();
+ 
+   // NOTE: this does not return!
++  REXSYS_INFO("Guest thread exiting: '{}' (handle {:08X}) code {}", thread_name_, handle(),
++              exit_code);
+   rex::thread::Thread::Exit(exit_code);
+   return X_STATUS_SUCCESS;
+ }
+@@ -569,8 +588,8 @@ X_STATUS XThread::Terminate(int exit_code) {
+ }
+ 
+ void XThread::Execute() {
+-  REXSYS_NOISY_DEBUG("Execute thid {} (handle={:08X}, '{}', native={:08X})", thread_id_, handle(),
+-                     thread_name_, thread_->system_id());
++  REXSYS_INFO("Guest thread started: '{}' (handle {:08X}, id {}, native {:08X})", thread_name_,
++              handle(), thread_id_, thread_->system_id());
+ 
+   // Let the kernel know we are starting.
+   kernel_state_->OnThreadExecute(this);
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index 5bd3dc5..291d5dd 100644
 --- a/src/ui/CMakeLists.txt
@@ -27223,6 +27722,140 @@ index 306118e..c9b8bd2 100644
            if (!temporal_dispatch_done) {
              D3D12_RESOURCE_BARRIER barrier_uav_to_rtv;
              barrier_uav_to_rtv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
+index bf8252b..ae06c3e 100644
+--- a/src/ui/d3d12/d3d12_provider.cpp
++++ b/src/ui/d3d12/d3d12_provider.cpp
+@@ -11,8 +11,13 @@
+ 
+ #include <cstdlib>
+ 
++#include <mutex>
++#include <string_view>
++#include <unordered_map>
++#include <vector>
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
++#include <rex/crash_handler.h>
+ #include <rex/math.h>
+ #include <rex/ui/d3d12/d3d12_immediate_drawer.h>
+ #include <rex/ui/d3d12/d3d12_presenter.h>
+@@ -22,6 +27,10 @@
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_debug, false, "UI/D3D12", "Enable Direct3D 12 and DXGI debug layer")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(d3d12_dred, true, "UI/D3D12",
++                    "Enable DRED (auto-breadcrumbs and page-fault data) so a device removal "
++                    "is explained in the log even without the debug layer")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_break_on_error, false, "UI/D3D12",
+                     "Break on Direct3D 12 validation errors");
+@@ -228,18 +237,18 @@ bool D3D12Provider::Initialize() {
+       debug = false;
+     }
+ 
+-    // Enable DRED (Device Removed Extended Data) for diagnosing GPU crashes.
+-    {
+-      Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;
+-      if (SUCCEEDED(pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
+-        dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+-        dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+-        REXLOG_INFO("DRED (Device Removed Extended Data) enabled");
+-      } else {
+-        REXLOG_WARN(
+-            "Failed to enable DRED - device removal diagnostics will be "
+-            "limited");
+-      }
++  }
++  // Enable DRED (Device Removed Extended Data) for diagnosing GPU crashes.
++  // DP1 (2026-09-13): on by default, independent of the debug layer, so a
++  // player's log carries the breadcrumbs of a device removal (#22).
++  if (debug || REXCVAR_GET(d3d12_dred)) {
++    Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;
++    if (SUCCEEDED(pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
++      dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
++      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
++      REXLOG_INFO("DRED (Device Removed Extended Data) enabled");
++    } else {
++      REXLOG_WARN("Failed to enable DRED - device removal diagnostics will be limited");
+     }
+   }
+   // Create the DXGI factory.
+@@ -351,7 +360,14 @@ bool D3D12Provider::Initialize() {
+     if (REXCVAR_GET(d3d12_break_on_warning)) {
+       d3d12_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
+     }
+-    d3d12_info_queue->Release();
++    if (debug) {
++      // Kept for LogDebugLayerMessages(): the stored messages are drained into
++      // the log once per frame, so players can enable d3d12_debug and attach
++      // the log without a debugger attached.
++      debug_info_queue_ = d3d12_info_queue;
++    } else {
++      d3d12_info_queue->Release();
++    }
+   }
+ 
+   // Create the command queue for graphics.
+@@ -476,4 +492,57 @@ std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
+   return D3D12ImmediateDrawer::Create(*this);
+ }
+ 
++void D3D12Provider::LogDebugLayerMessages() const {
++  // Once per frame: make sure nothing replaced the crash handler's filter.
++  rex::crash::Reassert();
++  if (!debug_info_queue_) {
++    return;
++  }
++  const UINT64 count = debug_info_queue_->GetNumStoredMessages();
++  if (!count) {
++    return;
++  }
++  static std::mutex mutex;
++  static std::unordered_map<int, uint32_t> seen;
++  std::lock_guard<std::mutex> lock(mutex);
++  std::vector<uint8_t> buffer;
++  for (UINT64 i = 0; i < count; ++i) {
++    SIZE_T length = 0;
++    if (FAILED(debug_info_queue_->GetMessage(i, nullptr, &length)) || !length) {
++      continue;
++    }
++    buffer.resize(length);
++    D3D12_MESSAGE* message = reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
++    if (FAILED(debug_info_queue_->GetMessage(i, message, &length))) {
++      continue;
++    }
++    uint32_t& times = seen[static_cast<int>(message->ID)];
++    ++times;
++    // The first 5 of each message ID verbatim, then every 500th, so a warning
++    // that fires every frame cannot fill the log.
++    if (times > 5 && (times % 500) != 0) {
++      continue;
++    }
++    std::string_view text(message->pDescription, message->DescriptionByteLength
++                                                       ? message->DescriptionByteLength - 1
++                                                       : 0);
++    switch (message->Severity) {
++      case D3D12_MESSAGE_SEVERITY_CORRUPTION:
++      case D3D12_MESSAGE_SEVERITY_ERROR:
++        REXLOG_ERROR("D3D12 debug layer [id {} x{}]: {}", static_cast<int>(message->ID), times,
++                     text);
++        break;
++      case D3D12_MESSAGE_SEVERITY_WARNING:
++        REXLOG_WARN("D3D12 debug layer [id {} x{}]: {}", static_cast<int>(message->ID), times,
++                    text);
++        break;
++      default:
++        REXLOG_INFO("D3D12 debug layer [id {} x{}]: {}", static_cast<int>(message->ID), times,
++                    text);
++        break;
++    }
++  }
++  debug_info_queue_->ClearStoredMessages();
++}
++
+ }  // namespace rex::ui::d3d12
 diff --git a/src/ui/keybinds.cpp b/src/ui/keybinds.cpp
 index 9822f3b..6f7bf7c 100644
 --- a/src/ui/keybinds.cpp
@@ -27284,10 +27917,18 @@ index 43d6c06..35646a5 100644
    ImGui::End();
    ImGui::PopStyleColor();
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..5fb41ee 100644
+index b94fe9e..7de16cc 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
-@@ -25,6 +25,8 @@
+@@ -14,6 +14,7 @@
+ #include <cstdlib>
+ 
+ #include <rex/assert.h>
++#include <rex/crash_handler.h>
+ #include <rex/cvar.h>
+ #include <rex/ui/flags.h>
+ #include <rex/kernel/crt/heap.h>
+@@ -25,6 +26,8 @@
  #include <rex/ui/overlay/console_overlay.h>
  #include <rex/ui/overlay/debug_overlay.h>
  #include <rex/ui/overlay/settings_overlay.h>
@@ -27296,7 +27937,16 @@ index b94fe9e..5fb41ee 100644
  #include <rex/audio/audio_system.h>
  #include <rex/audio/sdl/sdl_audio_system.h>
  #include <rex/input/input_system.h>
-@@ -394,6 +396,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+@@ -173,6 +176,8 @@ bool ReXApp::SetupEnvironment() {
+ 
+   rex::InitLogging(log_config);
+   rex::RegisterLogLevelCallback();
++  rex::crash::Install((exe_dir / "logs").string(), std::string(GetName()));
++  rex::system::RegisterGuestCrashInfo();
+ 
+   log_sink_ = std::make_shared<rex::LogCaptureSink>();
+   rex::AddSink(log_sink_);
+@@ -394,6 +399,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
    // gated eager font upload in SetImmediateDrawer is skipped (font uploads
    // lazily on the first Draw instead).
    imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
@@ -27308,7 +27958,7 @@ index b94fe9e..5fb41ee 100644
    rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
      if (debug_overlay_) {
        debug_overlay_.reset();
-@@ -457,25 +464,60 @@ void ReXApp::LaunchModule() {
+@@ -457,25 +467,60 @@ void ReXApp::LaunchModule() {
      }
  
      auto* graphics_system = runtime_->graphics_system();

@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.3.1 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.3.2 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.3.1.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.3.2.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -54,6 +54,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 
 ## What's new in 1.3
 
+**1.3.2 (diagnostics):** no gameplay changes, but the log now explains crashes, hangs and GPU device losses by itself: a crash report with the game's thread and call stack plus a minidump in `logs\`, thread names and frame numbers on every line, DRED breadcrumbs on device removal, save-container steps, optional file-open and debug-layer logging. [Notes](docs/RELEASE-NOTES-1.3.2.md).
+
 **1.3.1 (hotfix):** sound that stopped a few seconds into some cutscenes and never came back (the morgue, the tree profiling, the lumbermill nightmare, #16) is fixed. The XMA decoder was a pre-May-2026 snapshot of Xenia-canary's; five upstream fixes to the decoder / audio-engine handshake are ported. Verified on the reporter's save. [Notes](docs/RELEASE-NOTES-1.3.1.md).
 
 ![Sky, tree crowns and car glass after the fix (ROV path, 2×)](docs/screenshots/sky_fix.jpg)
@@ -78,7 +80,7 @@ Most of 1.3 is verified on one machine and a handful of saves. A 30-hour game wi
 - **FSR 3:** frame-to-frame flicker or brightness flashes with `fsr3`, and whether `fsr` in the launcher makes it go away.
 - **Audio loss** (#16) is fixed in 1.3.1. If any scene still goes silent, the log from that session (`logs\deadlyprem_XXX.log`) plus the scene name.
 - **Steam Deck / AMD integrated graphics:** frame rates with ROV vs RTV, 1× vs 2×.
-- **Crashes:** GPU and driver, render path, internal resolution, a screenshot, the newest file in `logs\`, and whether `Internal Resolution 1×` or `RTV` changed anything.
+- **Crashes:** GPU and driver, render path, internal resolution, a screenshot, the newest `logs\deadlyprem_XXX.log` and the `logs\*.dmp` written next to it (since 1.3.2 the log ends with a crash report: the game thread, the call stack, and for GPU losses the DRED breadcrumbs), and whether `Internal Resolution 1×` or `RTV` changed anything.
 
 Open an [issue](https://github.com/LittleBitUA/DPRecomp/issues/new) with a save file if the problem is scene-specific (`userdata\` → the folder for your XUID). "It works" reports with your GPU and settings are welcome too. And if you say yes when the launcher asks to **share your shader cache**, whoever plays after you gets fewer first-time stutters ([what exactly is sent](#faq)).
 

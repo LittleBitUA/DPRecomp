@@ -52,7 +52,7 @@ class DeadlypremApp : public rex::ReXApp {
     // stamp>" in SetupPresentation; this hook runs right after it.
     // F3 debug overlay watermark (ASCII only: the overlay font has no special glyphs).
     rex::ui::SetDebugOverlayBuildStamp(
-        "Deadly Premonition Recompilation 1.3.1 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+        "Deadly Premonition Recompilation 1.3.2 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
     if (window()) {
       window()->SetTitle("Deadly Premonition Recompilation (USA) | 1.3 «Little Bit»");
     }
@@ -161,7 +161,12 @@ class DeadlypremApp : public rex::ReXApp {
   }
 
   // Other virtual hooks available for customization:
-  // void OnPostInitLogging() override {}
+  void OnPostInitLogging() override {
+    // DP1 diagnostics: build stamp as the first application line of every log.
+    REXLOG_INFO("Deadly Premonition Recompilation 1.3.2 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+  }
+
+  // Other virtual hooks (unused here):
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostLoadXexImage() override {}
   // void OnPostSetup() override {}

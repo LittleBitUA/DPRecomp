@@ -451,3 +451,11 @@ registers = ["r31"]
 address = 0x8233BE98          # sub_8233BE20 (left-stick driven, fmadds)
 name = "DPCameraMouseHook"
 registers = ["r31"]
+
+# DP1 diagnostics (2026-09-13): guest thread names from the game's thread wrapper
+# (r4 = descriptor, name pointer at +8). Hooked at the function entry.
+[[midasm_hook]]
+address = 0x82530430
+name = "DPThreadCreateNameHook"
+registers = ["r4"]
+after_instruction = false

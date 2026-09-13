@@ -1,6 +1,10 @@
 # Changelog
 
-Release notes for each version: [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.3.2 (September 2026)
+
+Diagnostics release, no gameplay changes. The runtime gained a crash handler (exception, module, host registers, the game's thread, PowerPC registers and a guest call stack in the log, plus a minidump in `logs\`), thread names and frame numbers on every log line (the game's own thread names via a hook on its thread wrapper), DRED breadcrumbs on GPU device removal by default (#22), debug-layer messages written into the log when `d3d12_debug` is on, save-container steps logged (#21), `vfs_log_opens`, memory-failure and audio-registration lines, KeBugCheck / RtlRaiseException as errors, honoured "invalid" fetch constants reported once, a build stamp as the first line and a 5-second flush.
 
 ## 1.3.1 (September 2026)
 

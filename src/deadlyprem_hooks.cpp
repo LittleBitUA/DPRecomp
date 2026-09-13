@@ -35,6 +35,9 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/memory/utils.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xthread.h>
 
 #include "deadlyprem_pch.h"  // PPCRegister / PPCContext (generated/default is on the include path)
 
@@ -165,4 +168,24 @@ void DP60FpsTickHook(PPCRegister& f0) {
       multi = 0;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// DP1 diagnostics (2026-09-13): guest thread names. The game's thread wrapper
+// (PAL sub_82530430 / USA sub_82538058) receives r4 = descriptor
+// {entry, arg, name, stack_size, priority, flags} and calls CreateThread
+// synchronously; the name ("GameThread", "LoadThread", "PhysicsThread", ...)
+// is announced to the runtime so the new XThread carries it in every log line.
+// ---------------------------------------------------------------------------
+void DPThreadCreateNameHook(PPCRegister& r4) {
+  const uint32_t desc = r4.u32;
+  if (!desc) return;
+  auto* memory = REX_KERNEL_MEMORY();
+  const uint32_t name_ptr = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<const uint8_t*>(desc + 8));
+  if (name_ptr < 0x82000000u || name_ptr >= 0x84400000u) return;
+  const char* name = memory->TranslateVirtual<const char*>(name_ptr);
+  size_t len = 0;
+  while (len < 31 && name[len] >= 0x20 && name[len] < 0x7F) ++len;
+  if (!len) return;
+  rex::system::XThread::SetPendingGuestThreadName(std::string_view(name, len));
 }
