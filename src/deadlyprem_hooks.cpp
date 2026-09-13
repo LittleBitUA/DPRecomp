@@ -32,12 +32,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
+#include <rex/stats.h>
 
 #include "deadlyprem_pch.h"  // PPCRegister / PPCContext (generated/default is on the include path)
 
@@ -188,4 +192,96 @@ void DPThreadCreateNameHook(PPCRegister& r4) {
   while (len < 31 && name[len] >= 0x20 && name[len] < 0x7F) ++len;
   if (!len) return;
   rex::system::XThread::SetPendingGuestThreadName(std::string_view(name, len));
+}
+
+// ---------------------------------------------------------------------------
+// DP1 diagnostics (2026-09-13): the game's own error channels into the log.
+//
+// PhysX 2.6 error stream. Every PhysX-side check funnels through
+// PAL sub_825686A8(code, file, line, fmt, ...) -> sub_82569290 (USA
+// sub_82570380 -> sub_82570F68), which vsnprintf-s the message into a 160-byte
+// stack buffer (grown from the heap when it does not fit) and hands it to the
+// game's NxUserOutputStream. The hook sits right after the vsnprintf loop,
+// where r30 = message, r25 = NxErrorCode, r23 = file, r22 = line
+// (PAL 0x825693A0, USA 0x82571078; both bodies are instruction-identical).
+// Code 107 goes to reportAssertViolation, 208 to print(), the rest to
+// reportError(code, message, file, line) - the same split as the game makes.
+// ---------------------------------------------------------------------------
+
+REXCVAR_DEFINE_BOOL(dp_physx_log, true, "DP1",
+                    "Write PhysX error-stream messages (invalid parameters, skipped calls, "
+                    "out-of-memory, asserts) into the log: the first 5 of each distinct text, "
+                    "then every 100th, with a running count")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(dp_audio_cue_log, false, "DP1",
+                    "Log every sound-effect cue the game triggers through its SE wrapper "
+                    "(cue id, engine, arguments); the frame number in the line pattern shows "
+                    "which update fired it")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+
+// Copies a NUL-terminated guest string, or returns a placeholder when the
+// pointer is outside every guest heap (a bad pointer must never take the
+// log hook down with it).
+std::string DPGuestString(uint32_t guest_ptr, size_t max_len) {
+  if (!guest_ptr) return "(null)";
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory || !memory->LookupHeap(guest_ptr)) return "(bad ptr)";
+  const char* p = memory->TranslateVirtual<const char*>(guest_ptr);
+  size_t len = 0;
+  while (len < max_len && p[len] != '\0') ++len;
+  return std::string(p, len);
+}
+
+const char* DPPhysXCodeName(int code) {
+  switch (code) {
+    case 0: return "no-error";
+    case 1: return "invalid-parameter";
+    case 2: return "invalid-operation";
+    case 4: return "out-of-memory";
+    case 8: return "internal-error";
+    case 100: return "assertion";
+    case 107: return "assert-violation";
+    case 108: return "db-warning";
+    case 109: return "db-info";
+    case 208: return "print";
+    default: return "code";
+  }
+}
+
+std::mutex g_dp_physx_mutex;
+std::unordered_map<std::string, uint32_t> g_dp_physx_counts;
+uint32_t g_dp_physx_total = 0;
+
+}  // namespace
+
+// PAL 0x825693A0 / USA 0x82571078 (see the block comment above).
+void DPPhysXReportHook(PPCRegister& r30, PPCRegister& r25, PPCRegister& r23, PPCRegister& r22) {
+  if (!REXCVAR_GET(dp_physx_log)) return;
+  const int code = r25.s32;
+  const std::string message = DPGuestString(r30.u32, 1024);
+  uint32_t count = 0;
+  uint32_t total = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_dp_physx_mutex);
+    count = ++g_dp_physx_counts[message];
+    total = ++g_dp_physx_total;
+  }
+  rex::stats::Set("game/physx_reports", total);
+  if (count > 5 && (count % 100) != 0) return;
+  if (code == 208) {
+    REXLOG_INFO("PhysX print: {} (x{})", message, count);
+    return;
+  }
+  const std::string file = DPGuestString(r23.u32, 256);
+  REXLOG_WARN("PhysX {} ({}): {} [{}:{}] (x{})", DPPhysXCodeName(code), code, message, file,
+              r22.s32, count);
+}
+
+// PAL 0x8225D0B8 / USA 0x8225CFE0: SE wrapper entry, sub(engine, cue 0..1030,
+// r5, r6) -> table at engine+21692, 12 bytes per cue -> sub_8225B740.
+void DPAudioCueHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5, PPCRegister& r6) {
+  if (!REXCVAR_GET(dp_audio_cue_log)) return;
+  REXLOG_INFO("SE cue {} (engine {:08X}, r5 {:08X}, r6 {:08X})", r4.s32, r3.u32, r5.u32, r6.u32);
 }

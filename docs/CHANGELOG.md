@@ -2,6 +2,14 @@
 
 Release notes for each version: [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
 
+## Unreleased
+
+- **Periodic `[stats]` line in the log** (`log_stats_interval`, default 60 s, 0 = off): guest heap usage, kernel object and thread counts, GPU texture / pipeline cache sizes, shared-memory and scaled-resolve buffer use, XMA contexts, audio clients, VRAM budget and usage, process working set, private bytes, handle count and free system memory. Written from its own thread, so it keeps coming while the game is hung (#21) and the last line before a GPU device removal shows the VRAM picture (#22).
+- **The game's own error channels reach the log.** PhysX 2.6 error stream (`dp_physx_log`, on): every invalid parameter, skipped call, out-of-memory and assert the physics SDK reports, with file and line, the first 5 of each text then every 100th with a count, and a `game/physx_reports` gauge in `[stats]`. Sound-effect cues (`dp_audio_cue_log`, off): cue id and arguments per trigger, with the frame number.
+- **Green / rainbow panels on the ROV path (#23) are now caught in the log.** The ROV path tags every EDRAM tile that holds HDR (7e3) color and converts it in place before 8-bit draws; a resolve that copies an 8-bit render target from tiles still tagged HDR now logs a warning with the frame, EDRAM base and size (that is the green frame). `rov_7e3_track_log` logs every conversion, `rov_7e3_convert_on_resolve` and `rov_8888_full_extent` are the two experiments; `gpu/rov/*` gauges in `[stats]`.
+- **Trap instructions carry their address.** A `twi 31,r0,22` (the game's STL / CRT assert, 33 sites) or a conditional trap now logs `at 0x8XXXXXXX, lr 0x...` instead of a bare "trap hit", so a crash that follows one can be tied to a function.
+- The experimental `dp_anim_event_dedupe` / `dp_anim_event_log` switches from 1.3.0 are removed: the doubled sounds of #17 / #18 went away with whole ticks in 1.3, and the player logs showed the "triple picks" were different controllers, not a duplicate. A leftover key in `deadlyprem.toml` only logs one "unknown cvar" warning.
+
 ## 1.3.3 (September 2026)
 
 - **Steam Deck (#20):** the launcher applies updates itself (a helper copy of the launcher with a built-in zip reader, miniz) instead of a PowerShell script, so the Update button works under Proton.

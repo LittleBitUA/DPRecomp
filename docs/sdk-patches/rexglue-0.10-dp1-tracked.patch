@@ -1,3 +1,46 @@
+diff --git a/include/rex/dbg.h b/include/rex/dbg.h
+index 80c254d..f591161 100644
+--- a/include/rex/dbg.h
++++ b/include/rex/dbg.h
+@@ -17,6 +17,8 @@
+ 
+ #include <cstring>
+ 
++#include <rex/stats.h>
++
+ namespace rex::debug {
+ 
+ // Returns true if a debugger is attached to this process.
+@@ -82,11 +84,13 @@ void DebugPrint(fmt::string_view format, const Args&... args) {
+ #define PROFILE_FIBER_LEAVE
+ #endif
+ 
+-// Counter profiling -- plot to Tracy
+-#define COUNT_profile_set(name, value)              \
+-  do {                                              \
+-    if (TracyIsStarted)                             \
+-      TracyPlot(name, static_cast<int64_t>(value)); \
++// Counter profiling -- plot to Tracy, and keep the latest value in the
++// rex::stats gauge table for the periodic [stats] log line.
++#define COUNT_profile_set(name, value)                    \
++  do {                                                    \
++    ::rex::stats::Set(name, static_cast<int64_t>(value)); \
++    if (TracyIsStarted)                                   \
++      TracyPlot(name, static_cast<int64_t>(value));       \
+   } while (0)
+ 
+ #else  // !REXGLUE_ENABLE_PROFILING
+@@ -107,7 +111,8 @@ void DebugPrint(fmt::string_view format, const Args&... args) {
+ #define PROFILE_FIBER_ENTER(name)
+ #define PROFILE_FIBER_LEAVE
+ 
+-// Counter profiling stubs
+-#define COUNT_profile_set(name, value)
++// Counter profiling: no Tracy, but the gauge still feeds the [stats] line.
++#define COUNT_profile_set(name, value) \
++  ::rex::stats::Set(name, static_cast<int64_t>(value))
+ 
+ #endif  // REXGLUE_ENABLE_PROFILING
 diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
 index 7a9d6a2..d5128a3 100644
 --- a/include/rex/graphics/d3d12/pipeline_cache.h
@@ -24,10 +67,19 @@ index 7a9d6a2..d5128a3 100644
    void StorageWriteThread();
    std::mutex storage_write_request_lock_;
 diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
-index cd7693a..9eec523 100644
+index cd7693a..fb1f002 100644
 --- a/include/rex/graphics/d3d12/render_target_cache.h
 +++ b/include/rex/graphics/d3d12/render_target_cache.h
-@@ -750,6 +750,15 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+@@ -186,6 +186,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   };
+   static const ResolveCopyShaderCode
+       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
++  // DP1 diagnostics: XE_DP1_SHADOW_DEBUG variant of the full 32bpp resolve.
++  ID3D12PipelineState* resolve_copy_pipeline_shadow_debug_ = nullptr;
+   ID3D12PipelineState* resolve_copy_pipelines_[size_t(draw_util::ResolveCopyShaderIndex::kCount)] =
+       {};
+ 
+@@ -750,6 +752,15 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
    ID3D12PipelineState* resolve_rov_clear_32bpp_pipeline_ = nullptr;
    // Clearing 64bpp color.
    ID3D12PipelineState* resolve_rov_clear_64bpp_pipeline_ = nullptr;
@@ -116,10 +168,18 @@ index 2cf24c4..e52c177 100644
  REXCVAR_DECLARE(int32_t, anisotropic_override);
  REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_render_to_texture);
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
-index 3bbd52e..0017c1b 100644
+index 3bbd52e..1f37723 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
 +++ b/include/rex/graphics/pipeline/render_target/cache.h
-@@ -548,6 +548,25 @@ class RenderTargetCache {
+@@ -14,6 +14,7 @@
+ #include <cstdint>
+ #include <functional>
+ #include <map>
++#include <string>
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+@@ -548,6 +549,32 @@ class RenderTargetCache {
    // EDRAM memory are committed with a memory barrier.
    void PixelShaderInterlockFullEdramBarrierPlaced();
  
@@ -138,6 +198,13 @@ index 3bbd52e..0017c1b 100644
 +  // false) data written to the tile range, and, if convert_if_7e3_to_8888 is
 +  // true (drawing, as opposed to clearing), requests the reinterpretation of
 +  // the sub-ranges that still hold 7e3 data when binding them as 8888.
++  // DP1 diagnostics (2026-09-13, #23): number of tiles in [start, start + length)
++  // (wrapping) currently tagged as holding 7e3 color.
++  uint32_t PixelShaderInterlockCount7e3Tiles(uint32_t start_tiles, uint32_t length_tiles) const;
++  // Same for tiles tagged as NOT 7e3 (8888 / other / never written).
++  uint32_t PixelShaderInterlockCountNon7e3Tiles(uint32_t start_tiles,
++                                               uint32_t length_tiles) const;
++
 +  void PixelShaderInterlockTrackTiles(uint32_t start_tiles, uint32_t length_tiles, bool is_color,
 +                                      xenos::ColorRenderTargetFormat color_format,
 +                                      bool convert_if_7e3_to_8888);
@@ -145,7 +212,7 @@ index 3bbd52e..0017c1b 100644
   private:
    const RegisterFile& register_file_;
    uint32_t draw_resolution_scale_x_;
-@@ -661,6 +680,12 @@ class RenderTargetCache {
+@@ -661,6 +688,14 @@ class RenderTargetCache {
    // changes to this throughout a frame are pretty rare.
    std::map<uint32_t, OwnershipRange> ownership_ranges_;
  
@@ -154,6 +221,8 @@ index 3bbd52e..0017c1b 100644
 +  // ownership_ranges_, which the interlock path resets on every full barrier
 +  // and which doesn't carry the real color format there.
 +  uint8_t interlock_tile_is_7e3_[xenos::kEdramTileCount] = {};
++  // DP1 diagnostics: last "ROV bind" line, to log only changes.
++  std::string rov_bind_log_last_;
 +
    // Render targets actually used by the draw call with the last successful
    // update. 0 is depth, color starting from 1, nullptr if not bound.
@@ -354,6 +423,37 @@ index 1f52480..48d7478 100644
    std::unique_ptr<ui::ConsoleDialog> console_overlay_;
    std::unique_ptr<ui::SettingsDialog> settings_overlay_;
    std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;
+diff --git a/include/rex/system/util/object_table.h b/include/rex/system/util/object_table.h
+index df9bad4..9267cc2 100644
+--- a/include/rex/system/util/object_table.h
++++ b/include/rex/system/util/object_table.h
+@@ -76,6 +76,11 @@ class ObjectTable {
+   }
+ 
+   std::vector<object_ref<XObject>> GetAllObjects();
++
++  // Counts live entries without blocking: returns false when the global
++  // critical region is held by someone else (the periodic [stats] line must
++  // never wait on a lock a hung guest thread may own).
++  bool TryCountObjects(uint32_t* out_count);
+   void PurgeAllObjects();  // Purges the object table of all guest objects
+ 
+  private:
+diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
+index 0c39a42..1e12fd5 100644
+--- a/include/rex/system/xmemory.h
++++ b/include/rex/system/xmemory.h
+@@ -541,6 +541,10 @@ class Memory {
+   // Dumps a map of all allocated memory to the log.
+   void DumpMap();
+ 
++  // One-line reserved/total summary of every guest heap, in MB, for the
++  // periodic [stats] line. Lock-free (see the provider registration).
++  std::string DescribeHeapUsage() const;
++
+   bool Save(stream::ByteStream* stream);
+   bool Restore(stream::ByteStream* stream);
+ 
 diff --git a/include/rex/system/xthread.h b/include/rex/system/xthread.h
 index a72911e..3e9b439 100644
 --- a/include/rex/system/xthread.h
@@ -375,7 +475,7 @@ index a72911e..3e9b439 100644
    X_STATUS Create();
    X_STATUS Exit(int exit_code);
 diff --git a/include/rex/ui/d3d12/d3d12_provider.h b/include/rex/ui/d3d12/d3d12_provider.h
-index 35035a4..571c9e1 100644
+index 35035a4..b3e64b9 100644
 --- a/include/rex/ui/d3d12/d3d12_provider.h
 +++ b/include/rex/ui/d3d12/d3d12_provider.h
 @@ -35,6 +35,9 @@ class D3D12Provider : public GraphicsProvider {
@@ -397,6 +497,16 @@ index 35035a4..571c9e1 100644
    PFN_D3D12_CREATE_DEVICE pfn_d3d12_create_device_;
    PFN_D3D12_SERIALIZE_ROOT_SIGNATURE pfn_d3d12_serialize_root_signature_;
  
+@@ -151,6 +156,9 @@ class D3D12Provider : public GraphicsProvider {
+   DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
+ 
+   IDXGIFactory2* dxgi_factory_ = nullptr;
++  // DP1 2026-09-13: the adapter the device was created on, for the VRAM
++  // budget line in [stats]. May be nullptr on adapters without IDXGIAdapter3.
++  IDXGIAdapter3* dxgi_adapter3_ = nullptr;
+   ID3D12Device* device_ = nullptr;
+   ID3D12CommandQueue* direct_queue_ = nullptr;
+   IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
 diff --git a/include/rex/ui/overlay/debug_overlay.h b/include/rex/ui/overlay/debug_overlay.h
 index e15e410..c548be1 100644
 --- a/include/rex/ui/overlay/debug_overlay.h
@@ -439,6 +549,85 @@ index 3e1b948..a6286ce 100644
    kClear = 0x0C,
    kReturn = 0x0D,  // Enter.
  
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 68274d2..3507d21 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -286,22 +286,29 @@ inline std::unordered_map<u32, jmp_buf>& get_jmp_buf_map() {
+ // Trap Handling
+ //=============================================================================
+ 
+-inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
++// DP1 2026-09-13: `address` is the guest address of the trap instruction
++// (0 when the caller predates this signature). Type 22 is `twi 31,r0,22`,
++// the STL / CRT __debugbreak assert; type 0 is a conditional tw/twi
++// (division checks and the like). On the console both halt the title.
++inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type, u32 address = 0) {
+   switch (trap_type) {
+     case 20:
+     case 26: {
+       auto str = REX_LOAD_STRING(ctx.r3.u32, ctx.r4.u16);
+-      REXCPU_DEBUG("(service trap) {}", str);
++      REXCPU_DEBUG("(service trap) {} at 0x{:08X}", str, address);
+       break;
+     }
+-    case 0:
+     case 22:
+-      REXCPU_WARN("tw/td trap hit (type {})", trap_type);
++      REXCPU_WARN("assert trap (twi 31,r0,22) at 0x{:08X}, lr 0x{:08X}, r3 0x{:08X} r4 0x{:08X}",
++                  address, u32(ctx.lr), ctx.r3.u32, ctx.r4.u32);
++      break;
++    case 0:
++      REXCPU_WARN("conditional trap hit at 0x{:08X}, lr 0x{:08X}", address, u32(ctx.lr));
+       break;
+     case 25:
+       break;
+     default:
+-      REXCPU_WARN("Unknown trap type {}", trap_type);
++      REXCPU_WARN("Unknown trap type {} at 0x{:08X}", trap_type, address);
+       break;
+   }
+ }
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 7a711a8..a19bdcb 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -16,6 +16,7 @@
+ #include <rex/audio/xma/decoder.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
++#include <rex/stats.h>
+ #include <rex/math.h>
+ #include <rex/memory/ring_buffer.h>
+ #include <rex/stream.h>
+@@ -252,6 +253,13 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+   memory::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
+ 
+   clients_[index] = {driver, callback, callback_arg, ptr, true};
++  {
++    int64_t in_use = 0;
++    for (const auto& client : clients_) {
++      in_use += client.in_use ? 1 : 0;
++    }
++    rex::stats::Set("audio/clients", in_use);
++  }
+ 
+   if (out_index) {
+     *out_index = index;
+@@ -284,6 +292,13 @@ void AudioSystem::UnregisterClient(size_t index) {
+   DestroyDriver(clients_[index].driver);
+   memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
+   clients_[index] = {nullptr, 0, 0, 0, false};
++  {
++    int64_t in_use = 0;
++    for (const auto& client : clients_) {
++      in_use += client.in_use ? 1 : 0;
++    }
++    rex::stats::Set("audio/clients", in_use);
++  }
+ 
+   // Drain the semaphore of its count.
+   auto client_semaphore = client_semaphores_[index].get();
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
 index 20a2cd8..434f4e3 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
@@ -563,11 +752,108 @@ index 11b83be..e115c37 100644
    }
  
    return kBitsPerPacketHeader;
+diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
+index a0a178d..e215f70 100644
+--- a/src/audio/xma_decoder.cpp
++++ b/src/audio/xma_decoder.cpp
+@@ -9,11 +9,14 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
++
+ #include <rex/audio/xma/context.h>
+ #include <rex/audio/xma/decoder.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
++#include <rex/stats.h>
+ #include <rex/perf/counter.h>
+ #include <rex/math.h>
+ #include <rex/memory/ring_buffer.h>
+@@ -203,6 +206,9 @@ int XmaDecoder::GetContextId(uint32_t guest_ptr) {
+   return (guest_ptr - context_data_first_ptr_) >> 6;
+ }
+ 
++// DP1 2026-09-13: live XMA context count for the periodic [stats] line.
++static std::atomic<int64_t> g_xma_contexts_in_use{0};
++
+ uint32_t XmaDecoder::AllocateContext() {
+   size_t index = context_bitmap_.Acquire();
+   if (index == -1) {
+@@ -213,6 +219,7 @@ uint32_t XmaDecoder::AllocateContext() {
+   XmaContext& context = contexts_[index];
+   assert_false(context.is_allocated());
+   context.set_is_allocated(true);
++  rex::stats::Set("audio/xma_contexts", g_xma_contexts_in_use.fetch_add(1) + 1);
+   return context.guest_ptr();
+ }
+ 
+@@ -224,6 +231,7 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
+   assert_true(context.is_allocated());
+   context.Release();
+   context_bitmap_.Release(context_id);
++  rex::stats::Set("audio/xma_contexts", g_xma_contexts_in_use.fetch_sub(1) - 1);
+ }
+ 
+ bool XmaDecoder::BlockOnContext(uint32_t guest_ptr, bool poll) {
+diff --git a/src/codegen/builders/helpers.h b/src/codegen/builders/helpers.h
+index dbc8d51..863b93a 100644
+--- a/src/codegen/builders/helpers.h
++++ b/src/codegen/builders/helpers.h
+@@ -442,7 +442,7 @@ inline void emitVectorTempEA(BuilderContext& ctx) {
+ //=============================================================================
+ 
+ /**
+- * Emit a PPC trap instruction: if (<condition>) ppc_trap(ctx, base, 0);
++ * Emit a PPC trap instruction: if (<condition>) ppc_trap(ctx, base, 0, <guest address>);
+  *
+  * @param to       5-bit TO field
+  * @param aSigned  First operand, signed (e.g., "ctx.r3.s32")
+@@ -456,7 +456,7 @@ inline void emitTrap(BuilderContext& ctx, uint32_t to, const std::string& aSigne
+   if (to == 0)
+     return;
+   if (to == 0x1F) {
+-    ctx.println("\tppc_trap(ctx, base, 0);");
++    ctx.println("\tppc_trap(ctx, base, 0, 0x{:08X});", ctx.base);
+     return;
+   }
+ 
+@@ -477,7 +477,7 @@ inline void emitTrap(BuilderContext& ctx, uint32_t to, const std::string& aSigne
+   if (to & 0x01)
+     add(fmt::format("{} > {}", aUnsigned, bUnsigned));
+ 
+-  ctx.println("\tif ({}) ppc_trap(ctx, base, 0);", cond);
++  ctx.println("\tif ({}) ppc_trap(ctx, base, 0, 0x{:08X});", cond, ctx.base);
+ }
+ 
+ }  // namespace rex::codegen
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index b2d70f5..1c3f4c9 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -98,7 +98,7 @@ bool build_twi(BuilderContext& ctx) {
+   // twi 31, r0, <imm> is an unconditional trap with service code in the immediate
+   if (to == 0x1F && ra == 0) {
+     uint16_t trap_type = static_cast<uint16_t>(simm);
+-    ctx.println("\tppc_trap(ctx, base, {});", trap_type);
++    ctx.println("\tppc_trap(ctx, base, {}, 0x{:08X});", trap_type, ctx.base);
+     return true;
+   }
+ 
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 1ddafd0..88aff18 100644
+index 1ddafd0..e45404d 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -39,6 +39,7 @@ if(WIN32)
+@@ -16,6 +16,7 @@ add_library(rexcore OBJECT
+     memory.cpp
+     mutex.cpp
+     ring_buffer.cpp
++    stats.cpp
+     string_buffer.cpp
+     threading.cpp
+     timer_queue.cpp
+@@ -39,6 +40,7 @@ if(WIN32)
          clock_win.cpp
          dbg_win.cpp
          dynlib_win.cpp
@@ -575,13 +861,13 @@ index 1ddafd0..88aff18 100644
          exception_handler_win.cpp
          filesystem_win.cpp
          fiber_win32.cpp
-@@ -135,3 +136,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
+@@ -135,3 +137,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
      target_compile_definitions(rexcore PUBLIC
          $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
  endif()
 +
 +if(WIN32)
-+    target_link_libraries(rexcore PRIVATE dbghelp)
++    target_link_libraries(rexcore PRIVATE dbghelp psapi)
 +endif()
 diff --git a/src/core/logging.cpp b/src/core/logging.cpp
 index 1645848..1aa49f7 100644
@@ -1236,10 +1522,39 @@ index 8e6b854..6061ea5 100644
  }
  
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index dd321a5..f31bcbe 100644
+index dd321a5..ef60a98 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
-@@ -79,6 +79,9 @@ namespace shaders {
+@@ -33,11 +33,21 @@
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/logging.h>
++#include <rex/stats.h>
+ #include <rex/math.h>
+ #include <rex/string.h>
+ #include <rex/ui/d3d12/d3d12_provider.h>
+ #include <rex/ui/d3d12/d3d12_util.h>
+ 
++REXCVAR_DECLARE(bool, rov_7e3_convert_on_resolve);
++REXCVAR_DECLARE(bool, rov_bind_log);
++REXCVAR_DEFINE_BOOL(rov_shadow_debug_tint, false, "GPU/D3D12",
++                    "Diagnostics: resolve 7e3 (HDR) render targets with a shader that paints "
++                    "magenta wherever the shadow alpha tag is invalid and the 2-bit alpha "
++                    "fallback is used (sky / fog banding investigation)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DECLARE(bool, rov_7e3_track_log);
++
+ REXCVAR_DEFINE_BOOL(native_stencil_value_output_d3d12_intel, false, "GPU/D3D12",
+                     "Native stencil value output for Intel D3D12");
+ 
+@@ -75,10 +85,16 @@ namespace shaders {
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_16bpp_scaled_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_32bpp_cs.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_32bpp_scaled_cs.h"
++// DP1 diagnostics: XE_DP1_SHADOW_DEBUG builds of the two above.
++#include "../shaders/bytecode/d3d12_5_1/resolve_full_32bpp_cs_shadowdbg.h"
++#include "../shaders/bytecode/d3d12_5_1/resolve_full_32bpp_scaled_cs_shadowdbg.h"
+ #include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_cs.h"
  #include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_scaled_cs.h"
  #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_cs.h"
  #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_scaled_cs.h"
@@ -1249,7 +1564,7 @@ index dd321a5..f31bcbe 100644
  }  // namespace shaders
  
  const D3D12RenderTargetCache::ResolveCopyShaderCode
-@@ -203,8 +206,17 @@ bool D3D12RenderTargetCache::Initialize() {
+@@ -203,8 +219,17 @@ bool D3D12RenderTargetCache::Initialize() {
    }
  
    // Create the buffer for reinterpreting EDRAM contents.
@@ -1268,7 +1583,27 @@ index dd321a5..f31bcbe 100644
    D3D12_RESOURCE_DESC edram_buffer_desc;
    ui::d3d12::util::FillBufferResourceDesc(edram_buffer_desc, edram_buffer_size,
                                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-@@ -948,6 +960,19 @@ bool D3D12RenderTargetCache::Initialize() {
+@@ -366,6 +391,19 @@ bool D3D12RenderTargetCache::Initialize() {
+     resolve_copy_pipeline->SetName(reinterpret_cast<LPCWSTR>(resolve_copy_pipeline_name.c_str()));
+     resolve_copy_pipelines_[i] = resolve_copy_pipeline;
+   }
++  // DP1 diagnostics: the shadow-debug variant of the full 32bpp resolve.
++  resolve_copy_pipeline_shadow_debug_ = ui::d3d12::util::CreateComputePipeline(
++      device,
++      draw_resolution_scaled ? shaders::resolve_full_32bpp_scaled_cs_shadowdbg
++                             : shaders::resolve_full_32bpp_cs_shadowdbg,
++      draw_resolution_scaled ? sizeof(shaders::resolve_full_32bpp_scaled_cs_shadowdbg)
++                             : sizeof(shaders::resolve_full_32bpp_cs_shadowdbg),
++      resolve_copy_root_signature_);
++  if (resolve_copy_pipeline_shadow_debug_ != nullptr) {
++    resolve_copy_pipeline_shadow_debug_->SetName(L"Resolve full 32bpp (DP1 shadow debug)");
++  } else {
++    REXGPU_WARN("D3D12RenderTargetCache: shadow-debug resolve pipeline not created");
++  }
+ 
+   // Using the cvar on emulator initialization so used pipelines are consistent
+   // across different titles launched in one emulator instance.
+@@ -948,6 +986,19 @@ bool D3D12RenderTargetCache::Initialize() {
        return false;
      }
      resolve_rov_clear_64bpp_pipeline_->SetName(L"Resolve Clear 64bpp");
@@ -1288,7 +1623,7 @@ index dd321a5..f31bcbe 100644
    } else {
      assert_unhandled_case(path_);
      Shutdown();
-@@ -960,6 +985,7 @@ bool D3D12RenderTargetCache::Initialize() {
+@@ -960,6 +1011,7 @@ bool D3D12RenderTargetCache::Initialize() {
  }
  
  void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
@@ -1296,17 +1631,127 @@ index dd321a5..f31bcbe 100644
    ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_64bpp_pipeline_);
    ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_32bpp_pipeline_);
    ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_root_signature_);
-@@ -1370,6 +1396,9 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1026,6 +1078,7 @@ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
+   descriptor_pool_depth_.reset();
+   descriptor_pool_color_.reset();
+ 
++  ui::d3d12::util::ReleaseAndNull(resolve_copy_pipeline_shadow_debug_);
+   for (size_t i = 0; i < rex::countof(resolve_copy_pipelines_); ++i) {
+     ui::d3d12::util::ReleaseAndNull(resolve_copy_pipelines_[i]);
+   }
+@@ -1220,6 +1273,74 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+         }
+       }
+ 
++      if (REXCVAR_GET(rov_bind_log) && GetPath() == Path::kPixelShaderInterlock) {
++        const draw_util::ResolveEdramInfo& src_info = resolve_info.IsCopyingDepth()
++                                                          ? resolve_info.depth_edram_info
++                                                          : resolve_info.color_edram_info;
++        REXGPU_INFO("ROV bind: resolve copy {} base {} pitch {} fmt {} {}x{} px at x{} y{} -> dest {:08X}",
++                    resolve_info.IsCopyingDepth() ? "depth" : "color", uint32_t(src_info.base_tiles),
++                    uint32_t(src_info.pitch_tiles), uint32_t(src_info.format),
++                    uint32_t(resolve_info.coordinate_info.width_div_8) * 8, resolve_info.height_div_8 * 8,
++                    uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8),
++                    uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8),
++                    resolve_info.copy_dest_base);
++      }
++      // DP1 diagnostics (2026-09-13, #23): on the ROV path the copy reads the
++      // EDRAM buffer directly. If the source is an 8888 render target but some
++      // of its tiles are still tagged as holding 7e3 (HDR) bits, the copy
++      // decodes raw 7e3 as 8-bit color - the green / rainbow panels. The mirror
++      // case (7e3 source over tiles last written as 8888) is logged too.
++      if (GetPath() == Path::kPixelShaderInterlock && !resolve_info.IsCopyingDepth()) {
++        uint32_t span_base, span_row_length, span_rows, span_pitch;
++        resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
++        xenos::ColorRenderTargetFormat src_format =
++            xenos::ColorRenderTargetFormat(resolve_info.color_edram_info.format);
++        bool src_is_8888 = src_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
++                           src_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
++        bool src_is_7e3 =
++            src_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
++            src_format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16;
++        if (src_is_8888 || src_is_7e3) {
++          uint32_t mismatched = 0;
++          uint32_t total = 0;
++          for (uint32_t row = 0; row < span_rows; ++row) {
++            uint32_t row_start = span_base + row * span_pitch;
++            total += span_row_length;
++            mismatched += src_is_8888 ? PixelShaderInterlockCount7e3Tiles(row_start, span_row_length)
++                                      : PixelShaderInterlockCountNon7e3Tiles(row_start, span_row_length);
++          }
++          if (mismatched) {
++            static uint32_t events_8888_from_7e3 = 0;
++            static uint32_t events_7e3_from_8888 = 0;
++            uint32_t events = src_is_8888 ? ++events_8888_from_7e3 : ++events_7e3_from_8888;
++            rex::stats::Set(src_is_8888 ? "gpu/rov/resolve_8888_from_7e3_tiles"
++                                        : "gpu/rov/resolve_7e3_from_non7e3_tiles",
++                            events);
++            bool convert = src_is_8888 && REXCVAR_GET(rov_7e3_convert_on_resolve);
++            if (events <= 20 || (events % 200) == 0 || REXCVAR_GET(rov_7e3_track_log)) {
++              REXGPU_WARN(
++                  "ROV resolve: {} of {} source tiles of a {} copy (EDRAM base {}, pitch {}, {}x{} "
++                  "px at tile offset x{} y{}) are tagged {} -> {} (event {}{})",
++                  mismatched, total, src_is_8888 ? "8888" : "7e3", span_base, span_pitch,
++                  uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
++                  resolve_info.height_div_8 * 8,
++                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8),
++                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8),
++                  src_is_8888 ? "7e3" : "not 7e3",
++                  src_is_8888 ? "raw HDR bits decoded as 8-bit color (green / rainbow, #23)"
++                              : "8-bit bits decoded as HDR floats",
++                  events, convert ? ", converting first" : "");
++            }
++            if (convert) {
++              for (uint32_t row = 0; row < span_rows; ++row) {
++                PixelShaderInterlockTrackTiles(span_base + row * span_pitch, span_row_length, true,
++                                               src_format, true);
++              }
++            }
++          }
++        }
++      }
++
+       // Make sure there is memory to write to.
+       bool copy_dest_committed;
+       if (draw_resolution_scaled) {
+@@ -1298,7 +1419,15 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+             command_list.D3DSetComputeRoot32BitConstants(
+                 0, sizeof(copy_shader_constants) / sizeof(uint32_t), &copy_shader_constants, 0);
+           }
+-          command_processor_.SetExternalPipeline(resolve_copy_pipelines_[size_t(copy_shader)]);
++          {
++            ID3D12PipelineState* copy_pipeline = resolve_copy_pipelines_[size_t(copy_shader)];
++            if (REXCVAR_GET(rov_shadow_debug_tint) && resolve_copy_pipeline_shadow_debug_ &&
++                copy_shader == draw_util::ResolveCopyShaderIndex::kFull32bpp &&
++                GetPath() == Path::kPixelShaderInterlock) {
++              copy_pipeline = resolve_copy_pipeline_shadow_debug_;
++            }
++            command_processor_.SetExternalPipeline(copy_pipeline);
++          }
+           command_processor_.SubmitBarriers();
+           command_list.D3DDispatch(copy_group_count_x, copy_group_count_y, 1);
+ 
+@@ -1370,6 +1499,19 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            // instance), overlap of the depth and the color ranges is highly
            // unlikely.
            CommitEdramBufferUAVWrites();
 +          // DP1 fix: the clear overwrites the tiles - record their new format
 +          // class (no conversion needed).
 +          PixelShaderInterlockTrackClear(resolve_info, clear_depth, clear_color);
++          if (REXCVAR_GET(rov_bind_log)) {
++            REXGPU_INFO("ROV bind: clear{}{} depth base {} fmt {} / color base {} fmt {} {}x{} px",
++                        clear_depth ? " depth" : "", clear_color ? " color" : "",
++                        uint32_t(resolve_info.depth_edram_info.base_tiles),
++                        uint32_t(resolve_info.depth_edram_info.format),
++                        uint32_t(resolve_info.color_edram_info.base_tiles),
++                        uint32_t(resolve_info.color_edram_info.format),
++                        uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
++                        resolve_info.height_div_8 * 8);
++          }
            command_list.D3DSetComputeRootSignature(resolve_rov_clear_root_signature_);
            command_list.D3DSetComputeRootDescriptorTable(1, descriptor_edram.second);
            std::pair<uint32_t, uint32_t> clear_group_count = resolve_info.GetClearShaderGroupCount(
-@@ -1716,6 +1745,74 @@ void D3D12RenderTargetCache::RequestPixelShaderInterlockBarrier() {
+@@ -1716,6 +1858,74 @@ void D3D12RenderTargetCache::RequestPixelShaderInterlockBarrier() {
    CommitEdramBufferUAVWrites();
  }
  
@@ -1381,7 +1826,7 @@ index dd321a5..f31bcbe 100644
  void D3D12RenderTargetCache::TransitionEdramBuffer(D3D12_RESOURCE_STATES new_state) {
    if (command_processor_.PushTransitionBarrier(edram_buffer_, edram_buffer_state_, new_state)) {
      // Resetting edram_buffer_modification_status_ only if the barrier has been
-@@ -3126,6 +3223,20 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
+@@ -3126,6 +3336,20 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
                        dest_color_format ==
                            xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16)) {
              a.OpMov(dxbc::Dest::O(0), dxbc::Src::R(1));
@@ -1611,10 +2056,43 @@ index e2983a4..268a851 100644
  REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
  REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
-index 953c5fd..764d739 100644
+index 953c5fd..2ea0be4 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
 +++ b/src/graphics/pipeline/render_target/cache.cpp
-@@ -85,6 +85,10 @@ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat for
+@@ -26,8 +26,32 @@
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/logging.h>
++#include <rex/stats.h>
+ #include <rex/math.h>
+ 
++// DP1 diagnostics (2026-09-13, DPRecomp #23 green / rainbow UI panels on the
++// ROV path). The interlock path keeps a per-tile "holds 7e3 color" flag and
++// converts 7e3 -> 8888 in place when an 8888 draw binds those tiles, but only
++// over the draw's ESTIMATED extent. These switches make every step visible in
++// the log and in the [stats] line, and give two A/B experiments.
++REXCVAR_DEFINE_BOOL(rov_7e3_track_log, false, "GPU",
++                    "Log every ROV 7e3 -> 8888 tile conversion and every 8888 draw whose "
++                    "estimated extent leaves 7e3-tagged tiles behind (DPRecomp #23)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(rov_bind_log, false, "GPU",
++                    "Diagnostics: log every change of the bound render target set (EDRAM "
++                    "base, format, estimated length), every clear and every resolve copy on "
++                    "the ROV path, with the frame number")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(rov_8888_full_extent, false, "GPU",
++                    "Experiment: for 8888 color draws on the ROV path, track and convert the "
++                    "render target's full EDRAM range instead of the estimated draw extent")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(rov_7e3_convert_on_resolve, false, "GPU",
++                    "Experiment: when a resolve copies an 8888 render target from tiles still "
++                    "tagged 7e3, convert them first instead of copying raw HDR bits")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(mrt_edram_used_range_clamp_to_min, true, "GPU",
+                     "Clamp MRT EDRAM used range to minimum");
+ 
+@@ -85,6 +109,10 @@ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat for
        }
        if (!(write_mask & 0b1000)) {
          keep_mask_low |= uint32_t(3) << 30;
@@ -1625,7 +2103,7 @@ index 953c5fd..764d739 100644
        }
      } break;
      case xenos::ColorRenderTargetFormat::k_16_16:
-@@ -341,6 +345,7 @@ void RenderTargetCache::InitializeCommon() {
+@@ -341,6 +369,7 @@ void RenderTargetCache::InitializeCommon() {
  }
  
  void RenderTargetCache::DestroyAllRenderTargets(bool shutting_down) {
@@ -1633,7 +2111,7 @@ index 953c5fd..764d739 100644
    ownership_ranges_.clear();
    if (!shutting_down) {
      ownership_ranges_.emplace(std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
-@@ -457,6 +462,9 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -457,6 +486,9 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
    // depth_and_color_rts_used_bits -> EDRAM base.
    uint32_t edram_bases[1 + xenos::kMaxColorRenderTargets];
    uint32_t resource_formats[1 + xenos::kMaxColorRenderTargets];
@@ -1643,7 +2121,7 @@ index 953c5fd..764d739 100644
    uint32_t rts_are_64bpp = 0;
    if (is_rasterization_done) {
      if (normalized_depth_control.z_enable || normalized_depth_control.stencil_enable) {
-@@ -477,6 +485,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -477,6 +509,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
        edram_bases[rt_bit_index] = color_info.color_base;
        xenos::ColorRenderTargetFormat color_format =
            regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]).color_format;
@@ -1651,10 +2129,74 @@ index 953c5fd..764d739 100644
        bool is_64bpp = xenos::IsColorRenderTargetFormat64bpp(color_format);
        if (is_64bpp) {
          rts_are_64bpp |= uint32_t(1) << rt_bit_index;
-@@ -676,6 +685,17 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -625,6 +658,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+   RenderTargetKey rt_keys[1 + xenos::kMaxColorRenderTargets];
+   RenderTarget* rts[1 + xenos::kMaxColorRenderTargets];
+   uint32_t rt_lengths_tiles[1 + xenos::kMaxColorRenderTargets];
++  uint32_t rt_full_lengths_tiles[1 + xenos::kMaxColorRenderTargets];
+   uint32_t length_used_tiles_at_32bpp =
+       ((height_used << uint32_t(msaa_samples >= xenos::MsaaSamples::k2X)) +
+        (xenos::kEdramTileHeightSamples - 1)) /
+@@ -650,12 +684,25 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     // The last render target can occupy the EDRAM until the base of the first
+     // render target (itself in case of 1 render target) with EDRAM addressing
+     // wrapping.
++    uint32_t rt_next_base_distance =
++        ((i + 1 < edram_bases_sorted_count) ? edram_bases_sorted[i + 1].first
++                                            : (xenos::kEdramTileCount + edram_bases_sorted[0].first)) -
++        rt_base;
+     rt_lengths_tiles[i] = std::min(std::min(length_used_tiles_at_32bpp << rt_is_64bpp,
+                                             rt_max_distance_tiles_at_64bpp >> (rt_is_64bpp ^ 1)),
+-                                   ((i + 1 < edram_bases_sorted_count)
+-                                        ? edram_bases_sorted[i + 1].first
+-                                        : (xenos::kEdramTileCount + edram_bases_sorted[0].first)) -
+-                                       rt_base);
++                                   rt_next_base_distance);
++    // DP1 diagnostics (#23): the range the render target would cover at its
++    // full height, with the same neighbour clamps - what a draw can touch at
++    // most when the extent estimate is short.
++    uint32_t length_full_tiles_at_32bpp =
++        ((GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples)
++          << uint32_t(msaa_samples >= xenos::MsaaSamples::k2X)) +
++         (xenos::kEdramTileHeightSamples - 1)) /
++        xenos::kEdramTileHeightSamples * pitch_tiles_at_32bpp;
++    rt_full_lengths_tiles[i] =
++        std::min(std::min(length_full_tiles_at_32bpp << rt_is_64bpp,
++                          rt_max_distance_tiles_at_64bpp >> (rt_is_64bpp ^ 1)),
++                 rt_next_base_distance);
+   }
+ 
+   if (interlock_barrier_only) {
+@@ -676,6 +723,73 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
      if (interlock_barrier_needed) {
        RequestPixelShaderInterlockBarrier();
      }
++    if (REXCVAR_GET(rov_bind_log)) {
++      // DP1 diagnostics: one line per change of the bound set.
++      std::string binds;
++      for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
++        const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
++        uint32_t rt_bit_index = rt_base_index.second;
++        if (!binds.empty()) {
++          binds += " | ";
++        }
++        if (rt_bit_index == 0) {
++          fmt::format_to(std::back_inserter(binds), "depth base {} fmt {} len {}",
++                         rt_base_index.first, uint32_t(regs.Get<reg::RB_DEPTH_INFO>().depth_format),
++                         rt_lengths_tiles[i]);
++        } else {
++          fmt::format_to(std::back_inserter(binds), "color{} base {} fmt {} len {}",
++                         rt_bit_index - 1, rt_base_index.first,
++                         uint32_t(guest_color_formats[rt_bit_index]), rt_lengths_tiles[i]);
++        }
++      }
++      fmt::format_to(std::back_inserter(binds), " (pitch {} msaa {}x)", pitch_tiles_at_32bpp,
++                     uint32_t(1) << uint32_t(msaa_samples));
++      if (binds != rov_bind_log_last_) {
++        rov_bind_log_last_ = binds;
++        REXGPU_INFO("ROV bind: {}", binds);
++      }
++    }
 +    // DP1 fix: convert tiles still holding 7e3 color that are now bound as
 +    // 8888 color, and record what this draw is going to write. Done after the
 +    // barrier request (the conversion itself commits all preceding interlocked
@@ -1663,13 +2205,43 @@ index 953c5fd..764d739 100644
 +    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
 +      const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
 +      uint32_t rt_bit_index = rt_base_index.second;
-+      PixelShaderInterlockTrackTiles(rt_base_index.first, rt_lengths_tiles[i], rt_bit_index != 0,
-+                                     guest_color_formats[rt_bit_index], true);
++      xenos::ColorRenderTargetFormat rt_color_format = guest_color_formats[rt_bit_index];
++      bool rt_is_8888_color =
++          rt_bit_index != 0 && (rt_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
++                                rt_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA);
++      uint32_t track_length = rt_lengths_tiles[i];
++      if (rt_is_8888_color) {
++        // DP1 diagnostics (#23): tiles the draw may still reach beyond the
++        // estimated extent that hold 7e3 bits. If such a draw does reach them,
++        // its 8-bit output lands on raw HDR bits: green / rainbow panels.
++        uint32_t beyond_start = rt_base_index.first + rt_lengths_tiles[i];
++        uint32_t beyond_length = rt_full_lengths_tiles[i] > rt_lengths_tiles[i]
++                                     ? rt_full_lengths_tiles[i] - rt_lengths_tiles[i]
++                                     : 0;
++        uint32_t stale_7e3 = PixelShaderInterlockCount7e3Tiles(beyond_start, beyond_length);
++        if (stale_7e3) {
++          static uint32_t stale_events = 0;
++          ++stale_events;
++          rex::stats::Set("gpu/rov/8888_draws_with_7e3_beyond_extent", stale_events);
++          if (REXCVAR_GET(rov_7e3_track_log)) {
++            REXGPU_INFO(
++                "ROV 7e3 track: 8888 draw at EDRAM base {} pitch {} (est. {} of {} tiles) leaves {} "
++                "7e3-tagged tiles beyond its estimated extent [{}, +{})",
++                rt_base_index.first, pitch_tiles_at_32bpp, rt_lengths_tiles[i],
++                rt_full_lengths_tiles[i], stale_7e3, beyond_start, beyond_length);
++          }
++        }
++        if (REXCVAR_GET(rov_8888_full_extent)) {
++          track_length = rt_full_lengths_tiles[i];
++        }
++      }
++      PixelShaderInterlockTrackTiles(rt_base_index.first, track_length, rt_bit_index != 0,
++                                     rt_color_format, true);
 +    }
    }
  
    // From now on ownership transfers should succeed for simplicity and
-@@ -1144,6 +1164,50 @@ void RenderTargetCache::PixelShaderInterlockFullEdramBarrierPlaced() {
+@@ -1144,6 +1258,77 @@ void RenderTargetCache::PixelShaderInterlockFullEdramBarrierPlaced() {
    ownership_ranges_.emplace(0, empty_range);
  }
  
@@ -1704,6 +2276,17 @@ index 953c5fd..764d739 100644
 +        } else if (in_run) {
 +          in_run = false;
 +          PixelShaderInterlockReinterpret7e3To8888(run_start, tile - run_start);
++          // DP1 diagnostics (#23).
++          static uint32_t converted_runs = 0;
++          static uint32_t converted_tiles = 0;
++          ++converted_runs;
++          converted_tiles += tile - run_start;
++          rex::stats::Set("gpu/rov/7e3_to_8888_runs", converted_runs);
++          rex::stats::Set("gpu/rov/7e3_to_8888_tiles", converted_tiles);
++          if (REXCVAR_GET(rov_7e3_track_log)) {
++            REXGPU_INFO("ROV 7e3 track: converted tiles [{}, +{}) 7e3 -> 8888 for an 8888 draw",
++                        run_start, tile - run_start);
++          }
 +        }
 +      }
 +    }
@@ -1715,6 +2298,22 @@ index 953c5fd..764d739 100644
 +  if (end_tiles > xenos::kEdramTileCount) {
 +    track_segment(0, end_tiles - xenos::kEdramTileCount);
 +  }
++}
++
++uint32_t RenderTargetCache::PixelShaderInterlockCount7e3Tiles(uint32_t start_tiles,
++                                                            uint32_t length_tiles) const {
++  uint32_t count = 0;
++  length_tiles = std::min(length_tiles, xenos::kEdramTileCount);
++  for (uint32_t i = 0; i < length_tiles; ++i) {
++    count += interlock_tile_is_7e3_[(start_tiles + i) & (xenos::kEdramTileCount - 1)] ? 1 : 0;
++  }
++  return count;
++}
++
++uint32_t RenderTargetCache::PixelShaderInterlockCountNon7e3Tiles(uint32_t start_tiles,
++                                                               uint32_t length_tiles) const {
++  length_tiles = std::min(length_tiles, xenos::kEdramTileCount);
++  return length_tiles - PixelShaderInterlockCount7e3Tiles(start_tiles, length_tiles);
 +}
 +
  RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(RenderTargetKey key) {
@@ -27601,6 +28200,166 @@ index fc46d86..f9e97b2 100644
      xevent.cpp
      xfile.cpp
      xmutant.cpp
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 697399c..b7f0478 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -12,6 +12,7 @@
+ #include <chrono>
+ #include <cstring>
+ #include <filesystem>
++#include <mutex>
+ #include <string>
+ 
+ #include <fmt/format.h>
+@@ -27,6 +28,7 @@
+ #include <rex/kernel/xboxkrnl/threading.h>
+ #include <rex/system/kernel_module.h>
+ #include <rex/system/kernel_state.h>
++#include <rex/stats.h>
+ #include <rex/system/function_dispatcher.h>
+ #include <chrono>
+ #include <thread>
+@@ -74,6 +76,27 @@ KernelState::KernelState(Runtime* emulator)
+   }
+   content_manager_ = std::make_unique<xam::ContentManager>(this, user_data_root);
+ 
++  // DP1 2026-09-13: kernel object / guest thread counts in the periodic
++  // [stats] line. try_lock only: a hung guest thread may hold the global
++  // critical region, and the line must keep coming then.
++  rex::stats::RegisterProvider("kernel", [this]() {
++    std::string out;
++    uint32_t objects = 0;
++    if (object_table_.TryCountObjects(&objects)) {
++      out = fmt::format("objects {}", objects);
++    } else {
++      out = "objects busy";
++    }
++    std::unique_lock<std::recursive_mutex> lock(thread::global_critical_region::mutex(),
++                                                std::try_to_lock);
++    if (lock.owns_lock()) {
++      fmt::format_to(std::back_inserter(out), " threads {}", threads_by_id_.size());
++    } else {
++      out += " threads busy";
++    }
++    return out;
++  });
++
+   if (shared_kernel_state_ != nullptr) {
+     REXSYS_ERROR("KernelState constructed but shared_kernel_state_ already set");
+     rex::FatalError("Double initialization of KernelState");
+@@ -161,6 +184,7 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
+ }
+ 
+ KernelState::~KernelState() {
++  rex::stats::UnregisterProvider("kernel");
+   app_manager_.reset();
+ 
+   // Stop the dispatch thread before touching the object table
+diff --git a/src/system/util/object_table.cpp b/src/system/util/object_table.cpp
+index 6fbabd2..5fea3f5 100644
+--- a/src/system/util/object_table.cpp
++++ b/src/system/util/object_table.cpp
+@@ -15,6 +15,9 @@
+ #include <rex/logging.h>
+ #include <rex/stream.h>
+ #include <rex/system/util/object_table.h>
++#include <mutex>
++
++#include <rex/thread/mutex.h>
+ #include <rex/system/xobject.h>
+ #include <rex/system/xthread.h>
+ 
+@@ -229,6 +232,24 @@ std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {
+   return results;
+ }
+ 
++bool ObjectTable::TryCountObjects(uint32_t* out_count) {
++  std::unique_lock<std::recursive_mutex> lock(thread::global_critical_region::mutex(),
++                                              std::try_to_lock);
++  if (!lock.owns_lock()) {
++    return false;
++  }
++  uint32_t count = 0;
++  for (uint32_t slot = 0; slot < table_capacity_; ++slot) {
++    if (table_[slot].object != nullptr) {
++      ++count;
++    }
++  }
++  if (out_count) {
++    *out_count = count;
++  }
++  return true;
++}
++
+ void ObjectTable::PurgeAllObjects() {
+   auto lock = global_critical_region_.Acquire();
+   for (uint32_t slot = 0; slot < table_capacity_; slot++) {
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..4509601 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -28,6 +28,7 @@
+ #include <rex/system/function_dispatcher.h>
+ #include <rex/system/mmio_handler.h>
+ #include <rex/system/xmemory.h>
++#include <rex/stats.h>
+ #include <rex/thread.h>
+ 
+ // TODO(benvanik): move xbox.h out
+@@ -103,6 +104,8 @@ Memory::~Memory() {
+   assert_true(active_memory_ == this);
+   active_memory_ = nullptr;
+ 
++  rex::stats::UnregisterProvider("heaps");
++
+   // Uninstall the MMIO handler, as we won't be able to service more requests.
+   mmio_handler_.reset();
+ 
+@@ -233,6 +236,12 @@ bool Memory::Initialize() {
+   }
+   REXSYS_DEBUG("Installed MMIO handler for physical address translation");
+ 
++  // DP1 2026-09-13: guest heap usage in the periodic [stats] line. Reads the
++  // page counters without the heap mutex on purpose: the stats thread must
++  // keep reporting while a guest thread is stuck inside an allocation, and a
++  // stale 32-bit counter is harmless for a diagnostic.
++  rex::stats::RegisterProvider("heaps", [this]() { return DescribeHeapUsage(); });
++
+   // ?
+   uint32_t unk_phys_alloc;
+   heaps_.vA0000000.Alloc(0x340000, 64 * 1024, memory::kMemoryAllocationReserve,
+@@ -784,6 +793,30 @@ bool Memory::Restore(stream::ByteStream* stream) {
+ // Recompiled Code Function Table
+ //=============================================================================
+ 
++std::string Memory::DescribeHeapUsage() const {
++  struct Entry {
++    const char* label;
++    const BaseHeap* heap;
++  };
++  const Entry entries[] = {
++      {"v00", &heaps_.v00000000}, {"v40", &heaps_.v40000000}, {"v80", &heaps_.v80000000},
++      {"v90", &heaps_.v90000000}, {"vA0", &heaps_.vA0000000}, {"vC0", &heaps_.vC0000000},
++      {"vE0", &heaps_.vE0000000}, {"phys", &heaps_.physical},
++  };
++  std::string out;
++  for (const Entry& entry : entries) {
++    const uint64_t page_size = entry.heap->page_size();
++    const uint64_t total = uint64_t(entry.heap->total_page_count()) * page_size;
++    const uint64_t reserved = uint64_t(entry.heap->reserved_page_count()) * page_size;
++    if (!out.empty()) {
++      out += ' ';
++    }
++    fmt::format_to(std::back_inserter(out), "{} {}/{}", entry.label, reserved >> 20, total >> 20);
++  }
++  out += " MB";
++  return out;
++}
++
+ bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
+                                      uint32_t image_size) {
+   constexpr uint32_t kThunkReserveSize = runtime::FunctionDispatcher::kThunkReserveSize;
 diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
 index 77bce25..07ce344 100644
 --- a/src/system/xthread.cpp
@@ -27739,10 +28498,10 @@ index 306118e..c9b8bd2 100644
              D3D12_RESOURCE_BARRIER barrier_uav_to_rtv;
              barrier_uav_to_rtv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
-index bf8252b..a9a8370 100644
+index bf8252b..aaa73cb 100644
 --- a/src/ui/d3d12/d3d12_provider.cpp
 +++ b/src/ui/d3d12/d3d12_provider.cpp
-@@ -11,8 +11,13 @@
+@@ -11,8 +11,16 @@
  
  #include <cstdlib>
  
@@ -27750,13 +28509,16 @@ index bf8252b..a9a8370 100644
 +#include <string_view>
 +#include <unordered_map>
 +#include <vector>
++#include <fmt/format.h>
++
  #include <rex/cvar.h>
  #include <rex/logging.h>
 +#include <rex/crash_handler.h>
++#include <rex/stats.h>
  #include <rex/math.h>
  #include <rex/ui/d3d12/d3d12_immediate_drawer.h>
  #include <rex/ui/d3d12/d3d12_presenter.h>
-@@ -22,6 +27,10 @@
+@@ -22,6 +30,10 @@
  
  REXCVAR_DEFINE_BOOL(d3d12_debug, false, "UI/D3D12", "Enable Direct3D 12 and DXGI debug layer")
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -27767,7 +28529,18 @@ index bf8252b..a9a8370 100644
  
  REXCVAR_DEFINE_BOOL(d3d12_break_on_error, false, "UI/D3D12",
                      "Break on Direct3D 12 validation errors");
-@@ -228,18 +237,18 @@ bool D3D12Provider::Initialize() {
+@@ -65,6 +77,10 @@ std::unique_ptr<D3D12Provider> D3D12Provider::Create() {
+ }
+ 
+ D3D12Provider::~D3D12Provider() {
++  rex::stats::UnregisterProvider("vram");
++  if (dxgi_adapter3_ != nullptr) {
++    dxgi_adapter3_->Release();
++  }
+   if (graphics_analysis_ != nullptr) {
+     graphics_analysis_->Release();
+   }
+@@ -228,18 +244,18 @@ bool D3D12Provider::Initialize() {
        debug = false;
      }
  
@@ -27798,7 +28571,7 @@ index bf8252b..a9a8370 100644
      }
    }
    // Create the DXGI factory.
-@@ -351,7 +360,19 @@ bool D3D12Provider::Initialize() {
+@@ -351,7 +367,19 @@ bool D3D12Provider::Initialize() {
      if (REXCVAR_GET(d3d12_break_on_warning)) {
        d3d12_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
      }
@@ -27819,7 +28592,41 @@ index bf8252b..a9a8370 100644
    }
  
    // Create the command queue for graphics.
-@@ -476,4 +497,95 @@ std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
+@@ -397,6 +425,33 @@ bool D3D12Provider::Initialize() {
+   device_ = device;
+   direct_queue_ = direct_queue;
+ 
++  // DP1 2026-09-13: VRAM budget / usage for the periodic [stats] line.
++  // QueryVideoMemoryInfo is thread-safe, so the stats thread calls it directly.
++  {
++    Microsoft::WRL::ComPtr<IDXGIFactory4> dxgi_factory4;
++    IDXGIAdapter3* adapter3 = nullptr;
++    if (SUCCEEDED(dxgi_factory->QueryInterface(IID_PPV_ARGS(&dxgi_factory4))) &&
++        SUCCEEDED(dxgi_factory4->EnumAdapterByLuid(device->GetAdapterLuid(),
++                                                   IID_PPV_ARGS(&adapter3)))) {
++      dxgi_adapter3_ = adapter3;
++      rex::stats::RegisterProvider("vram", [adapter3]() {
++        DXGI_QUERY_VIDEO_MEMORY_INFO local = {};
++        DXGI_QUERY_VIDEO_MEMORY_INFO non_local = {};
++        std::string out;
++        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(
++                0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
++          out = fmt::format("local {}/{} MB", local.CurrentUsage >> 20, local.Budget >> 20);
++        }
++        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(
++                0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &non_local))) {
++          fmt::format_to(std::back_inserter(out), "{}shared {}/{} MB", out.empty() ? "" : " ",
++                         non_local.CurrentUsage >> 20, non_local.Budget >> 20);
++        }
++        return out;
++      });
++    }
++  }
++
+   // Get descriptor sizes for each type.
+   for (uint32_t i = 0; i < D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES; ++i) {
+     descriptor_sizes_[i] = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE(i));
+@@ -476,4 +531,95 @@ std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
    return D3D12ImmediateDrawer::Create(*this);
  }
  
@@ -27976,7 +28783,7 @@ index 43d6c06..35646a5 100644
    ImGui::End();
    ImGui::PopStyleColor();
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..7de16cc 100644
+index b94fe9e..9ceaf1c 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -14,6 +14,7 @@
@@ -27996,16 +28803,25 @@ index b94fe9e..7de16cc 100644
  #include <rex/audio/audio_system.h>
  #include <rex/audio/sdl/sdl_audio_system.h>
  #include <rex/input/input_system.h>
-@@ -173,6 +176,8 @@ bool ReXApp::SetupEnvironment() {
+@@ -34,6 +37,7 @@
+ #include <rex/system/achievement_manager.h>
+ #include <rex/system/gpu_plugin.h>
+ #include <rex/system/kernel_state.h>
++#include <rex/stats.h>
+ #include <rex/system/xthread.h>
+ #include <rex/ui/graphics_provider.h>
+ #include <rex/ui/keybinds.h>
+@@ -173,6 +177,9 @@ bool ReXApp::SetupEnvironment() {
  
    rex::InitLogging(log_config);
    rex::RegisterLogLevelCallback();
 +  rex::crash::Install((exe_dir / "logs").string(), std::string(GetName()));
 +  rex::system::RegisterGuestCrashInfo();
++  rex::stats::StartPeriodicLogging();
  
    log_sink_ = std::make_shared<rex::LogCaptureSink>();
    rex::AddSink(log_sink_);
-@@ -394,6 +399,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+@@ -394,6 +401,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
    // gated eager font upload in SetImmediateDrawer is skipped (font uploads
    // lazily on the first Draw instead).
    imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
@@ -28017,7 +28833,7 @@ index b94fe9e..7de16cc 100644
    rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
      if (debug_overlay_) {
        debug_overlay_.reset();
-@@ -457,25 +467,60 @@ void ReXApp::LaunchModule() {
+@@ -457,25 +469,60 @@ void ReXApp::LaunchModule() {
      }
  
      auto* graphics_system = runtime_->graphics_system();
@@ -28123,3 +28939,23 @@ index 2251429..cee7285 100644
        OnFocusUpdate(false, destruction_receiver);
        break;
      case SDL_EVENT_WINDOW_EXPOSED:
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index 7bda2ad..b2c3d47 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -11,6 +11,7 @@ add_executable(unit_tests
+     core/hash_test.cpp
+     core/stream_test.cpp
+     core/chrono_test.cpp
++    core/stats_test.cpp
+     ppc/import_function_test.cpp
+     ppc/stack_test.cpp
+     system/guest_path_test.cpp
+@@ -36,6 +37,7 @@ target_include_directories(unit_tests PRIVATE
+ target_link_libraries(unit_tests PRIVATE
+     rexcodegen
+     rexruntime
++    xxHash::xxhash
+     Catch2::Catch2WithMain
+ )
+ 

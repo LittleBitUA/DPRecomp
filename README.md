@@ -76,7 +76,7 @@ Full notes: [docs/RELEASE-NOTES-1.3.0.md](docs/RELEASE-NOTES-1.3.0.md). Earlier 
 
 Most of 1.3 is verified on one machine and a handful of saves. A 30-hour game with hundreds of scenes needs more eyes than that, and every report so far has led to a real fix. What helps most:
 
-- **Play at 60 FPS and tell us about anything that runs at the wrong speed, doubles a sound, or swaps a prop** (the coffee cup, the cigarette jar lid). Set `dp_anim_event_log = true` in `deadlyprem.toml` for that session and attach `logs\deadlyprem_XXX.log`. A second run with `dp_anim_event_dedupe = true` is even better.
+- **Play at 60 FPS and tell us about anything that runs at the wrong speed, doubles a sound, or swaps a prop** (the coffee cup, the cigarette jar lid). Attach `logs\deadlyprem_XXX.log`; since 1.3.2 it carries thread names, frame numbers and a periodic `[stats]` line, which is what we need.
 - **Cutscene sync:** the scene where York meets Emily and George is the reference. In sync or not, with 60 FPS on?
 - **The sky, tree edges, glass, fog:** any scene where the ROV path still shows hard contours or blue polygonal patches on characters. Screenshot plus the scene name.
 - **FSR 3:** frame-to-frame flicker or brightness flashes with `fsr3`, and whether `fsr` in the launcher makes it go away.

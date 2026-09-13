@@ -460,6 +460,14 @@ uint XeResolveEdramPixelStrideInts(XeResolveInfo resolve_info) {
                  kXenosColorRenderTargetFormat_2_10_10_10_FLOAT_AS_16_16_16_16;
     }
 
+    // DP1 diagnostics (2026-09-13): true when the shadow dword is used.
+    bool XeDp1ShadowValid(uint packed, uint shadow) {
+      uint tag = (packed ^ (packed >> 16u)) & 0xFFFFu;
+      uint alpha16 = shadow & 0xFFFFu;
+      return (shadow >> 16u) == tag &&
+             ((alpha16 * 3u + 32767u) / 65535u) == (packed >> 30u);
+    }
+
     float XeDp1ShadowAlpha(uint packed, uint shadow, float fallback) {
       uint tag = (packed ^ (packed >> 16u)) & 0xFFFFu;
       uint alpha16 = shadow & 0xFFFFu;
@@ -514,6 +522,14 @@ uint XeResolveEdramPixelStrideInts(XeResolveInfo resolve_info) {
           }
           pixel_0.a = XeDp1ShadowAlpha(packed.x, shadow.x, pixel_0.a);
           pixel_1.a = XeDp1ShadowAlpha(packed.y, shadow.y, pixel_1.a);
+#ifdef XE_DP1_SHADOW_DEBUG
+          // DP1 diagnostics: magenta wherever the 2-bit alpha fallback is
+          // taken, so a screenshot shows which pixels lost the shadow alpha.
+          pixel_0.rgb = XeDp1ShadowValid(packed.x, shadow.x) ? pixel_0.rgb
+                                                             : float3(1.0f, 0.0f, 1.0f);
+          pixel_1.rgb = XeDp1ShadowValid(packed.y, shadow.y) ? pixel_1.rgb
+                                                             : float3(1.0f, 0.0f, 1.0f);
+#endif
         }
       }
     }
@@ -583,6 +599,16 @@ uint XeResolveEdramPixelStrideInts(XeResolveInfo resolve_info) {
           pixel_1.a = XeDp1ShadowAlpha(packed.y, shadow.y, pixel_1.a);
           pixel_2.a = XeDp1ShadowAlpha(packed.z, shadow.z, pixel_2.a);
           pixel_3.a = XeDp1ShadowAlpha(packed.w, shadow.w, pixel_3.a);
+#ifdef XE_DP1_SHADOW_DEBUG
+          pixel_0.rgb = XeDp1ShadowValid(packed.x, shadow.x) ? pixel_0.rgb
+                                                             : float3(1.0f, 0.0f, 1.0f);
+          pixel_1.rgb = XeDp1ShadowValid(packed.y, shadow.y) ? pixel_1.rgb
+                                                             : float3(1.0f, 0.0f, 1.0f);
+          pixel_2.rgb = XeDp1ShadowValid(packed.z, shadow.z) ? pixel_2.rgb
+                                                             : float3(1.0f, 0.0f, 1.0f);
+          pixel_3.rgb = XeDp1ShadowValid(packed.w, shadow.w) ? pixel_3.rgb
+                                                             : float3(1.0f, 0.0f, 1.0f);
+#endif
         }
       }
     }
