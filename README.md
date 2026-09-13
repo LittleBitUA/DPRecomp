@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.3.4 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.3.5 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.3.4.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.3.5.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.3.5 (hotfix):** the GPU device removal while tailing Nick (#22) turned out to be a texture upload copying a 64×64 mip into a 32×32 level, which Direct3D 12 answers by removing the device. The copy is now clamped to the level and the texture is named in the log; the game survives the frame. [Notes](docs/RELEASE-NOTES-1.3.5.md).
 
 **1.3.4 (diagnostics, please test):** a `[stats]` line in the log every minute (memory, VRAM, guest heaps, kernel objects, GPU caches) written from its own thread so it survives a hang (#21) and shows the VRAM picture before a device loss (#22); the PhysX error stream and the game's own asserts (with addresses) in the log; the green / rainbow frame on the ROV path (#23) is detected and logged, with two switches to try. The experimental animation-event switches from 1.3.0 are gone. [Notes](docs/RELEASE-NOTES-1.3.4.md).
 

@@ -1,6 +1,10 @@
 # Changelog
 
-Release notes for each version: [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.3.5 (September 2026)
+
+Hotfix for the GPU device removal while tailing Nick to the art gallery (#22). The 1.3.3 debug-layer drain named it: a `CopyTextureRegion` in the texture loader wrote a 64×64 mip into a 32×32 level of an R8G8B8A8 texture, the command list failed to close and Direct3D 12 removed the device (`INVALID_CALL`). Both texture copy paths now check the source extent against the destination level, clamp the copy and log the texture (size, format, mips, packed level, box) once, with a `gpu/texture_cache/copies_clamped` gauge in `[stats]`. The frame renders with a partial mip instead of killing the device; the logged texture is the input for the real layout fix. GPU plugin DLL only.
 
 ## 1.3.4 (September 2026)
 
