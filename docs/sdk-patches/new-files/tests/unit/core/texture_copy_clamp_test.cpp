@@ -212,3 +212,31 @@ TEST_CASE("texture_copy_clamp: report keys do not collide across levels", "[text
   std::sort(keys.begin(), keys.end());
   CHECK(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
 }
+
+TEST_CASE("texture_copy_clamp: host resource extent applies the draw resolution scale",
+          "[texture_copy_clamp]") {
+  // #22 log 5: guest 32x32 k_8_8_8_8, scaled_resolve, 2x scale. The loader
+  // uploads 64x64, so the resource (CreateTexture and the 3D-as-2D wrapper
+  // alike) must be 64x64; the wrapper used to be 32x32.
+  Extent2 scaled = HostResourceExtent(32, 32, true, 2, 2);
+  CHECK(scaled.width == 64);
+  CHECK(scaled.height == 64);
+  // The upload of that size fits the scaled resource and not the unscaled one.
+  Box upload = FullBox(64, 64);
+  CHECK_FALSE(ClampBoxToLevel(upload, LevelExtent(scaled.width, scaled.height, 1, 0, false, 1, 1)));
+  Box upload_unscaled = FullBox(64, 64);
+  CHECK(ClampBoxToLevel(upload_unscaled, LevelExtent(32, 32, 1, 0, false, 1, 1)));
+  // Not scaled: guest size as is, whatever the draw scale.
+  Extent2 plain = HostResourceExtent(32, 32, false, 3, 3);
+  CHECK(plain.width == 32);
+  CHECK(plain.height == 32);
+  // Identity: scaled_resolve at scale 1 is the guest size (scaled_resolve can
+  // only be set when the scale is above 1, but the rule must hold anyway).
+  Extent2 one = HostResourceExtent(32, 32, true, 1, 1);
+  CHECK(one.width == 32);
+  CHECK(one.height == 32);
+  // Non-uniform scale.
+  Extent2 wide = HostResourceExtent(640, 480, true, 3, 2);
+  CHECK(wide.width == 1920);
+  CHECK(wide.height == 960);
+}

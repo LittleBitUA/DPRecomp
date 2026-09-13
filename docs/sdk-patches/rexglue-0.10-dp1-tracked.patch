@@ -1848,7 +1848,7 @@ index dd321a5..ef60a98 100644
              color_packed_in_r1x = true;
              // Float16 has a wider range for both color and alpha, also NaNs -
 diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
-index 2be0e8e..5c8ab61 100644
+index 2be0e8e..7d6755d 100644
 --- a/src/graphics/d3d12/texture_cache.cpp
 +++ b/src/graphics/d3d12/texture_cache.cpp
 @@ -10,11 +10,14 @@
@@ -1921,7 +1921,21 @@ index 2be0e8e..5c8ab61 100644
    if (key.dimension == xenos::DataDimension::k3D) {
      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
    } else {
-@@ -1538,6 +1574,12 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+@@ -1530,14 +1566,21 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+   }
+   desc.Alignment = 0;
+-  desc.Width = key.GetWidth();
+-  desc.Height = key.GetHeight();
+-  if (key.scaled_resolve) {
+-    desc.Width *= draw_resolution_scale_x();
+-    desc.Height *= draw_resolution_scale_y();
++  {
++    const rex::gpu::texture_copy::Extent2 host_extent = rex::gpu::texture_copy::HostResourceExtent(
++        key.GetWidth(), key.GetHeight(), key.scaled_resolve != 0, draw_resolution_scale_x(),
++        draw_resolution_scale_y());
++    desc.Width = host_extent.width;
++    desc.Height = host_extent.height;
    }
    desc.DepthOrArraySize = key.GetDepthOrArraySize();
    desc.MipLevels = key.mip_max_level + 1;
@@ -1934,7 +1948,7 @@ index 2be0e8e..5c8ab61 100644
    desc.SampleDesc.Count = 1;
    desc.SampleDesc.Quality = 0;
    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-@@ -1554,13 +1596,174 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+@@ -1554,13 +1597,174 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
                                               resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
      return nullptr;
    }
@@ -2110,7 +2124,7 @@ index 2be0e8e..5c8ab61 100644
  
    DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
    ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
-@@ -1924,7 +2127,31 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1924,7 +2128,31 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
        source_box_ptr = nullptr;
      }
      for (uint32_t slice = 0; slice < array_size; ++slice) {
@@ -2143,7 +2157,41 @@ index 2be0e8e..5c8ab61 100644
        location_dest.SubresourceIndex += texture_level_count;
        location_source.PlacedFootprint.Offset += host_slice_size;
      }
-@@ -2075,6 +2302,10 @@ uint32_t D3D12TextureCache::FindOrCreateTextureDescriptor(D3D12Texture& texture,
+@@ -1982,6 +2210,13 @@ ID3D12Resource* D3D12TextureCache::D3D12Texture::GetOrCreate3DAs2DResource(
+   auto& d3d12_cache = static_cast<D3D12TextureCache&>(texture_cache());
+ 
+   if (texture_3d_as_2d_) {
++    // DP1 2026-09-14 (DPRecomp #22 follow-up): the wrapper has its own
++    // memory watch, but nothing reloaded it once it existed - a scaled-resolve
++    // texture rewritten every frame showed its first frame forever through 2D
++    // sampling. LoadTextureData is a no-op unless the range was rewritten.
++    if (texture_3d_as_2d_->outdated_mask() && !d3d12_cache.LoadTextureData(*texture_3d_as_2d_)) {
++      REXGPU_ERROR("D3D12TextureCache: Failed to reload 3D-as-2D wrapper data");
++    }
+     d3d12_cache.command_processor_.PushTransitionBarrier(
+         texture_3d_as_2d_->resource(), texture_3d_as_2d_->SetResourceState(end_state), end_state);
+     return texture_3d_as_2d_->resource();
+@@ -1993,8 +2228,17 @@ ID3D12Resource* D3D12TextureCache::D3D12Texture::GetOrCreate3DAs2DResource(
+   D3D12_RESOURCE_DESC desc = {};
+   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+   desc.Alignment = 0;
+-  desc.Width = key().GetWidth();
+-  desc.Height = key().GetHeight();
++  // DP1 2026-09-14 (DPRecomp #22, log 5): the wrapper keeps the key's
++  // scaled_resolve, so the loader uploads the scaled layout - the resource
++  // must be scaled the same way CreateTexture scales it (was the guest size:
++  // a 64x64 upload into a 32x32 level, device removed).
++  {
++    const rex::gpu::texture_copy::Extent2 host_extent = rex::gpu::texture_copy::HostResourceExtent(
++        key().GetWidth(), key().GetHeight(), key().scaled_resolve != 0,
++        d3d12_cache.draw_resolution_scale_x(), d3d12_cache.draw_resolution_scale_y());
++    desc.Width = host_extent.width;
++    desc.Height = host_extent.height;
++  }
+   desc.DepthOrArraySize = 1;
+   desc.MipLevels = 1;
+   desc.Format = d3d12_cache.GetDXGIResourceFormat(key());
+@@ -2075,6 +2319,10 @@ uint32_t D3D12TextureCache::FindOrCreateTextureDescriptor(D3D12Texture& texture,
    }
  
    uint32_t mip_levels = texture_key.mip_max_level + 1;
@@ -27374,6 +27422,38 @@ index 14068cf..6b37354 100644
 +      0,   0,   0,   0,   1,   0, 
 +      0,   0
 +};
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index ecbd940..47d9c1c 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -22,6 +22,7 @@
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/flags.h>
++#include <rex/graphics/host_texture_extent.h>
+ #include <rex/graphics/pipeline/texture/info.h>
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/vulkan/command_processor.h>
+@@ -1974,8 +1975,17 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
+     image_create_info.flags = 0;
+     image_create_info.imageType = VK_IMAGE_TYPE_2D;
+     image_create_info.format = wrapper_format;
+-    image_create_info.extent.width = key().GetWidth();
+-    image_create_info.extent.height = key().GetHeight();
++    // DP1 2026-09-14 (DPRecomp #22): the loader uploads the scaled layout for
++    // scaled_resolve keys - the image must be scaled like CreateTexture's.
++    {
++      const rex::gpu::texture_copy::Extent2 host_extent =
++          rex::gpu::texture_copy::HostResourceExtent(
++              key().GetWidth(), key().GetHeight(), key().scaled_resolve != 0,
++              vulkan_texture_cache.draw_resolution_scale_x(),
++              vulkan_texture_cache.draw_resolution_scale_y());
++      image_create_info.extent.width = host_extent.width;
++      image_create_info.extent.height = host_extent.height;
++    }
+     image_create_info.extent.depth = 1;
+     image_create_info.mipLevels = 1;
+     image_create_info.arrayLayers = 1;
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
 index 3f9422d..8f4fb53 100644
 --- a/src/input/mnk/mnk_input_driver.cpp

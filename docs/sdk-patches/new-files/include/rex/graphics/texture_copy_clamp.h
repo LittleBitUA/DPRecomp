@@ -13,6 +13,8 @@
 
 #include <dxgiformat.h>
 
+#include <rex/graphics/host_texture_extent.h>
+
 namespace rex::gpu::texture_copy {
 
 struct Box {

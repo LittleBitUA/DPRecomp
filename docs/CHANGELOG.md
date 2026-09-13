@@ -1,6 +1,12 @@
 # Changelog
 
-Release notes for each version: [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.3.7 (September 2026)
+
+Root-cause fix for the GPU device removal while tailing Nick to the art gallery (#22). The 1.3.6 guard log named the texture: a 32×32 `k_8_8_8_8` texture with `scaled_resolve` set, uploaded as a 64×64 layout (render resolution scale 2×) into a 32×32 resource. That resource is the 3D-as-2D wrapper (`gpu_3d_to_2d_texture`, upstream code that samples problematic 3D textures through a 2D resource): it was created from the guest size, while `CreateTexture` scales the size for scaled-resolve textures and the loader uploads the scaled layout. Both creation paths now go through `HostResourceExtent()` in `rex/graphics/texture_copy_clamp.h`, covered by a unit test; the 1.3.5/1.3.6 copy guard stays as the safety net and keeps logging if any other mismatch shows up.
+
+Two follow-ups from the review of that fix: the D3D12 wrapper is now reloaded when its guest memory is rewritten (it was loaded once and kept its first contents, so a scaled-resolve texture sampled through it showed its first frame forever), and the Vulkan wrapper image gets the same scaled size (same bug there; the Vulkan backend is not what we ship, but the code is in the DLL). `HostResourceExtent()` lives in `rex/graphics/host_texture_extent.h`. GPU plugin DLL only.
 
 ## 1.3.6 (September 2026)
 
