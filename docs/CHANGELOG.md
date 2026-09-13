@@ -1,6 +1,10 @@
 # Changelog
 
-Release notes for each version: [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.3.6 (September 2026)
+
+Hotfix for the 1.3.5 hotfix. The `CopyTextureRegion` guard added in 1.3.5 compared the source box with the raw texel size of the destination mip level. For block-compressed (DXT1/3/5) textures the last levels are 2×2 and 1×1 texels but are addressed as one whole 4×4 block, so copying a 4×4 block into them is legal; the guard clamped those copies to 2×2 and 1×1, which is not block-aligned, and Direct3D 12 removed the device with `INVALID_CALL` (#22 log 4, reproduced on the title screen about 60 seconds in, when the attract demo loads its textures). The guard math now lives in `rex/graphics/texture_copy_clamp.h`: the destination level extent is rounded up to whole blocks of the resource format (BC1-7 4×4, packed 4:2:2 2×1), a box that fits is never touched, and a clamped box stays block-aligned. Covered by `tests/unit/core/texture_copy_clamp_test.cpp` (the log-4 copies, the original 64×64-into-32×32 case, alignment of clamped boxes). The log line now also prints the block size and the clamped extent. GPU plugin DLL only.
 
 ## 1.3.5 (September 2026)
 
