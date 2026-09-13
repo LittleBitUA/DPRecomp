@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.3.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.3.4 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.3.3.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.3.4.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.3.4 (diagnostics, please test):** a `[stats]` line in the log every minute (memory, VRAM, guest heaps, kernel objects, GPU caches) written from its own thread so it survives a hang (#21) and shows the VRAM picture before a device loss (#22); the PhysX error stream and the game's own asserts (with addresses) in the log; the green / rainbow frame on the ROV path (#23) is detected and logged, with two switches to try. The experimental animation-event switches from 1.3.0 are gone. [Notes](docs/RELEASE-NOTES-1.3.4.md).
 
 **1.3.3:** the launcher's Update button works on the Steam Deck (no more PowerShell, #20), mouse aiming works in the clock-tower boss fight (#24), and a GPU device removal now leaves the debug layer's last message in the log (#22). [Notes](docs/RELEASE-NOTES-1.3.3.md).
 

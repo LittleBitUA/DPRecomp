@@ -1,8 +1,8 @@
 # Changelog
 
-Release notes for each version: [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
 
-## Unreleased
+## 1.3.4 (September 2026)
 
 - **Periodic `[stats]` line in the log** (`log_stats_interval`, default 60 s, 0 = off): guest heap usage, kernel object and thread counts, GPU texture / pipeline cache sizes, shared-memory and scaled-resolve buffer use, XMA contexts, audio clients, VRAM budget and usage, process working set, private bytes, handle count and free system memory. Written from its own thread, so it keeps coming while the game is hung (#21) and the last line before a GPU device removal shows the VRAM picture (#22).
 - **The game's own error channels reach the log.** PhysX 2.6 error stream (`dp_physx_log`, on): every invalid parameter, skipped call, out-of-memory and assert the physics SDK reports, with file and line, the first 5 of each text then every 100th with a count, and a `game/physx_reports` gauge in `[stats]`. Sound-effect cues (`dp_audio_cue_log`, off): cue id and arguments per trigger, with the frame number.
