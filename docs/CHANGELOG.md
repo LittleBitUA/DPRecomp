@@ -1,6 +1,12 @@
 # Changelog
 
-Release notes for each version: [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.3.3 (September 2026)
+
+- **Steam Deck (#20):** the launcher applies updates itself (a helper copy of the launcher with a built-in zip reader, miniz) instead of a PowerShell script, so the Update button works under Proton.
+- **Mouse aiming in the clock-tower boss fight (#24):** holding the aim key hands the mouse to the aim whatever camera runs; the fight's locked camera was not one of the hooked gameplay cameras.
+- **GPU device removal (#22):** the Direct3D 12 and DXGI debug queues are drained at the moment of the removal, so the fatal validation message reaches the log.
 
 ## 1.3.2 (September 2026)
 

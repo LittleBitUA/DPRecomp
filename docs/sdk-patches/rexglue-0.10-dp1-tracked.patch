@@ -375,7 +375,7 @@ index a72911e..3e9b439 100644
    X_STATUS Create();
    X_STATUS Exit(int exit_code);
 diff --git a/include/rex/ui/d3d12/d3d12_provider.h b/include/rex/ui/d3d12/d3d12_provider.h
-index 35035a4..0a93ce8 100644
+index 35035a4..571c9e1 100644
 --- a/include/rex/ui/d3d12/d3d12_provider.h
 +++ b/include/rex/ui/d3d12/d3d12_provider.h
 @@ -35,6 +35,9 @@ class D3D12Provider : public GraphicsProvider {
@@ -388,11 +388,12 @@ index 35035a4..0a93ce8 100644
    ID3D12CommandQueue* GetDirectQueue() const { return direct_queue_; }
  
    uint32_t GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const {
-@@ -138,6 +141,7 @@ class D3D12Provider : public GraphicsProvider {
+@@ -138,6 +141,8 @@ class D3D12Provider : public GraphicsProvider {
  
    HMODULE library_d3d12_ = nullptr;
    PFN_D3D12_GET_DEBUG_INTERFACE pfn_d3d12_get_debug_interface_;
 +  ID3D12InfoQueue* debug_info_queue_ = nullptr;
++  IDXGIInfoQueue* dxgi_debug_info_queue_ = nullptr;
    PFN_D3D12_CREATE_DEVICE pfn_d3d12_create_device_;
    PFN_D3D12_SERIALIZE_ROOT_SIGNATURE pfn_d3d12_serialize_root_signature_;
  
@@ -773,7 +774,7 @@ index a744375..bdd819f 100644
  
    ++counter_;
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..7b24b74 100644
+index 19874a5..a9a7147 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -10,6 +10,8 @@
@@ -820,6 +821,17 @@ index 19874a5..7b24b74 100644
    }
  
    // Update the textures - this may bind pipelines.
+@@ -3215,6 +3236,10 @@ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HR
+   }
+   REXGPU_ERROR("D3D12 device removed: HRESULT 0x{:08X} - {}", static_cast<unsigned>(reason),
+                reason_str);
++  // DP1 (#22): the validation message that caused an INVALID_CALL removal is
++  // produced on the same frame the removal is detected, i.e. after the
++  // per-frame drain - flush both debug queues now, before the game exits.
++  GetD3D12Provider().LogDebugLayerMessages();
+ 
+   Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+   if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {
 diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
 index 8e6b854..6061ea5 100644
 --- a/src/graphics/d3d12/pipeline_cache.cpp
@@ -26644,7 +26656,7 @@ index 14068cf..6b37354 100644
 +      0,   0
 +};
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
-index 3f9422d..6716044 100644
+index 3f9422d..8f4fb53 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
 +++ b/src/input/mnk/mnk_input_driver.cpp
 @@ -1,3 +1,4 @@
@@ -27089,7 +27101,7 @@ index 3f9422d..6716044 100644
  
    int32_t rx = 0;
    int32_t ry = 0;
-@@ -330,12 +619,62 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -330,12 +619,66 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
      ry += INT16_MAX;
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
      ry -= INT16_MAX;
@@ -27126,7 +27138,11 @@ index 3f9422d..6716044 100644
 +    TakeMouseCameraDelta(drop_dx, drop_dy);  // keep the stamp fresh-free: no snap when the camera resumes
 +    mouse_camera_hook_frame_ns.store(0, std::memory_order_relaxed);
 +  }
-+  const bool aim_stick = hook_live && (rt != 0 || IsMouseAimStickActive());
++  // DP1 1.3.3 (#24): the right trigger held means "aim" whatever camera runs -
++  // the clock-tower boss fight uses a locked camera none of the hooked
++  // gameplay routines drive, so hook_live is false there and the mouse fell
++  // back to the (ignored) right stick. Aim-camera frames still count as before.
++  const bool aim_stick = (rt != 0) || (hook_live && IsMouseAimStickActive());
 +  if (aim_stick) {
 +    float drop_dx = 0.0f, drop_dy = 0.0f;
 +    TakeMouseCameraDelta(drop_dx, drop_dy);  // never replay aim motion as a camera snap later
@@ -27157,7 +27173,7 @@ index 3f9422d..6716044 100644
    }
    // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
    // mouse is off, and toggling it on would otherwise dump the whole backlog
-@@ -476,15 +815,23 @@ void MnkInputDriver::RecenterCursorFromUIThread(int32_t x, int32_t y) {
+@@ -476,15 +819,23 @@ void MnkInputDriver::RecenterCursorFromUIThread(int32_t x, int32_t y) {
  
  void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
    if (vk < 256) {
@@ -27182,7 +27198,7 @@ index 3f9422d..6716044 100644
    SetKeyState(vk, true);
  }
  
-@@ -549,6 +896,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -549,6 +900,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
        mouse_dx_ += float(x - prev_mouse_x_);
        mouse_dy_ += float(y - prev_mouse_y_);
      }
@@ -27198,7 +27214,7 @@ index 3f9422d..6716044 100644
    }
    prev_mouse_x_ = x;
    prev_mouse_y_ = y;
-@@ -558,6 +914,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -558,6 +918,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
    }
  }
  
@@ -27216,7 +27232,7 @@ index 3f9422d..6716044 100644
  void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
    has_focus_ = false;
    // Withdraw the request too, or an update queued before the focus loss grabs
-@@ -568,6 +935,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+@@ -568,6 +939,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
      std::memset(key_down_, 0, sizeof(key_down_));
      mouse_dx_ = 0.0f;
      mouse_dy_ = 0.0f;
@@ -27723,7 +27739,7 @@ index 306118e..c9b8bd2 100644
              D3D12_RESOURCE_BARRIER barrier_uav_to_rtv;
              barrier_uav_to_rtv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
-index bf8252b..ae06c3e 100644
+index bf8252b..a9a8370 100644
 --- a/src/ui/d3d12/d3d12_provider.cpp
 +++ b/src/ui/d3d12/d3d12_provider.cpp
 @@ -11,8 +11,13 @@
@@ -27782,7 +27798,7 @@ index bf8252b..ae06c3e 100644
      }
    }
    // Create the DXGI factory.
-@@ -351,7 +360,14 @@ bool D3D12Provider::Initialize() {
+@@ -351,7 +360,19 @@ bool D3D12Provider::Initialize() {
      if (REXCVAR_GET(d3d12_break_on_warning)) {
        d3d12_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
      }
@@ -27792,19 +27808,66 @@ index bf8252b..ae06c3e 100644
 +      // the log once per frame, so players can enable d3d12_debug and attach
 +      // the log without a debugger attached.
 +      debug_info_queue_ = d3d12_info_queue;
++      // The DXGI side (swap chain, present) has its own queue.
++      if (pfn_dxgi_get_debug_interface1_ &&
++          FAILED(pfn_dxgi_get_debug_interface1_(0, IID_PPV_ARGS(&dxgi_debug_info_queue_)))) {
++        dxgi_debug_info_queue_ = nullptr;
++      }
 +    } else {
 +      d3d12_info_queue->Release();
 +    }
    }
  
    // Create the command queue for graphics.
-@@ -476,4 +492,57 @@ std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
+@@ -476,4 +497,95 @@ std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
    return D3D12ImmediateDrawer::Create(*this);
  }
  
 +void D3D12Provider::LogDebugLayerMessages() const {
 +  // Once per frame: make sure nothing replaced the crash handler's filter.
 +  rex::crash::Reassert();
++  static std::mutex mutex;
++  static std::unordered_map<int, uint32_t> seen;
++  std::lock_guard<std::mutex> lock(mutex);
++  std::vector<uint8_t> buffer;
++
++  // DXGI queue first: a swap-chain / present rejection that removes the device
++  // lands here, not in the D3D12 queue.
++  if (dxgi_debug_info_queue_) {
++    const UINT64 dxgi_count = dxgi_debug_info_queue_->GetNumStoredMessages(DXGI_DEBUG_ALL);
++    for (UINT64 i = 0; i < dxgi_count; ++i) {
++      SIZE_T length = 0;
++      if (FAILED(dxgi_debug_info_queue_->GetMessage(DXGI_DEBUG_ALL, i, nullptr, &length)) ||
++          !length) {
++        continue;
++      }
++      buffer.resize(length);
++      DXGI_INFO_QUEUE_MESSAGE* message = reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(buffer.data());
++      if (FAILED(dxgi_debug_info_queue_->GetMessage(DXGI_DEBUG_ALL, i, message, &length))) {
++        continue;
++      }
++      if (message->Severity == DXGI_INFO_QUEUE_MESSAGE_SEVERITY_INFO ||
++          message->Severity == DXGI_INFO_QUEUE_MESSAGE_SEVERITY_MESSAGE) {
++        continue;
++      }
++      uint32_t& times = seen[0x40000000 | static_cast<int>(message->ID)];
++      ++times;
++      if (times > 5 && (times % 500) != 0) {
++        continue;
++      }
++      std::string_view text(message->pDescription,
++                            message->DescriptionByteLength ? message->DescriptionByteLength - 1 : 0);
++      if (message->Severity <= DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR) {
++        REXLOG_ERROR("DXGI debug layer [id {} x{}]: {}", static_cast<int>(message->ID), times, text);
++      } else {
++        REXLOG_WARN("DXGI debug layer [id {} x{}]: {}", static_cast<int>(message->ID), times, text);
++      }
++    }
++    if (dxgi_count) {
++      dxgi_debug_info_queue_->ClearStoredMessages(DXGI_DEBUG_ALL);
++    }
++  }
++
 +  if (!debug_info_queue_) {
 +    return;
 +  }
@@ -27812,10 +27875,6 @@ index bf8252b..ae06c3e 100644
 +  if (!count) {
 +    return;
 +  }
-+  static std::mutex mutex;
-+  static std::unordered_map<int, uint32_t> seen;
-+  std::lock_guard<std::mutex> lock(mutex);
-+  std::vector<uint8_t> buffer;
 +  for (UINT64 i = 0; i < count; ++i) {
 +    SIZE_T length = 0;
 +    if (FAILED(debug_info_queue_->GetMessage(i, nullptr, &length)) || !length) {

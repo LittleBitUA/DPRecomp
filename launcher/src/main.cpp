@@ -30,6 +30,8 @@
 #include <map>
 #include <memory>
 #include <unordered_map>
+
+#include "thirdparty/miniz/miniz.h"
 #include <cwchar>
 #include <algorithm>
 #include <set>
@@ -355,7 +357,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.3.2";
+constexpr const wchar_t* kLauncherVersion = L"v1.3.3";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -1869,7 +1871,260 @@ static std::wstring GetUpdateBackupPath() {
   return std::wstring(buf) + L"dp1_user_backup_" + kLauncherVersion + L".zip";
 }
 
-static bool WriteUpdateScript(const std::wstring& script_path,
+
+// ---------------------------------------------------------------------------
+// v1.3.3 (#20): PowerShell-free updater. Proton has no powershell.exe, so the
+// apply step is now a helper copy of this launcher running from %TEMP% with
+// `--apply-update <zip> <install_dir> <parent_pid>`. It mirrors what the
+// PowerShell script did: wait for the launcher to exit, unzip (miniz), back up
+// user data, copy the host shell files and the shipped folders, relaunch.
+// The log file convention is unchanged (removed on success), so
+// CheckPreviousUpdateLog() works as before.
+// ---------------------------------------------------------------------------
+namespace update_helper {
+
+static std::wstring g_log_path;
+
+static std::string ToUtf8(const std::wstring& w) {
+  if (w.empty()) return {};
+  int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+  std::string out(n, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), out.data(), n, nullptr, nullptr);
+  return out;
+}
+
+static std::wstring FromUtf8(const std::string& u) {
+  if (u.empty()) return {};
+  int n = MultiByteToWideChar(CP_UTF8, 0, u.c_str(), (int)u.size(), nullptr, 0);
+  std::wstring out(n, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, u.c_str(), (int)u.size(), out.data(), n);
+  return out;
+}
+
+static void L(const std::wstring& msg) {
+  if (g_log_path.empty()) return;
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  wchar_t stamp[40];
+  swprintf(stamp, 40, L"[%04d-%02d-%02d %02d:%02d:%02d] ", t.wYear, t.wMonth, t.wDay, t.wHour,
+           t.wMinute, t.wSecond);
+  std::string line = ToUtf8(std::wstring(stamp) + msg) + "\r\n";
+  std::ofstream f(g_log_path, std::ios::binary | std::ios::app);
+  f.write(line.data(), (std::streamsize)line.size());
+}
+
+static bool CopyTree(const std::filesystem::path& from, const std::filesystem::path& to,
+                     const std::wstring& skip_dir_name, std::wstring& err) {
+  std::error_code ec;
+  std::filesystem::create_directories(to, ec);
+  for (auto& e : std::filesystem::recursive_directory_iterator(
+           from, std::filesystem::directory_options::skip_permission_denied, ec)) {
+    const auto rel = std::filesystem::relative(e.path(), from, ec);
+    if (!skip_dir_name.empty() && !rel.empty() && rel.begin()->wstring() == skip_dir_name) {
+      continue;
+    }
+    const auto dst = to / rel;
+    if (e.is_directory(ec)) {
+      std::filesystem::create_directories(dst, ec);
+    } else if (e.is_regular_file(ec)) {
+      std::filesystem::create_directories(dst.parent_path(), ec);
+      if (!CopyFileW(e.path().c_str(), dst.c_str(), FALSE)) {
+        err = L"copy failed: " + e.path().wstring() + L" (" + std::to_wstring(GetLastError()) + L")";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool ExtractZip(const std::wstring& zip, const std::filesystem::path& staging,
+                       std::wstring& err) {
+  std::error_code ec;
+  std::filesystem::remove_all(staging, ec);
+  std::filesystem::create_directories(staging, ec);
+  mz_zip_archive za;
+  memset(&za, 0, sizeof(za));
+  std::string zip_utf8 = ToUtf8(zip);
+  if (!mz_zip_reader_init_file(&za, zip_utf8.c_str(), 0)) {
+    err = L"zip open failed: " + FromUtf8(mz_zip_get_error_string(mz_zip_get_last_error(&za)));
+    return false;
+  }
+  const mz_uint count = mz_zip_reader_get_num_files(&za);
+  for (mz_uint i = 0; i < count; ++i) {
+    mz_zip_archive_file_stat st;
+    if (!mz_zip_reader_file_stat(&za, i, &st)) continue;
+    std::wstring name = FromUtf8(st.m_filename);
+    // Zip slip guard: no absolute paths, no "..".
+    if (name.find(L"..") != std::wstring::npos || name.empty() || name[0] == L'/' ||
+        name[0] == L'\\' || (name.size() > 1 && name[1] == L':')) {
+      continue;
+    }
+    std::filesystem::path out = staging / name;
+    if (mz_zip_reader_is_file_a_directory(&za, i)) {
+      std::filesystem::create_directories(out, ec);
+      continue;
+    }
+    std::filesystem::create_directories(out.parent_path(), ec);
+    std::string out_utf8 = ToUtf8(out.wstring());
+    if (!mz_zip_reader_extract_to_file(&za, i, out_utf8.c_str(), 0)) {
+      err = L"extract failed: " + name + L" - " +
+            FromUtf8(mz_zip_get_error_string(mz_zip_get_last_error(&za)));
+      mz_zip_reader_end(&za);
+      return false;
+    }
+  }
+  mz_zip_reader_end(&za);
+  L(L"stage: extracted " + std::to_wstring(count) + L" entries to " + staging.wstring());
+  return true;
+}
+
+static void Relaunch(const std::filesystem::path& install_dir) {
+  std::wstring exe = (install_dir / L"PlayDeadlyPremonition.exe").wstring();
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  std::vector<wchar_t> cmd(exe.begin(), exe.end());
+  cmd.push_back(L'\0');
+  if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                     install_dir.c_str(), &si, &pi)) {
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+}
+
+// Entry point of the helper process. Returns the process exit code.
+static int Run(const std::wstring& zip, const std::wstring& install, DWORD parent_pid) {
+  wchar_t temp[MAX_PATH];
+  if (!GetTempPathW(MAX_PATH, temp)) return 2;
+  g_log_path = std::wstring(temp) + L"dp1_update.log";
+  {
+    std::ofstream f(g_log_path, std::ios::binary | std::ios::trunc);  // fresh log
+  }
+  const std::filesystem::path install_dir(install);
+  const std::filesystem::path staging = std::filesystem::path(temp) / L"dp1_update_staging";
+  const std::filesystem::path backup = std::filesystem::path(temp) / L"dp1_update_backup";
+  L(L"update helper v" + std::wstring(kLauncherVersion) + L" starting; zip=" + zip +
+    L" dest=" + install);
+  bool ok = false;
+  std::wstring err;
+  do {
+    // Wait for the launcher that spawned us to exit (it holds its own exe).
+    if (parent_pid) {
+      HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
+      if (h) {
+        L(L"wait: launcher exit");
+        WaitForSingleObject(h, 20000);
+        CloseHandle(h);
+      }
+    }
+    Sleep(500);
+    if (!ExtractZip(zip, staging, err)) break;
+    // Root: the staging dir or its single top-level folder holding the launcher.
+    std::filesystem::path root = staging;
+    std::error_code ec;
+    if (!std::filesystem::exists(root / L"PlayDeadlyPremonition.exe", ec)) {
+      for (auto& e : std::filesystem::directory_iterator(staging, ec)) {
+        if (e.is_directory(ec) &&
+            std::filesystem::exists(e.path() / L"PlayDeadlyPremonition.exe", ec)) {
+          root = e.path();
+          break;
+        }
+      }
+    }
+    L(L"stage: zip root resolved to " + root.wstring());
+    // Backup of user data (saves, settings) - best effort, plain copy.
+    {
+      std::filesystem::remove_all(backup, ec);
+      std::filesystem::create_directories(backup, ec);
+      std::wstring berr;
+      const std::filesystem::path ud = install_dir / L"userdata";
+      if (std::filesystem::exists(ud, ec)) {
+        if (CopyTree(ud, backup / L"userdata", L"cache", berr)) {
+          L(L"backup: userdata (without cache) -> " + backup.wstring());
+        } else {
+          L(L"backup FAILED (continuing): " + berr);
+        }
+      }
+      for (const wchar_t* n : {L"deadlyprem.toml", L"launcher.ini", L"deadlyprem.toml.backup"}) {
+        const auto p = install_dir / n;
+        if (std::filesystem::exists(p, ec)) CopyFileW(p.c_str(), (backup / n).c_str(), FALSE);
+      }
+    }
+    // Host shell files (same list as the previous PowerShell updater).
+    const wchar_t* copy_list[] = {
+      L"PlayDeadlyPremonition.exe",
+      L"deadlyprem.exe",
+      L"rexruntimerd.dll",
+      L"rexgpu-xenosrd.dll",
+      L"TracyClientrd.dll",
+      L"amd_fidelityfx_dx12drel.dll",
+      L"deadlyprem_usa.exe",
+      L"gamecontrollerdb.txt",
+      L"README.txt"
+    };
+    bool copy_ok = true;
+    for (const wchar_t* f : copy_list) {
+      const auto src = root / f;
+      if (!std::filesystem::exists(src, ec)) {
+        L(std::wstring(L"skip: ") + f + L" (not in zip)");
+        continue;
+      }
+      bool done = false;
+      for (int attempt = 0; attempt < 20 && !done; ++attempt) {
+        done = CopyFileW(src.c_str(), (install_dir / f).c_str(), FALSE) != 0;
+        if (!done) Sleep(250);  // the old launcher may still be releasing its exe
+      }
+      if (!done) {
+        err = std::wstring(L"copy failed: ") + f + L" (" + std::to_wstring(GetLastError()) + L")";
+        copy_ok = false;
+        break;
+      }
+      L(std::wstring(L"copy: ") + f);
+    }
+    if (!copy_ok) break;
+    // Whole folders shipped in the zip.
+    for (const wchar_t* d : {L"prompts", L"textures"}) {
+      const auto src = root / d;
+      if (std::filesystem::exists(src, ec)) {
+        std::wstring derr;
+        if (!CopyTree(src, install_dir / d, L"", derr)) { err = derr; break; }
+        L(std::wstring(L"copy: ") + d + L"/*");
+      }
+    }
+    if (!err.empty()) break;
+    {
+      const auto src = root / L"userdata" / L"cache" / L"shaders" / L"shareable";
+      if (std::filesystem::exists(src, ec)) {
+        std::wstring derr;
+        if (CopyTree(src, install_dir / L"userdata" / L"cache" / L"shaders" / L"shareable", L"",
+                     derr)) {
+          L(L"copy: cache/shaders/shareable/*");
+        } else {
+          L(L"shareable cache copy FAILED (continuing): " + derr);
+        }
+      }
+    }
+    ok = true;
+  } while (false);
+
+  std::error_code ec;
+  std::filesystem::remove_all(staging, ec);
+  std::filesystem::remove(zip, ec);
+  if (ok) {
+    L(L"update: success -- relaunching");
+    Relaunch(install_dir);
+    std::filesystem::remove(g_log_path, ec);  // clean removal = success marker
+    return 0;
+  }
+  L(L"FAILED: " + err);
+  L(L"update: aborted -- launching previous build");
+  Relaunch(install_dir);
+  return 1;
+}
+
+}  // namespace update_helper
+
+[[maybe_unused]] static bool WriteUpdateScript(const std::wstring& script_path,
                               const std::wstring& zip_path,
                               const std::wstring& staging_dir,
                               const std::wstring& install_dir) {
@@ -2080,7 +2335,6 @@ static void RunUpdateFlow(HWND hwnd) {
   if (!GetTempPathW(MAX_PATH, temp_dir)) return;
   std::wstring zip_path = std::wstring(temp_dir) + L"dp1_update.zip";
   std::wstring staging  = std::wstring(temp_dir) + L"dp1_update_staging";
-  std::wstring script   = std::wstring(temp_dir) + L"dp1_update.ps1";
 
   // Run the progress dialog modally.
   UpdateDownloadState st;
@@ -2123,26 +2377,27 @@ static void RunUpdateFlow(HWND hwnd) {
   }
 
   std::wstring install_dir = GetExeDir();
-  if (!WriteUpdateScript(script, zip_path, staging, install_dir)) {
+  // v1.3.3 (#20): no PowerShell. A copy of this launcher applies the update
+  // from %TEMP% so the install folder (including this exe) can be replaced.
+  std::wstring helper = std::wstring(temp_dir) + L"dp1_update_helper.exe";
+  wchar_t self_path[MAX_PATH];
+  GetModuleFileNameW(nullptr, self_path, MAX_PATH);
+  if (!CopyFileW(self_path, helper.c_str(), FALSE)) {
     MessageBoxW(hwnd, s.failure_body.c_str(), s.failure_title.c_str(),
                 MB_OK | MB_ICONERROR);
     return;
   }
-
-  // powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File <script>
-  std::wstring cmd = L"powershell.exe -NoProfile -WindowStyle Hidden "
-                     L"-ExecutionPolicy Bypass -File \"" + script + L"\"";
+  std::wstring cmd = L"\"" + helper + L"\" --apply-update \"" + zip_path + L"\" \"" +
+                     install_dir + L"\" " + std::to_wstring(GetCurrentProcessId());
   STARTUPINFOW si{}; si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESHOWWINDOW;
-  si.wShowWindow = SW_HIDE;
   PROCESS_INFORMATION pi{};
   std::vector<wchar_t> buf(cmd.begin(), cmd.end());
   buf.push_back(L'\0');
-  if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
-                     CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+  if (CreateProcessW(helper.c_str(), buf.data(), nullptr, nullptr, FALSE,
+                     CREATE_NO_WINDOW, nullptr, temp_dir, &si, &pi)) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    // Exit immediately so the script can replace files without lock contention.
+    // Exit immediately so the helper can replace files without lock contention.
     PostMessage(hwnd, WM_CLOSE, 0, 0);
   } else {
     MessageBoxW(hwnd, s.failure_body.c_str(), s.failure_title.c_str(),
@@ -3637,6 +3892,19 @@ void MaybeShareShaderCache() {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
+  // Helper mode (see update_helper): apply a downloaded update and exit.
+  {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv) {
+      if (argc >= 5 && wcscmp(argv[1], L"--apply-update") == 0) {
+        int rc = update_helper::Run(argv[2], argv[3], (DWORD)_wtoi(argv[4]));
+        LocalFree(argv);
+        return rc;
+      }
+      LocalFree(argv);
+    }
+  }
   INITCOMMONCONTROLSEX icc = {sizeof(icc),
                               ICC_TAB_CLASSES | ICC_STANDARD_CLASSES |
                                   ICC_PROGRESS_CLASS | ICC_BAR_CLASSES};

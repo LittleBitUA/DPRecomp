@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.3.2 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.3.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.3.2.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.3.3.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -48,11 +48,13 @@
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
-Updating: the launcher shows an *Update available* banner and installs the new version in place, keeping your saves and settings (Steam Deck / Proton: unzip by hand, see [Known issues](#known-issues)).
+Updating: the launcher shows an *Update available* banner and installs the new version in place, keeping your saves and settings; since 1.3.3 this works under Proton on the Steam Deck too (one manual unzip to get onto 1.3.3, the button from then on).
 
 ---
 
 ## What's new in 1.3
+
+**1.3.3:** the launcher's Update button works on the Steam Deck (no more PowerShell, #20), mouse aiming works in the clock-tower boss fight (#24), and a GPU device removal now leaves the debug layer's last message in the log (#22). [Notes](docs/RELEASE-NOTES-1.3.3.md).
 
 **1.3.2 (diagnostics):** no gameplay changes, but the log now explains crashes, hangs and GPU device losses by itself: a crash report with the game's thread and call stack plus a minidump in `logs\`, thread names and frame numbers on every line, DRED breadcrumbs on device removal, save-container steps, optional file-open and debug-layer logging. [Notes](docs/RELEASE-NOTES-1.3.2.md).
 
@@ -209,7 +211,6 @@ Yes. Turn on *Texture Dump* in the launcher (Advanced), play, pick the PNG from 
 ## Known issues
 
 - **60 FPS:** some animation-keyed sounds play twice and a few prop attach events misfire (#17, #18). Under investigation; an experimental switch is in 1.3.
-- **Steam Deck / Proton:** the launcher's Update button downloads the update but cannot apply it (the updater uses PowerShell). Unzip the release over your folder by hand; a PowerShell-free updater is planned.
 - **Terrain layer blending** shows hard triangle edges while walking and blends correctly when standing still (long-standing, under investigation).
 - Some dialogue scenes show **light-blue polygonal patches on characters** with the ROV path (the scene's fog colour through the composite mask). Under investigation with RenderDoc.
 - **2× internal resolution:** the game's glow, depth of field and the sun's halo are computed in buffers sized for 1×, so bright edges can show a fine grid and the blur is softer than the original. 1× does not have it.
@@ -254,6 +255,7 @@ The AI reads thousands of lines of runtime and game listings faster than a perso
 - **[Alexbeav](https://github.com/Alexbeav)** — the first-run disc image installer (contributed to DownpourRecomp, ported here).
 - **[ReXGlue](https://github.com/rexglue/rexglue-sdk)** and **[Xenia](https://xenia.jp/)** — the runtime this port stands on; **[XenonRecomp](https://github.com/hedge-dev/XenonRecomp)** and the recompilation projects that showed the way.
 - **[DPfix](https://github.com/PeterTh/dpfix)** by Peter Thoman — invaluable notes on how the game renders.
+- **[miniz](https://github.com/richgel999/miniz)** (MIT) — the zip reader inside the launcher's updater.
 - **[Zacksly](https://zacksly.itch.io)** — *PS5 Button Icons and Controls*, the PlayStation prompt icons ([CC BY 3.0](https://creativecommons.org/licenses/by/3.0/), resized, otherwise unmodified; `prompts/LICENSE-zacksly.txt`).
 - **The testers.** SilentHeII, Crowley9, Dominus41, DexgamingX, GradiusHead and everyone who filed an issue, sent a save, a log or a DebugView capture: the black screen under Steam recording, the audio desync, the doubled sounds, the coffee cup, the morgue, the Steam Deck updater. Each one became a fix or is on its way to one.
 
