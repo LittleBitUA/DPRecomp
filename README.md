@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.3.7 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.4.0 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.3.7.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.4.0.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.4.0:** two things from the wishlist (#19). *Skip Intro* (launcher → Advanced) jumps past the publisher logos to the title screen, or straight into the main menu. *Controller Layout* (launcher → Controls) gives pads the Director's Cut layout: left trigger aims, right trigger fires. Both off by default. [Notes](docs/RELEASE-NOTES-1.4.0.md).
 
 **1.3.7:** the art-gallery device removal (#22) is fixed at the root. The texture the 1.3.6 log named is a 3D texture sampled through a 2D wrapper, and that wrapper was created at the guest size while its contents are uploaded at the render resolution scale, so a 64×64 upload landed in a 32×32 resource. Both resource paths now share one size rule. [Notes](docs/RELEASE-NOTES-1.3.7.md).
 
@@ -98,13 +100,13 @@ Open an [issue](https://github.com/LittleBitUA/DPRecomp/issues/new) with a save 
 
 ## The launcher and in-game keys
 
-`PlayDeadlyPremonition.exe` shows every setting in five tabs: **Graphics** (render path, internal resolution, upscaler and sharpness, FXAA, 60 FPS, window, monitor list), **Advanced** (game language, GPU adapter, texture cache, audio, Steam overlay switch, shader cache sharing, texture dump), **Mouse** (direct camera control, sensitivity, invert, key stick ramp, auto-shake), **Controls** (button prompts style, DualSense triggers, every key binding), **Debug** (log level, PSO policy). It writes `deadlyprem.toml` next to the game and repairs keys the in-game overlay may drop.
+`PlayDeadlyPremonition.exe` shows every setting in five tabs: **Graphics** (render path, internal resolution, upscaler and sharpness, FXAA, 60 FPS, window, monitor list), **Advanced** (game language, skip intro, GPU adapter, texture cache, audio, Steam overlay switch, shader cache sharing, texture dump), **Mouse** (direct camera control, sensitivity, invert, key stick ramp, auto-shake), **Controls** (button prompts style, controller layout, DualSense triggers, every key binding), **Debug** (log level, PSO policy). It writes `deadlyprem.toml` next to the game and repairs keys the in-game overlay may drop.
 
 In the game: **F4** runtime settings overlay (live changes, *Save to config* writes them back) · **F3** performance overlay · **F7** achievements.
 
 ## Controls
 
-Mirrors the Director's Cut PC keymap. A controller works at the same time. Rebind anything in the launcher (Controls tab); combo syntax in the config: `,` separates alternatives, `+` means held together (`keybind_a = "E,Space+LMB"`).
+Mirrors the Director's Cut PC keymap. A controller works at the same time. The publisher logos can be skipped (Advanced → Skip Intro: straight to the title screen, or straight to the main menu). Rebind anything in the launcher (Controls tab); combo syntax in the config: `,` separates alternatives, `+` means held together (`keybind_a = "E,Space+LMB"`).
 
 | Action | Keyboard / mouse | Pad |
 |---|---|---|
@@ -122,6 +124,7 @@ Mirrors the Director's Cut PC keymap. A controller works at the same time. Rebin
 | Fire | `Space` + `LMB` | A while aiming |
 | Shake the stick (QTE "Get it off!") | tap `A` `D` `A` `D` rapidly | wiggle the left stick |
 | Hold breath / lock-on | `Control` | Left trigger |
+| *Director's Cut layout* (Controls → Controller Layout) | unchanged | Left trigger aims, right trigger fires, A while aiming holds breath |
 | Strafe left / right | `Z` / `X` | LB / RB |
 | Pause menu | `Enter` | Start |
 | Map | `M` | Back |

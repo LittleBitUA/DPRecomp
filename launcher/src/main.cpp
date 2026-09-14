@@ -196,6 +196,18 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Controller Mappings (SDL)",
                                     L"Мапінги геймпадів (SDL)"},
       {"Game Language",             L"Мова гри"},
+      {"Skip Intro",                L"Пропуск інтро"},
+      {"Off (publisher logos, then the title screen)",
+                                    L"Вимкнено (логотипи видавців, потім титульний екран)"},
+      {"Skip the logos (straight to the title screen)",
+                                    L"Пропустити логотипи (одразу титульний екран)"},
+      {"Skip the logos and press Start (straight to the main menu)",
+                                    L"Пропустити логотипи і натиснути Start (одразу головне меню)"},
+      {"Controller Layout",         L"Розкладка геймпада"},
+      {"Original (RT aims, A fires, LT holds breath)",
+                                    L"Оригінал (RT приціл, A постріл, LT затримка дихання)"},
+      {"Director's Cut (LT aims, RT fires, A holds breath)",
+                                    L"Director's Cut (LT приціл, RT постріл, A затримка дихання)"},
       {"German (Deutsch)",          L"Німецька"},
       {"French (Francais)",         L"Французька"},
       {"Spanish (Espanol)",         L"Іспанська"},
@@ -357,7 +369,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.3.7";
+constexpr const wchar_t* kLauncherVersion = L"v1.4.0";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -1217,6 +1229,13 @@ void DefineCvars() {
   AddCvar("texture_cache_memory_limit_hard", "Texture Cache Hard Limit (MB)",
           kCatAdvanced, K::kInt, "768", {}, 128, 8192);
   AddCvar("audio_mute", "Mute Game Audio", kCatAdvanced, K::kBool, "false");
+  // DP1 2026-09-14 (DPRecomp #19): intro skip through the title-mode hook
+  // (dp_skip_intro in deadlyprem_hooks.cpp). Off = the game as shipped.
+  AddCvar("dp_skip_intro", "Skip Intro", kCatAdvanced,
+          K::kEnum, "off",
+          {{"off",   "Off (publisher logos, then the title screen)"},
+           {"logos", "Skip the logos (straight to the title screen)"},
+           {"menu",  "Skip the logos and press Start (straight to the main menu)"}});
 
   // ===== MOUSE =====
   AddCvar("mnk_mode", "Mouse & Keyboard Mode", kCatMouse, K::kBool, "true");
@@ -1267,6 +1286,13 @@ void DefineCvars() {
   // ===== DUALSENSE ADAPTIVE TRIGGERS =====
   // Applied by the SDL input driver on every DualSense connect event; other
   // controllers ignore these. Defaults = SDK defaults.
+  // DP1 2026-09-14 (DPRecomp #19): Director's Cut pad layout (dp_pad_layout,
+  // deadlyprem_pad_layout.h): LT aims, RT fires, A while aiming holds breath.
+  // Driving is never remapped. Hot-reloadable.
+  AddCvar("dp_pad_layout", "Controller Layout", kCatControls,
+          K::kEnum, "original",
+          {{"original", "Original (RT aims, A fires, LT holds breath)"},
+           {"dc",       "Director's Cut (LT aims, RT fires, A holds breath)"}});
   AddCvar("dualsense_adaptive_triggers", "DualSense Adaptive Triggers",
           kCatControls, K::kBool, "true");
   AddCvar("dualsense_rt_mode", "Right Trigger Effect Mode",

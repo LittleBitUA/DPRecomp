@@ -34,6 +34,7 @@
 // stick, so the two never fight.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -92,7 +93,9 @@ void StoreF32(uint8_t* p, float v) { rex::memory::store_and_swap<float>(p, v); }
 // Anchor (camera state object) captured by DPCameraAnchorHook in the absolute
 // routines right before the mouse hook of the same routine runs. The serial
 // makes sure the pointer used comes from this very call.
-uint32_t g_anchor = 0;
+// Written on the game thread (camera routines), read from whichever thread
+// polls the pad (DPInVehicle) - hence atomic.
+std::atomic<uint32_t> g_anchor{0};
 uint64_t g_anchor_serial = 0;
 uint64_t g_anchor_serial_applied = 0;
 
@@ -116,6 +119,18 @@ CatchUpState g_catchup;
 // frame, so the target-based hook cannot steer it. Report the frame to the
 // MnK driver, which then maps the mouse onto the left stick instead.
 void DPCameraAimHook() { rex::input::mnk::NoteMouseAimFrame(); }
+
+// DP1 #19 (2026-09-14): York is in a car while bit 1 of the anchor's +0x3C
+// word is set (0x00010000 on foot, 0x00010002 driving; logs 119/120,
+// 2026-09-13). false until the first camera routine has run.
+bool DPInVehicle() {
+  const uint32_t anchor = g_anchor.load(std::memory_order_relaxed);
+  if (anchor == 0) return false;
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory || !memory->LookupHeap(anchor + 0x3C)) return false;
+  const uint32_t flags = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(anchor + 0x3C));
+  return (flags & 0x2) != 0;
+}
 
 // Absolute routines, at `lfs f0,128(r3)` (r3 = anchor): remember the anchor.
 void DPCameraAnchorHook(PPCRegister& r3) {
@@ -147,7 +162,7 @@ static void ApplyMouseToCamera(PPCRegister& r31, float pitch_sign, const char* t
   const float base_yaw = LoadF32(yaw_ptr);
   if (log_now) {
     REXLOG_INFO("DPCameraMouseHook[{}] #{}: active={} r31={:08X} anchor={:08X} dx={} dy={} pitch={} yaw={} pend=({}, {})",
-                tag, call_count, active, r31.u32, g_anchor, dx, dy, base_pitch, base_yaw,
+                tag, call_count, active, r31.u32, g_anchor.load(), dx, dy, base_pitch, base_yaw,
                 g_catchup.pending_yaw, g_catchup.pending_pitch);
   }
   if (!active) {
@@ -208,10 +223,10 @@ static void ApplyMouseToCamera(PPCRegister& r31, float pitch_sign, const char* t
   // Direct: turn the yaw state (anchor+128) by this frame's mouse step so the
   // camera does not have to spring towards the target first. Only with an
   // anchor captured during this very routine call.
-  if (absolute && has_mouse && REXCVAR_GET(dp_mouse_camera_direct) && g_anchor != 0 &&
+  if (absolute && has_mouse && REXCVAR_GET(dp_mouse_camera_direct) && g_anchor.load() != 0 &&
       g_anchor_serial != g_anchor_serial_applied) {
     g_anchor_serial_applied = g_anchor_serial;
-    uint8_t* anchor_yaw = memory->TranslateVirtual<uint8_t*>(g_anchor + 128);
+    uint8_t* anchor_yaw = memory->TranslateVirtual<uint8_t*>(g_anchor.load() + 128);
     StoreF32(anchor_yaw, WrapAngle(LoadF32(anchor_yaw) + yaw_step));
   }
 }

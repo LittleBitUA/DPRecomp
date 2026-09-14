@@ -525,3 +525,12 @@ address = 0x8225CFE0
 name = "DPAudioCueHook"
 registers = ["r3", "r4", "r5", "r6"]
 after_instruction = false
+
+# DP1 #19 (2026-09-14): title mode state logger / intro skip at the entry of the
+# title mode's phase dispatcher (PAL sub_8241C840 = USA sub_8241BFA0, matched by
+# instruction sequence, 6058 insns, score 0.987; dp_skip_intro, src/deadlyprem_hooks.cpp).
+[[midasm_hook]]
+address = 0x8241BFA0
+name = "DPTitleModeHook"
+registers = ["r3", "r4", "r5"]
+after_instruction = false

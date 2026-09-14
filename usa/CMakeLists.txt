@@ -61,3 +61,13 @@ rexglue_setup_target(deadlyprem GPU_PLUGINS xenos)
 # USA / NTSC build (title 494F07D4): same app sources as the PAL project, separate
 # recompilation; ships next to the PAL exe and is picked by the launcher.
 set_target_properties(deadlyprem PROPERTIES OUTPUT_NAME deadlyprem_usa)
+target_compile_definitions(deadlyprem PRIVATE DP_REGION_USA=1)  # region-specific hook defaults (deadlyprem_hooks.cpp)
+
+# DP1 #19 (2026-09-14): controller layout remap + intro skip state machine
+# tests (plain executables, no framework):
+#   cmake --build --preset dp-relwithdebinfo --target dp_pad_layout_test dp_title_skip_test
+# then run out/build/<preset>/dp_*_test.exe (exit code 0 = pass).
+add_executable(dp_pad_layout_test tests/pad_layout_test.cpp)
+set_target_properties(dp_pad_layout_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+add_executable(dp_title_skip_test tests/title_skip_test.cpp)
+set_target_properties(dp_title_skip_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

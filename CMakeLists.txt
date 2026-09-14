@@ -57,3 +57,12 @@ else()
 endif()
 
 rexglue_setup_target(deadlyprem GPU_PLUGINS xenos)
+
+# DP1 #19 (2026-09-14): controller layout remap + intro skip state machine
+# tests (plain executables, no framework):
+#   cmake --build --preset dp-relwithdebinfo --target dp_pad_layout_test dp_title_skip_test
+# then run out/build/<preset>/dp_*_test.exe (exit code 0 = pass).
+add_executable(dp_pad_layout_test tests/pad_layout_test.cpp)
+set_target_properties(dp_pad_layout_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+add_executable(dp_title_skip_test tests/title_skip_test.cpp)
+set_target_properties(dp_title_skip_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

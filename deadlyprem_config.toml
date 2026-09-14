@@ -454,3 +454,12 @@ address = 0x8225D0B8
 name = "DPAudioCueHook"
 registers = ["r3", "r4", "r5", "r6"]
 after_instruction = false
+
+# DP1 #19 (2026-09-14): title mode state logger / intro skip at the entry of the
+# title mode's phase dispatcher sub_8241C840 (dp_skip_intro, dp_title_state_log,
+# src/deadlyprem_hooks.cpp).
+[[midasm_hook]]
+address = 0x8241C840
+name = "DPTitleModeHook"
+registers = ["r3", "r4", "r5"]
+after_instruction = false

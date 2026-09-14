@@ -42,6 +42,10 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
 #include <rex/stats.h>
+#include <rex/input/state_filter.h>
+
+#include "deadlyprem_pad_layout.h"
+#include "deadlyprem_title_skip.h"
 
 #include "deadlyprem_pch.h"  // PPCRegister / PPCContext (generated/default is on the include path)
 
@@ -284,4 +288,198 @@ void DPPhysXReportHook(PPCRegister& r30, PPCRegister& r25, PPCRegister& r23, PPC
 void DPAudioCueHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5, PPCRegister& r6) {
   if (!REXCVAR_GET(dp_audio_cue_log)) return;
   REXLOG_INFO("SE cue {} (engine {:08X}, r5 {:08X}, r6 {:08X})", r4.s32, r3.u32, r5.u32, r6.u32);
+}
+
+// DP1 #19 (2026-09-14): title mode state logger + intro skip. PAL sub_8241C840
+// (USA sub_8241BFA0) is the title mode's phase dispatcher: r3 = this, r4 =
+// phase (0 init, 1 update, 6/18 draw passes), r5 = params, *(r5) = requested
+// start state (80 on boot, 0 when the game returns to the title). The state
+// machine lives in a global block (PAL 0x83D7F688 / USA 0x83D7F680): +4
+// current state, +8 next state, +48 press-start countdown (frames), +60 load
+// step (18 = layouts loaded), +6964 per-state timer (frames). The decision
+// logic and the measured state sequence are in src/deadlyprem_title_skip.h
+// (tests/title_skip_test.cpp); this hook only reads and writes guest memory.
+REXCVAR_DEFINE_STRING(dp_skip_intro, "off", "DP1",
+                      "Skip the intro: off = the four publisher logos play; logos = jump "
+                      "straight to the title screen; menu = also press Start for you and land "
+                      "in the main menu. Exact names; anything else = off (DPRecomp #19)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(dp_title_state_log, false, "DP1",
+                    "Log the title mode's state transitions (logos, press start, attract demo, "
+                    "main menu) with a timestamp; diagnostics for the intro skip (#19)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+#if defined(DP_REGION_USA)
+constexpr uint32_t kDPTitleBlockDefault = 0x83D7F680;
+#else
+constexpr uint32_t kDPTitleBlockDefault = 0x83D7F688;
+#endif
+// Read once per title entry (phase 0); a value changed at runtime applies to
+// the next entry, and the state read from the block must match the start
+// state the game passed in before anything is written.
+REXCVAR_DEFINE_INT32(dp_title_block, static_cast<int32_t>(kDPTitleBlockDefault), "DP1",
+                     "Guest address of the title mode's state block (PAL 0x83D7F688, USA "
+                     "0x83D7F680, stored as a signed 32-bit number); 0 disables the intro skip");
+
+namespace {
+constexpr uint32_t kTitleTimerOffset = 6964;
+
+uint8_t* DPTitlePtr(uint32_t guest_ptr) {
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory || !memory->LookupHeap(guest_ptr)) return nullptr;
+  return memory->TranslateVirtual<uint8_t*>(guest_ptr);
+}
+uint32_t DPLoadU32(uint32_t guest_ptr) {
+  uint8_t* p = DPTitlePtr(guest_ptr);
+  return p ? rex::memory::load_and_swap<uint32_t>(p) : 0xFFFFFFFFu;
+}
+float DPLoadF32(uint32_t guest_ptr) {
+  uint8_t* p = DPTitlePtr(guest_ptr);
+  return p ? rex::memory::load_and_swap<float>(p) : 0.0f;
+}
+void DPStoreU32(uint32_t guest_ptr, uint32_t v) {
+  if (uint8_t* p = DPTitlePtr(guest_ptr)) rex::memory::store_and_swap<uint32_t>(p, v);
+}
+void DPStoreF32(uint32_t guest_ptr, float v) {
+  if (uint8_t* p = DPTitlePtr(guest_ptr)) rex::memory::store_and_swap<float>(p, v);
+}
+double DPSecondsSinceStart() {
+  static const auto t0 = std::chrono::steady_clock::now();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+dp::SkipIntro DPSkipIntroLevel() {
+  const std::string v = REXCVAR_GET(dp_skip_intro);  // copy: hot-reload writes the cvar
+  bool ok = false;
+  const dp::SkipIntro level = dp::ParseSkipIntro(v.c_str(), &ok);
+  if (!ok) {
+    static std::string warned_for;
+    if (warned_for != v) {
+      warned_for = v;
+      REXLOG_WARN("dp_skip_intro = \"{}\" is not one of off / logos / menu; treating it as off", v);
+    }
+  }
+  return level;
+}
+
+// Title mode bookkeeping. The hook runs on the game thread only.
+dp::TitleSkipState g_title;
+uint32_t g_title_block = 0;
+}  // namespace
+
+void DPTitleModeHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
+  const uint32_t phase = r4.u32 & 0xFF;
+  const bool log = REXCVAR_GET(dp_title_state_log);
+  static uint32_t last_state = 0xFFFFFFFFu, last_next = 0xFFFFFFFFu, last_sub = 0xFFFFFFFFu;
+  if (phase == dp::kTitlePhaseInit) {
+    dp::TitleSkipOnInit(g_title, DPLoadU32(r5.u32));
+    g_title_block = static_cast<uint32_t>(REXCVAR_GET(dp_title_block));
+    last_state = last_next = last_sub = 0xFFFFFFFFu;
+    if (log) {
+      REXLOG_INFO("title init: this {:08X}, params {:08X}, start state {} (t={:.2f}s)", r3.u32, r5.u32,
+                  static_cast<int32_t>(g_title.start_state), DPSecondsSinceStart());
+    }
+    return;
+  }
+  if (phase != dp::kTitlePhaseUpdate || g_title_block == 0) return;
+  const uint32_t block = g_title_block;
+  const uint32_t state = DPLoadU32(block + 4);
+  const uint32_t next = DPLoadU32(block + 8);
+  const uint32_t sub = DPLoadU32(block + 60);
+  if (log && (state != last_state || next != last_next || sub != last_sub)) {
+    REXLOG_INFO("title state {} (next {}, load step {}, countdown {:.2f}) t={:.2f}s",
+                static_cast<int32_t>(state), static_cast<int32_t>(next), static_cast<int32_t>(sub),
+                DPLoadF32(block + 48), DPSecondsSinceStart());
+    last_state = state; last_next = next; last_sub = sub;
+  }
+  const dp::TitleSkipAction a = dp::TitleSkipOnUpdate(g_title, DPSkipIntroLevel(), state, next, sub);
+  if (a.log_block_mismatch) {
+    REXLOG_WARN("title block 0x{:08X}: state {} does not match start state {}; intro skip disabled "
+                "for this title entry (dp_title_block)",
+                block, static_cast<int32_t>(state), static_cast<int32_t>(g_title.start_state));
+  }
+  if (a.jump_to_title) {
+    DPStoreU32(block + 4, dp::kTitleStateTitleFadeIn);
+    DPStoreU32(block + 8, dp::kTitleStateTitleFadeIn);
+    DPStoreF32(block + kTitleTimerOffset, 0.0f);
+    REXLOG_INFO("Intro skipped: title state 80 -> 97 (dp_skip_intro = {}, t={:.2f}s)",
+                REXCVAR_GET(dp_skip_intro), DPSecondsSinceStart());
+  }
+  if (a.log_started_pulsing) {
+    REXLOG_INFO("Intro skipped: pressing Start on the title screen (dp_skip_intro = menu, t={:.2f}s)",
+                DPSecondsSinceStart());
+  }
+  if (a.inject_start) {
+    rex::input::InjectButtons(0, static_cast<uint16_t>(rex::input::X_INPUT_GAMEPAD_START),
+                              dp::kTitleStartPulsePolls);
+  }
+  if (a.cancel_injection) rex::input::InjectButtons(0, 0, 0);
+  if (a.log_start_left) {
+    if (a.left_state == dp::kTitleStateStartAccepted) {
+      REXLOG_INFO("Intro skipped: Start accepted after {} frames", a.pulse_frames);
+    } else {
+      REXLOG_INFO("Intro skipped: title screen left for state {} after {} frames without our Start",
+                  static_cast<int32_t>(a.left_state), a.pulse_frames);
+    }
+  }
+  if (a.log_gave_up) {
+    REXLOG_WARN("Intro skipped: the title screen ignored Start for {} frames; giving up",
+                dp::kTitleStartPulseMaxFrames);
+  }
+}
+
+// DP1 #19 (2026-09-14): controller layout (src/deadlyprem_pad_layout.h,
+// tests/pad_layout_test.cpp). Installed by the app as the input system's
+// state filter; runs on every physical pad's state before the devices of a
+// user are merged (the MnK synthetic device is left alone: its bindings
+// already target guest buttons). The vehicle check reads the camera anchor's
+// +0x3C flags (bit 1 set while York is in a car; observed in logs 119/120 on
+// 2026-09-13, not proven from the disassembly - if it ever reads wrong, the
+// symptom is the car ignoring the triggers, and the launcher switch is the
+// way out).
+REXCVAR_DEFINE_STRING(dp_pad_layout, "original", "DP1",
+                      "Controller layout: original = Xbox 360 (RT aims, A fires, LT holds "
+                      "breath), dc = Director's Cut (LT aims, RT fires, A while aiming holds "
+                      "breath; RT outside aiming = the old LT). Driving is never remapped. "
+                      "Exact names; anything else = original (DPRecomp #19)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+bool DPInVehicle();  // deadlyprem_camera_hook.cpp
+
+namespace {
+dp::PadLayout DPPadLayoutValue() {
+  const std::string v = REXCVAR_GET(dp_pad_layout);  // copy: hot-reload writes the cvar
+  bool ok = false;
+  const dp::PadLayout layout = dp::ParsePadLayout(v.c_str(), &ok);
+  if (!ok) {
+    static std::string warned_for;
+    if (warned_for != v) {
+      warned_for = v;
+      REXLOG_WARN("dp_pad_layout = \"{}\" is not one of original / dc; treating it as original", v);
+    }
+  }
+  return layout;
+}
+// One latch per guest user; the filter is called under the input system's
+// per-call sequence for a user, and users never share a latch.
+std::mutex g_pad_layout_mutex;
+dp::PadLayoutState g_pad_layout_state[4];
+}  // namespace
+
+void DPInstallPadLayoutFilter() {
+  rex::input::SetStateFilter([](uint32_t user_index, bool synthetic, rex::input::X_INPUT_GAMEPAD& pad) {
+    // Keyboard/mouse emulation already binds keys to the game's own buttons
+    // (Space = RT etc.); only physical pads get the alternative layout.
+    if (synthetic || user_index >= 4) return;
+    const dp::PadLayout layout = DPPadLayoutValue();
+    uint16_t buttons = static_cast<uint16_t>(pad.buttons);
+    uint8_t lt = pad.left_trigger;
+    uint8_t rt = pad.right_trigger;
+    {
+      std::lock_guard<std::mutex> lock(g_pad_layout_mutex);
+      dp::ApplyPadLayout(layout, buttons, lt, rt, DPInVehicle(), g_pad_layout_state[user_index]);
+    }
+    pad.buttons = buttons;
+    pad.left_trigger = lt;
+    pad.right_trigger = rt;
+  });
+  REXLOG_INFO("Controller layout filter installed (dp_pad_layout = {})", REXCVAR_GET(dp_pad_layout));
 }

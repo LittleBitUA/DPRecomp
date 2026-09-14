@@ -142,7 +142,7 @@ index 4d845c7..7435042 100644
  
    struct SRVDescriptorCachePage {
 diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
-index 2cf24c4..e52c177 100644
+index 2cf24c4..884c65b 100644
 --- a/include/rex/graphics/flags.h
 +++ b/include/rex/graphics/flags.h
 @@ -18,6 +18,10 @@ REXCVAR_DECLARE(bool, vsync);
@@ -167,6 +167,14 @@ index 2cf24c4..e52c177 100644
  REXCVAR_DECLARE(bool, gpu_3d_to_2d_texture);
  REXCVAR_DECLARE(int32_t, anisotropic_override);
  REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_render_to_texture);
+@@ -65,6 +73,7 @@ REXCVAR_DECLARE(int32_t, primitive_processor_cache_min_indices);
+ 
+ // GPU Debug
+ REXCVAR_DECLARE(bool, gpu_debug_markers);
++REXCVAR_DECLARE(bool, gpu_hdr_log);
+ bool IsGpuDebugMarkersEnabled();
+ 
+ // GPU Alpha Test
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
 index 3bbd52e..1f37723 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
@@ -392,6 +400,22 @@ index 984e28a..6368c39 100644
  
    /** Messages at or above this level trigger an immediate flush. */
    spdlog::level::level_enum flush_level = spdlog::level::info;
+diff --git a/include/rex/perf/counter.h b/include/rex/perf/counter.h
+index b3947e0..ddebe0f 100644
+--- a/include/rex/perf/counter.h
++++ b/include/rex/perf/counter.h
+@@ -15,6 +15,11 @@
+ 
+ #ifdef REXGLUE_ENABLE_PROFILING
+ #include <tracy/Tracy.hpp>
++
++#include <rex/cvar.h>
++
++REXCVAR_DECLARE(bool, tracy_enable);
++REXCVAR_DECLARE(std::string, perf_log_csv);
+ #endif
+ 
+ namespace rex::perf {
 diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
 index 1f52480..48d7478 100644
 --- a/include/rex/rex_app.h
@@ -969,6 +993,20 @@ index 1645848..1aa49f7 100644
 +uint32_t GetFrameNumber() { return g_frame_number.load(std::memory_order_relaxed); }
 +
  }  // namespace rex
+diff --git a/src/core/perf/counter.cpp b/src/core/perf/counter.cpp
+index 536009e..9ef4dda 100644
+--- a/src/core/perf/counter.cpp
++++ b/src/core/perf/counter.cpp
+@@ -21,6 +21,9 @@
+ 
+ REXCVAR_DEFINE_STRING(perf_log_csv, "", "Perf",
+                       "Path to write per-frame CSV log (empty = disabled)");
++REXCVAR_DEFINE_BOOL(tracy_enable, false, "Perf",
++                    "Start the Tracy profiler client at launch (on-demand: zones are recorded only "
++                    "while a Tracy capture/profiler is connected on port 8086)");
+ 
+ namespace rex::perf {
+ 
 diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
 index 896dfec..123c093 100644
 --- a/src/core/threading_win.cpp
@@ -2203,7 +2241,7 @@ index 2be0e8e..7d6755d 100644
    switch (dimension) {
      case xenos::DataDimension::k3D:
 diff --git a/src/graphics/flags.cpp b/src/graphics/flags.cpp
-index e2983a4..268a851 100644
+index e2983a4..e8d2750 100644
 --- a/src/graphics/flags.cpp
 +++ b/src/graphics/flags.cpp
 @@ -15,6 +15,16 @@
@@ -2223,6 +2261,17 @@ index e2983a4..268a851 100644
  REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
  REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
  REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
+@@ -28,6 +38,10 @@ REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
+ REXCVAR_DEFINE_BOOL(use_fuzzy_alpha_epsilon, false, "GPU",
+                     "Use approximate compare for alpha test values to prevent "
+                     "flickering on NVIDIA graphics cards");
++REXCVAR_DEFINE_BOOL(gpu_hdr_log, true, "GPU",
++                    "Log once per distinct case: EDRAM resolves (source render target format, "
++                    "destination texture format, exponent bias, number format) and texture fetch "
++                    "constants with gamma signs, exponent adjust or float formats (DPRecomp HDR audit)");
+ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
+                     "Insert debug markers into GPU command streams for tools "
+                     "like PIX and RenderDoc. Automatically enabled when "
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
 index 953c5fd..2ea0be4 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
@@ -2773,13 +2822,14 @@ index a7d508a..58f46db 100644
        a_.OpEndIf();
  
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..d09719b 100644
+index 76f5600..d3db142 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
-@@ -10,7 +10,12 @@
+@@ -10,7 +10,13 @@
   */
  
  #include <algorithm>
++#include <unordered_set>
 +#include <array>
 +#include <mutex>
 +#include <set>
@@ -2789,7 +2839,7 @@ index 76f5600..d09719b 100644
  #include <utility>
  
  #include <rex/assert.h>
-@@ -20,6 +25,7 @@
+@@ -20,6 +26,7 @@
  #include <rex/graphics/flags.h>
  #include <rex/graphics/pipeline/texture/cache.h>
  #include <rex/graphics/pipeline/texture/info.h>
@@ -2797,7 +2847,7 @@ index 76f5600..d09719b 100644
  #include <rex/graphics/pipeline/texture/util.h>
  #include <rex/graphics/register_file.h>
  #include <rex/graphics/xenos.h>
-@@ -246,6 +252,8 @@ bool TextureCache::GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out
+@@ -246,6 +253,8 @@ bool TextureCache::GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out
    uint32_t clamped_y = std::min(kMaxDrawResolutionScaleAlongAxis, config_y);
    x_out = clamped_x;
    y_out = clamped_y;
@@ -2806,7 +2856,7 @@ index 76f5600..d09719b 100644
    return clamped_x == config_x && clamped_y == config_y;
  }
  
-@@ -591,6 +599,41 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -591,6 +600,41 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
    if (bindings_changed) {
      UpdateTextureBindingsImpl(bindings_changed);
    }
@@ -2848,7 +2898,7 @@ index 76f5600..d09719b 100644
  }
  
  const char* TextureCache::TextureKey::GetLogDimensionName(xenos::DataDimension dimension) {
-@@ -867,6 +910,7 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+@@ -867,6 +911,7 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
    // Create the texture and add it to the map.
    Texture* texture;
    {
@@ -2856,7 +2906,7 @@ index 76f5600..d09719b 100644
      std::unique_ptr<Texture> new_texture = CreateTexture(key);
      if (!new_texture) {
        key.LogAction("Failed to create");
-@@ -874,12 +918,46 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+@@ -874,12 +919,46 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
      }
      assert_true(new_texture->key() == key);
      texture = textures_.emplace(key, std::move(new_texture)).first->second.get();
@@ -2903,7 +2953,7 @@ index 76f5600..d09719b 100644
  bool TextureCache::LoadTextureData(Texture& texture) {
    PendingTextureLoad pending_load;
    PendingSharedMemoryRange pending_ranges[2];
-@@ -911,14 +989,38 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
+@@ -911,14 +990,38 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
      case xenos::FetchConstantType::kTexture:
        break;
      case xenos::FetchConstantType::kInvalidTexture:
@@ -2943,6 +2993,48 @@ index 76f5600..d09719b 100644
            fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5);
        return;
      default:
+@@ -989,6 +1092,41 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
+   if (swizzled_signs_out != nullptr) {
+     *swizzled_signs_out = texture_util::SwizzleSigns(fetch);
+   }
++
++  // DP1 2026-09-14 (HDR audit): textures that carry HDR-relevant fetch state -
++  // a gamma (PWL) sign on any component, a non-zero exponent adjust, or a
++  // float / 10-11-11 format - once per distinct (format, signs, exp_adjust,
++  // num_format, size, base).
++  if (REXCVAR_GET(gpu_hdr_log)) {
++    const bool any_gamma = fetch.sign_x == xenos::TextureSign::kGamma ||
++                           fetch.sign_y == xenos::TextureSign::kGamma ||
++                           fetch.sign_z == xenos::TextureSign::kGamma ||
++                           fetch.sign_w == xenos::TextureSign::kGamma;
++    const bool float_format =
++        format == xenos::TextureFormat::k_16_16_16_16_FLOAT || format == xenos::TextureFormat::k_16_FLOAT ||
++        format == xenos::TextureFormat::k_16_16_FLOAT || format == xenos::TextureFormat::k_32_FLOAT ||
++        format == xenos::TextureFormat::k_32_32_FLOAT || format == xenos::TextureFormat::k_32_32_32_32_FLOAT ||
++        format == xenos::TextureFormat::k_10_11_11 || format == xenos::TextureFormat::k_11_11_10 ||
++        format == xenos::TextureFormat::k_2_10_10_10;
++    if (any_gamma || fetch.exp_adjust != 0 || float_format) {
++      static std::unordered_set<uint64_t> reported;
++      const uint64_t key = (uint64_t(uint32_t(format)) << 56) | (uint64_t(fetch.dword_0 & 0x3FF) << 44) |
++                           (uint64_t(uint32_t(fetch.exp_adjust) & 63) << 38) |
++                           (uint64_t(fetch.num_format) << 37) | (uint64_t(width_minus_1 & 0x1FFF) << 24) |
++                           (uint64_t(height_minus_1 & 0x1FFF) << 11) | uint64_t(base_page & 0x7FF);
++      if (reported.insert(key).second) {
++        static const char* kSign[] = {"u", "s", "b", "G"};
++        REXGPU_INFO(
++            "HDR texture: {} {}x{} at 0x{:08X}, signs {}{}{}{}, exp_adjust {}, num_format {}, "
++            "filters {}/{}/{}, aniso {} (first seen; gpu_hdr_log)",
++            FormatInfo::Get(format)->name, width_minus_1 + 1, height_minus_1 + 1, base_page << 12,
++            kSign[uint32_t(fetch.sign_x)], kSign[uint32_t(fetch.sign_y)], kSign[uint32_t(fetch.sign_z)],
++            kSign[uint32_t(fetch.sign_w)], int32_t(fetch.exp_adjust), uint32_t(fetch.num_format),
++            uint32_t(fetch.mag_filter), uint32_t(fetch.min_filter), uint32_t(fetch.mip_filter),
++            uint32_t(fetch.aniso_filter));
++      }
++    }
++  }
+ }
+ 
+ void TextureCache::ResetTextureBindings(bool from_destructor) {
 diff --git a/src/graphics/shaders/bytecode/d3d12_5_1/resolve_full_32bpp_cs.h b/src/graphics/shaders/bytecode/d3d12_5_1/resolve_full_32bpp_cs.h
 index f6fba09..d73f68c 100644
 --- a/src/graphics/shaders/bytecode/d3d12_5_1/resolve_full_32bpp_cs.h
@@ -27422,6 +27514,49 @@ index 14068cf..6b37354 100644
 +      0,   0,   0,   0,   1,   0, 
 +      0,   0
 +};
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+index 305380e..6be4023 100644
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <unordered_set>
+ 
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+@@ -1107,6 +1108,30 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+                      xenos::ColorRenderTargetFormat(color_edram_info.format)),
+       dest_format_info.name, rb_copy_dest_base, copy_dest_extent_start, copy_dest_extent_end);
+ 
++  // DP1 2026-09-14 (HDR audit): one line per distinct resolve configuration.
++  if (REXCVAR_GET(gpu_hdr_log)) {
++    static std::unordered_set<uint64_t> reported;
++    const uint32_t src_format = is_depth ? depth_edram_info.format : color_edram_info.format;
++    const uint64_t key = (uint64_t(is_depth) << 63) | (uint64_t(src_format) << 56) |
++                         (uint64_t(uint32_t(dest_format)) << 48) |
++                         (uint64_t(uint32_t(exp_bias) & 63) << 40) |
++                         (uint64_t(uint32_t(rb_copy_dest_info.copy_dest_number)) << 36) |
++                         (uint64_t(rb_copy_dest_info.copy_dest_swap) << 35) |
++                         (uint64_t(uint32_t(x1 - x0) & 0xFFFF) << 16) | uint64_t(uint32_t(y1 - y0) & 0xFFFF);
++    if (reported.insert(key).second) {
++      REXGPU_INFO(
++          "HDR resolve: {} {}x{} -> texture {} at 0x{:08X}, exp_bias {}, number_format {}, "
++          "swap {}, clear {}/{} (first seen; gpu_hdr_log)",
++          is_depth ? xenos::GetDepthRenderTargetFormatName(
++                         xenos::DepthRenderTargetFormat(depth_edram_info.format))
++                   : xenos::GetColorRenderTargetFormatName(
++                         xenos::ColorRenderTargetFormat(color_edram_info.format)),
++          x1 - x0, y1 - y0, dest_format_info.name, rb_copy_dest_base, exp_bias,
++          uint32_t(rb_copy_dest_info.copy_dest_number), uint32_t(rb_copy_dest_info.copy_dest_swap),
++          uint32_t(rb_copy_control.color_clear_enable), uint32_t(rb_copy_control.depth_clear_enable));
++    }
++  }
++
+   return true;
+ }
+ 
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
 index ecbd940..47d9c1c 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
@@ -27454,6 +27589,49 @@ index ecbd940..47d9c1c 100644
      image_create_info.extent.depth = 1;
      image_create_info.mipLevels = 1;
      image_create_info.arrayLayers = 1;
+diff --git a/src/input/CMakeLists.txt b/src/input/CMakeLists.txt
+index 3ea3535..1829423 100644
+--- a/src/input/CMakeLists.txt
++++ b/src/input/CMakeLists.txt
+@@ -5,6 +5,7 @@ add_library(rexinput OBJECT
+     input_system.cpp
+     device_assignment.cpp
+     state_merge.cpp
++    state_filter.cpp
+     mnk/mnk_input_driver.cpp
+     nop/nop_input_driver.cpp
+ )
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..88660fc 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -17,6 +17,7 @@
+ #include <rex/input/flags.h>
+ #include <rex/input/input_driver.h>
+ #include <rex/input/input_system.h>
++#include <rex/input/state_filter.h>
+ #include <rex/input/mnk/mnk_input_driver.h>
+ #include <rex/input/nop/nop_input_driver.h>
+ #include <rex/input/sdl/sdl_input_driver.h>
+@@ -234,6 +235,9 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+       continue;
+     }
+     active_devices_.Observe(user_index, id, state.gamepad);
++    // DP1 2026-09-14 (#19): title-side per-device remap (rex/input/state_filter.h).
++    const DeviceInfo* info = DeviceInfoFor(id);
++    ApplyStateFilter(user_index, info ? info->synthetic : false, state.gamepad);
+     if (!any) {
+       merged = state;
+       any = true;
+@@ -245,6 +249,8 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   if (!any) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
++  // DP1 2026-09-14 (#19): synthetic presses on the merged state.
++  ApplyInjectedButtons(user_index, merged.gamepad);
+   if (out_state) {
+     *out_state = merged;
+   }
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
 index 3f9422d..8f4fb53 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
@@ -28983,7 +29161,7 @@ index 43d6c06..35646a5 100644
    ImGui::End();
    ImGui::PopStyleColor();
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..9ceaf1c 100644
+index b94fe9e..1a5ae2e 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -14,6 +14,7 @@
@@ -29003,25 +29181,38 @@ index b94fe9e..9ceaf1c 100644
  #include <rex/audio/audio_system.h>
  #include <rex/audio/sdl/sdl_audio_system.h>
  #include <rex/input/input_system.h>
-@@ -34,6 +37,7 @@
+@@ -34,6 +37,8 @@
  #include <rex/system/achievement_manager.h>
  #include <rex/system/gpu_plugin.h>
  #include <rex/system/kernel_state.h>
 +#include <rex/stats.h>
++#include <rex/perf/counter.h>
  #include <rex/system/xthread.h>
  #include <rex/ui/graphics_provider.h>
  #include <rex/ui/keybinds.h>
-@@ -173,6 +177,9 @@ bool ReXApp::SetupEnvironment() {
+@@ -173,6 +178,21 @@ bool ReXApp::SetupEnvironment() {
  
    rex::InitLogging(log_config);
    rex::RegisterLogLevelCallback();
 +  rex::crash::Install((exe_dir / "logs").string(), std::string(GetName()));
 +  rex::system::RegisterGuestCrashInfo();
 +  rex::stats::StartPeriodicLogging();
++  // DP1 2026-09-14: the Tracy client is built in but was never started, and
++  // the per-frame counter CSV had no caller. Both stay off by default.
++#ifdef REXGLUE_ENABLE_PROFILING
++  if (REXCVAR_GET(tracy_enable)) {
++    rex::perf::Profiler::Startup();
++    REXLOG_INFO("Tracy profiler started (tracy_enable); waiting for a capture on port 8086");
++  }
++  if (!REXCVAR_GET(perf_log_csv).empty()) {
++    rex::perf::SetCsvLogPath(REXCVAR_GET(perf_log_csv));
++    REXLOG_INFO("Per-frame perf CSV: {}", REXCVAR_GET(perf_log_csv));
++  }
++#endif
  
    log_sink_ = std::make_shared<rex::LogCaptureSink>();
    rex::AddSink(log_sink_);
-@@ -394,6 +401,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+@@ -394,6 +414,11 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
    // gated eager font upload in SetImmediateDrawer is skipped (font uploads
    // lazily on the first Draw instead).
    imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
@@ -29033,7 +29224,7 @@ index b94fe9e..9ceaf1c 100644
    rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
      if (debug_overlay_) {
        debug_overlay_.reset();
-@@ -457,25 +469,60 @@ void ReXApp::LaunchModule() {
+@@ -457,25 +482,60 @@ void ReXApp::LaunchModule() {
      }
  
      auto* graphics_system = runtime_->graphics_system();
@@ -29140,10 +29331,10 @@ index 2251429..cee7285 100644
        break;
      case SDL_EVENT_WINDOW_EXPOSED:
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bda2ad..a509516 100644
+index 7bda2ad..1730946 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
-@@ -11,6 +11,8 @@ add_executable(unit_tests
+@@ -11,12 +11,15 @@ add_executable(unit_tests
      core/hash_test.cpp
      core/stream_test.cpp
      core/chrono_test.cpp
@@ -29152,7 +29343,14 @@ index 7bda2ad..a509516 100644
      ppc/import_function_test.cpp
      ppc/stack_test.cpp
      system/guest_path_test.cpp
-@@ -36,6 +38,7 @@ target_include_directories(unit_tests PRIVATE
+     system/achievement_manager_test.cpp
+     system/function_dispatcher_test.cpp
+     input/input_assignment_test.cpp
++    input/state_filter_test.cpp
+     codegen/codegen_writer_test.cpp
+     codegen/output_partition_test.cpp
+     codegen/output_stamp_test.cpp
+@@ -36,6 +39,7 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime
