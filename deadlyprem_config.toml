@@ -463,3 +463,11 @@ address = 0x8241C840
 name = "DPTitleModeHook"
 registers = ["r3", "r4", "r5"]
 after_instruction = false
+
+# DP1 #28 (2026-09-18): "York is driving" for the Director's Cut controller
+# layout - entry of the player-driven car update sub_82356948
+# (reads the pad triggers as throttle/brake; src/deadlyprem_camera_hook.cpp DPInVehicle).
+[[midasm_hook]]
+address = 0x82356948
+name = "DPVehicleFrameHook"
+after_instruction = false

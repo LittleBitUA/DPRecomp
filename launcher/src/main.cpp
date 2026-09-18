@@ -369,7 +369,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.4.0";
+constexpr const wchar_t* kLauncherVersion = L"v1.4.1";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -3791,6 +3791,19 @@ void GenerateKeyPromptOverlay() {
         {"@shake_l", L"Left Stick Left-Right"}, {"@shake_r", L"Right Stick Left-Right"},
     };
 
+    // DP1 #19 / #28 (2026-09-18): with the Director's Cut controller layout
+    // the game's LT prompt (breath) is pressed on the right trigger and its
+    // RT prompt (aim) on the left one, so the icon sets swap L2 and R2. The
+    // original Xbox icons (no icon set) cannot be swapped: the overlay only
+    // paints over the atlas, it has no Xbox trigger art to paint with.
+    const bool dc_layout = val("dp_pad_layout") == "dc";
+    auto icon_for = [&](const std::string& key, const wchar_t* name) -> const wchar_t* {
+      if (!dc_layout) return name;
+      if (key == "keybind_left_trigger") return L"R2";
+      if (key == "keybind_right_trigger") return L"L2";
+      return name;
+    };
+
     for (const auto& c : atlas.cells) {
       const std::string key(c.key);
       const float m = 1.0f * S;
@@ -3800,7 +3813,7 @@ void GenerateKeyPromptOverlay() {
           if (key == n.first) {
             // full cell (no margin) so the erase covers the original icon
             RectF full(float(c.x * S), float(c.y * S), float(c.w * S), float(c.h * S));
-            draw_icon(full, n.second);
+            draw_icon(full, icon_for(key, n.second));
             break;
           }
         }

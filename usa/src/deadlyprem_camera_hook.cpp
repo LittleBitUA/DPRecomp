@@ -93,8 +93,8 @@ void StoreF32(uint8_t* p, float v) { rex::memory::store_and_swap<float>(p, v); }
 // Anchor (camera state object) captured by DPCameraAnchorHook in the absolute
 // routines right before the mouse hook of the same routine runs. The serial
 // makes sure the pointer used comes from this very call.
-// Written on the game thread (camera routines), read from whichever thread
-// polls the pad (DPInVehicle) - hence atomic.
+// Written on the game thread (camera routines); atomic because the pad
+// filter used to read it from the poll thread (1.4.0 vehicle check).
 std::atomic<uint32_t> g_anchor{0};
 uint64_t g_anchor_serial = 0;
 uint64_t g_anchor_serial_applied = 0;
@@ -120,16 +120,42 @@ CatchUpState g_catchup;
 // MnK driver, which then maps the mouse onto the left stick instead.
 void DPCameraAimHook() { rex::input::mnk::NoteMouseAimFrame(); }
 
-// DP1 #19 (2026-09-14): York is in a car while bit 1 of the anchor's +0x3C
-// word is set (0x00010000 on foot, 0x00010002 driving; logs 119/120,
-// 2026-09-13). false until the first camera routine has run.
+// DP1 #28 (2026-09-18): "York is driving" = the game's player-driven car
+// update (PAL sub_82356948 / USA sub_823566F8, the routine that reads the
+// pad triggers as throttle and brake; the car object runs it only in its
+// player-driven mode, bit 0x8000 of car+1228, PAL sub_82342B00) has run
+// within the last dp_pad_layout_vehicle_ms. The camera anchor's +0x3C flag
+// used by 1.4.0 read "on foot" while driving on a pad (#28), so the
+// Director's Cut layout remapped the car's triggers; this signal comes from
+// the driving code itself. false until the first driving frame.
+REXCVAR_DEFINE_INT32(dp_pad_layout_vehicle_ms, 150, "DP1",
+                     "How long after the last driving frame the controller layout still treats "
+                     "York as driving (ms); covers a dropped frame, ends the moment he steps out")
+    .range(16, 2000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+std::atomic<int64_t> g_vehicle_frame_ns{0};
+int64_t NowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
+void DPVehicleFrameHook() {
+  const int64_t now = NowNs();
+  const int64_t last = g_vehicle_frame_ns.exchange(now, std::memory_order_relaxed);
+  // One line per driving streak (first frame after >= 1 s without the car
+  // update), so a log shows when the game considered York at the wheel.
+  if (last == 0 || now - last > 1000000000LL) {
+    REXLOG_INFO("Vehicle: player-driven car update running (York is at the wheel)");
+  }
+}
+
 bool DPInVehicle() {
-  const uint32_t anchor = g_anchor.load(std::memory_order_relaxed);
-  if (anchor == 0) return false;
-  auto* memory = REX_KERNEL_MEMORY();
-  if (!memory || !memory->LookupHeap(anchor + 0x3C)) return false;
-  const uint32_t flags = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(anchor + 0x3C));
-  return (flags & 0x2) != 0;
+  const int64_t last = g_vehicle_frame_ns.load(std::memory_order_relaxed);
+  if (last == 0) return false;
+  return NowNs() - last < static_cast<int64_t>(REXCVAR_GET(dp_pad_layout_vehicle_ms)) * 1000000;
 }
 
 // Absolute routines, at `lfs f0,128(r3)` (r3 = anchor): remember the anchor.

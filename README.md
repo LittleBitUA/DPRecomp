@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.0 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.4.1 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.4.0.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.4.1.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.4.1:** the Director's Cut controller layout now stands down in the car (#28: 1.4.0 remapped the triggers while driving), the launcher's Game Language works on the European disc (#27: the game wanted a retail console region and got a dev-kit one), and PlayStation prompt sets swap L2/R2 with that layout. [Notes](docs/RELEASE-NOTES-1.4.1.md).
 
 **1.4.0:** two things from the wishlist (#19). *Skip Intro* (launcher → Advanced) jumps past the publisher logos to the title screen, or straight into the main menu. *Controller Layout* (launcher → Controls) gives pads the Director's Cut layout: left trigger aims, right trigger fires. Both off by default. [Notes](docs/RELEASE-NOTES-1.4.0.md).
 

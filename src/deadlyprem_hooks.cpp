@@ -430,11 +430,10 @@ void DPTitleModeHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
 // tests/pad_layout_test.cpp). Installed by the app as the input system's
 // state filter; runs on every physical pad's state before the devices of a
 // user are merged (the MnK synthetic device is left alone: its bindings
-// already target guest buttons). The vehicle check reads the camera anchor's
-// +0x3C flags (bit 1 set while York is in a car; observed in logs 119/120 on
-// 2026-09-13, not proven from the disassembly - if it ever reads wrong, the
-// symptom is the car ignoring the triggers, and the launcher switch is the
-// way out).
+// already target guest buttons). The vehicle check (DPInVehicle,
+// deadlyprem_camera_hook.cpp) is driven by the game's own player-driven car
+// update since 1.4.1 (#28): the 1.4.0 camera-anchor flag read "on foot" while
+// driving on a pad, so the car's triggers got remapped.
 REXCVAR_DEFINE_STRING(dp_pad_layout, "original", "DP1",
                       "Controller layout: original = Xbox 360 (RT aims, A fires, LT holds "
                       "breath), dc = Director's Cut (LT aims, RT fires, A while aiming holds "
@@ -473,9 +472,18 @@ void DPInstallPadLayoutFilter() {
     uint16_t buttons = static_cast<uint16_t>(pad.buttons);
     uint8_t lt = pad.left_trigger;
     uint8_t rt = pad.right_trigger;
+    const bool in_vehicle = DPInVehicle();
     {
       std::lock_guard<std::mutex> lock(g_pad_layout_mutex);
-      dp::ApplyPadLayout(layout, buttons, lt, rt, DPInVehicle(), g_pad_layout_state[user_index]);
+      // One line per change so a player's log shows when the layout stood
+      // down for the car (#28).
+      static bool logged_vehicle = false;
+      if (in_vehicle != logged_vehicle) {
+        logged_vehicle = in_vehicle;
+        REXLOG_INFO("Controller layout: York {} driving, Director's Cut remap {}", in_vehicle ? "is" : "stopped",
+                    in_vehicle ? "paused (car on RT/LT)" : "active");
+      }
+      dp::ApplyPadLayout(layout, buttons, lt, rt, in_vehicle, g_pad_layout_state[user_index]);
     }
     pad.buttons = buttons;
     pad.left_trigger = lt;

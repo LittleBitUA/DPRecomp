@@ -463,6 +463,18 @@ index df9bad4..9267cc2 100644
    void PurgeAllObjects();  // Purges the object table of all guest objects
  
   private:
+diff --git a/include/rex/system/xex_module.h b/include/rex/system/xex_module.h
+index 2ba62d7..5381e57 100644
+--- a/include/rex/system/xex_module.h
++++ b/include/rex/system/xex_module.h
+@@ -53,6 +53,7 @@ class XexModule : public Module {
+     uint32_t load_address;
+     uint32_t page_descriptor_count;
+     const xex2_page_descriptor* page_descriptors;
++    uint32_t region = 0;  // xex2_region_flags of the image (XGetGameRegion), DP1 #27
+   };
+   enum XexFormat {
+     kFormatUnknown,
 diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
 index 0c39a42..1e12fd5 100644
 --- a/include/rex/system/xmemory.h
@@ -28429,6 +28441,86 @@ index 86c4353..2cc7e8f 100644
  
    if (overlapped_ptr) {
      REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(), result);
+diff --git a/src/kernel/xam/xam_info.cpp b/src/kernel/xam/xam_info.cpp
+index 1fda053..68f0281 100644
+--- a/src/kernel/xam/xam_info.cpp
++++ b/src/kernel/xam/xam_info.cpp
+@@ -15,6 +15,8 @@
+ #include <rex/hook.h>
+ #include <rex/types.h>
+ #include <rex/string.h>
++#include <rex/cvar.h>
++#include <rex/system/flags.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/user_module.h>
+ #include <rex/system/xenumerator.h>
+@@ -174,7 +176,36 @@ u32 XGetAVPack_entry() {
+   return 6;
+ }
+ 
++// DP1 2026-09-18 (DPRecomp #27): XGetGameRegion returns the console's game
++// region code (XC_GAME_REGION_*: 0x00FF North America, 0x0101 Japan, 0x0201
++// China, 0x02FE / 0x02FF Europe), not the XEX region flags. The old fixed
++// 0xFFFF is what a development kit reports, and Deadly Premonition's European
++// build only honours the console language for a retail region (it accepts
++// exactly 0x00FF, 0x0101, 0x0201, 0x02FE, 0x02FF, PAL sub_8223CAD0), so with
++// 0xFFFF the launcher's Game Language never took effect. The code is derived
++// from the running XEX's region flags; game_region overrides it.
++REXCVAR_DEFINE_UINT32(game_region, 0, "Kernel",
++                      "Console game region reported by XGetGameRegion (0x00FF North America, 0x0101 "
++                      "Japan, 0x0201 China, 0x02FF Europe, 0xFFFF development kit); 0 = derive it "
++                      "from the region flags of the running XEX");
++
+ uint32_t xeXGetGameRegion() {
++  const uint32_t override_region = REXCVAR_GET(game_region);
++  if (override_region != 0) {
++    return override_region & 0xFFFFu;
++  }
++  auto module = REX_KERNEL_STATE() ? REX_KERNEL_STATE()->GetExecutableModule() : nullptr;
++  if (module && module->xex_module() && module->xex_module()->loaded()) {
++    const uint32_t flags = module->xex_module()->xex_security_info()->region;
++    if (flags == XEX_REGION_ALL || flags == 0) {
++      return 0x00FFu;  // region-free image: behave like a North American console
++    }
++    if (flags & XEX_REGION_PAL) return 0x02FFu;
++    if (flags & XEX_REGION_NTSCU) return 0x00FFu;
++    if (flags & XEX_REGION_NTSCJ_JAPAN) return 0x0101u;
++    if (flags & XEX_REGION_NTSCJ_CHINA) return 0x0201u;
++    if (flags & XEX_REGION_NTSCJ) return 0x0101u;
++  }
+   return 0xFFFFu;
+ }
+ 
+@@ -183,19 +214,17 @@ u32 XGetGameRegion_entry() {
+ }
+ 
+ u32 XGetLanguage_entry() {
+-  auto desired_language = XLanguage::kEnglish;
+-
+-  // Switch the language based on game region.
+-  // TODO(benvanik): pull from xex header.
+-  uint32_t game_region = XEX_REGION_NTSCU;
+-  if (game_region & XEX_REGION_NTSCU) {
+-    desired_language = XLanguage::kEnglish;
+-  } else if (game_region & XEX_REGION_NTSCJ) {
+-    desired_language = XLanguage::kJapanese;
++  // DP1 2026-09-18 (DPRecomp #27): the legacy no-argument XGetLanguage is the
++  // one Deadly Premonition (and other XDK-era titles) call to pick their text
++  // language; it used to be a Xenia-era stub that always answered English, so
++  // the user_language cvar (XamGetLanguage / the launcher's Game Language)
++  // never reached those games. Serve the same value XamGetLanguage serves,
++  // with the stub's English fallback for an invalid setting.
++  const uint32_t language = REXCVAR_GET(user_language);
++  if (language == uint32_t(XLanguage::kInvalid) || language >= uint32_t(XLanguage::kMaxLanguages)) {
++    return uint32_t(XLanguage::kEnglish);
+   }
+-  // Add more overrides?
+-
+-  return uint32_t(desired_language);
++  return language;
+ }
+ 
+ u32 XamGetCurrentTitleId_entry() {
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
 index 86e7888..f2002be 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
@@ -28673,6 +28765,26 @@ index 6fbabd2..5fea3f5 100644
  void ObjectTable::PurgeAllObjects() {
    auto lock = global_critical_region_.Acquire();
    for (uint32_t slot = 0; slot < table_capacity_; slot++) {
+diff --git a/src/system/xex_module.cpp b/src/system/xex_module.cpp
+index 0726516..3023d98 100644
+--- a/src/system/xex_module.cpp
++++ b/src/system/xex_module.cpp
+@@ -848,6 +848,7 @@ void XexModule::ReadSecurityInfo() {
+     security_info_.load_address = xex1_sec_info->load_address;
+     security_info_.page_descriptor_count = xex1_sec_info->page_descriptor_count;
+     security_info_.page_descriptors = xex1_sec_info->page_descriptors;
++    security_info_.region = xex1_sec_info->region;
+   } else if (xex_format_ == kFormatXex2) {
+     const xex2_security_info* xex2_sec_info =
+         reinterpret_cast<const xex2_security_info*>(GetSecurityInfo(xex_header()));
+@@ -860,6 +861,7 @@ void XexModule::ReadSecurityInfo() {
+     security_info_.load_address = xex2_sec_info->load_address;
+     security_info_.page_descriptor_count = xex2_sec_info->page_descriptor_count;
+     security_info_.page_descriptors = xex2_sec_info->page_descriptors;
++    security_info_.region = xex2_sec_info->region;
+   }
+ }
+ 
 diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
 index 76cc877..4509601 100644
 --- a/src/system/xmemory.cpp
