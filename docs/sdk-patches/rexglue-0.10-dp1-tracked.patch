@@ -463,6 +463,24 @@ index df9bad4..9267cc2 100644
    void PurgeAllObjects();  // Purges the object table of all guest objects
  
   private:
+diff --git a/include/rex/system/xam/content_manager.h b/include/rex/system/xam/content_manager.h
+index 949d185..759cf34 100644
+--- a/include/rex/system/xam/content_manager.h
++++ b/include/rex/system/xam/content_manager.h
+@@ -152,8 +152,12 @@ class ContentManager {
+                                                  const XCONTENT_AGGREGATE_DATA& data);
+ 
+   bool ContentExists(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
++  /// The package directory exists, is a directory and is not mounted (DPRecomp #21 reuse path).
++  bool ContentDirectoryUsable(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
++  /// reuse_directory: accept an already existing package directory (the
++  /// overwrite path when the old directory could not be removed, DPRecomp #21).
+   X_RESULT CreateContent(const std::string_view root_name, uint64_t xuid,
+-                         const XCONTENT_AGGREGATE_DATA& data);
++                         const XCONTENT_AGGREGATE_DATA& data, bool reuse_directory = false);
+   X_RESULT OpenContent(const std::string_view root_name, uint64_t xuid,
+                        const XCONTENT_AGGREGATE_DATA& data, uint32_t& content_license);
+   X_RESULT CloseContent(const std::string_view root_name);
 diff --git a/include/rex/system/xex_module.h b/include/rex/system/xex_module.h
 index 2ba62d7..5381e57 100644
 --- a/include/rex/system/xex_module.h
@@ -27645,7 +27663,7 @@ index 813bb1c..88660fc 100644
      *out_state = merged;
    }
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
-index 3f9422d..8f4fb53 100644
+index 3f9422d..8babb2f 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
 +++ b/src/input/mnk/mnk_input_driver.cpp
 @@ -1,3 +1,4 @@
@@ -27653,7 +27671,15 @@ index 3f9422d..8f4fb53 100644
  /**
   * @file        input/mnk/mnk_input_driver.cpp
   * @brief       Keyboard/mouse input driver implementation.
-@@ -29,6 +30,50 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
+@@ -9,6 +10,7 @@
+  *              See LICENSE file in the project root for full license text.
+  */
+ #include <rex/input/mnk/mnk_input_driver.h>
++#include <rex/input/mnk/stick_mapping.h>
+ 
+ #include <rex/cvar.h>
+ #include <rex/input/input.h>
+@@ -29,6 +31,61 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
                      "from the keybind_rstick_* keys only");
  REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
      .range(0.01, 10.0);
@@ -27667,6 +27693,17 @@ index 3f9422d..8f4fb53 100644
 +                      "Right-stick units per mouse pixel (per poll) on top of the deadzone floor; "
 +                      "multiplied by mnk_sensitivity")
 +    .range(10.0, 5000.0);
++// DPRecomp #30 (2026-09-19): while aiming, the mouse drives the LEFT stick and
++// the game's aim routine reads that stick per axis, each axis with its own
++// deadzone. The vector mapping below puts the floor on the length of the
++// motion, so a diagonal move only clears the deadzone on one axis at a time
++// and the reticle staircases. With this on, aim mode adds the floor to each
++// axis that moved instead (small moves lean to 45 degrees, which is what a
++// per-axis reader expects); the look camera keeps the vector mapping.
++REXCVAR_DEFINE_BOOL(mnk_aim_axis_floor, true, "Input",
++                    "Aiming: add the right-stick deadzone floor per axis (diagonal aim moves both "
++                    "axes at once; off = vector mapping as for the look camera)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_INT32(mnk_deadzone_floor, 8689, "Input",
 +                     "Minimum right-stick deflection for any nonzero mouse motion (XInput "
 +                     "canonical inner deadzone is 8689; 0 = no floor)")
@@ -27704,7 +27741,7 @@ index 3f9422d..8f4fb53 100644
  
  REXCVAR_DEFINE_STRING(keybind_a, "Semicolon,Space", "Input/Keybinds/Controller", "A button");
  REXCVAR_DEFINE_STRING(keybind_b, "Quote,Backspace", "Input/Keybinds/Controller", "B button");
-@@ -71,6 +116,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
+@@ -71,6 +128,13 @@ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x
  // it. That is what lets the D-pad share the arrow keys. A consequence is
  // that binding a bare modifier name ("Shift") can never fire, since holding it
  // makes the live mask non-zero while the bind wants zero.
@@ -27718,7 +27755,7 @@ index 3f9422d..8f4fb53 100644
  constexpr uint8_t kModShift = 1u << 0;
  constexpr uint8_t kModCtrl = 1u << 1;
  constexpr uint8_t kModAlt = 1u << 2;
-@@ -86,30 +138,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
+@@ -86,30 +150,18 @@ uint8_t LiveModifiers(const bool (&key_down)[256]) {
    return mods;
  }
  
@@ -27760,7 +27797,7 @@ index 3f9422d..8f4fb53 100644
  }
  
  std::string_view TrimSpaces(std::string_view s) {
-@@ -122,17 +162,99 @@ std::string_view TrimSpaces(std::string_view s) {
+@@ -122,17 +174,99 @@ std::string_view TrimSpaces(std::string_view s) {
    return s;
  }
  
@@ -27867,7 +27904,7 @@ index 3f9422d..8f4fb53 100644
  }
  
  std::atomic<bool> mouse_look_active{true};
-@@ -147,6 +269,56 @@ bool IsMouseLookActive() {
+@@ -147,6 +281,56 @@ bool IsMouseLookActive() {
    return mouse_look_active.load(std::memory_order_relaxed);
  }
  
@@ -27924,7 +27961,7 @@ index 3f9422d..8f4fb53 100644
  using rex::ui::VirtualKey;
  
  MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order)
-@@ -212,7 +384,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+@@ -212,7 +396,8 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
        rest.remove_prefix(comma + 1);
      }
      token = TrimSpaces(token);
@@ -27934,7 +27971,7 @@ index 3f9422d..8f4fb53 100644
        return true;
      }
    }
-@@ -222,8 +395,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+@@ -222,8 +407,18 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
  void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
    // Disabled means no device at all, so it never occupies a guest user slot.
    if (!IsEnabled()) {
@@ -27953,7 +27990,7 @@ index 3f9422d..8f4fb53 100644
    DeviceInfo info;
    info.id = kMnkDevice;
    info.name = "Keyboard and Mouse";
-@@ -269,11 +452,49 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -269,11 +464,49 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
        std::memset(out_state, 0, sizeof(*out_state));
        out_state->packet_number = packet_number_;
      }
@@ -28003,7 +28040,7 @@ index 3f9422d..8f4fb53 100644
    uint16_t buttons = 0;
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
      buttons |= X_INPUT_GAMEPAD_A;
-@@ -311,14 +532,82 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -311,14 +544,82 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
  
    int32_t lx = 0;
    int32_t ly = 0;
@@ -28090,7 +28127,7 @@ index 3f9422d..8f4fb53 100644
  
    int32_t rx = 0;
    int32_t ry = 0;
-@@ -330,12 +619,66 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+@@ -330,12 +631,67 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
      ry += INT16_MAX;
    if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
      ry -= INT16_MAX;
@@ -28146,23 +28183,24 @@ index 3f9422d..8f4fb53 100644
 +    const double dx = double(mouse_dx_);
 +    // Stick Y is up-positive, screen Y is down-positive.
 +    const double dy = REXCVAR_GET(mnk_invert_y) ? double(mouse_dy_) : -double(mouse_dy_);
-+    const double len = std::sqrt(dx * dx + dy * dy);
-+    if (len > 0.0) {
++    if (dx != 0.0 || dy != 0.0) {
 +      const double gain = REXCVAR_GET(mnk_sensitivity) * REXCVAR_GET(mnk_stick_scale);
 +      const double floor = double(std::clamp(REXCVAR_GET(mnk_deadzone_floor), 0, 32767));
-+      const double out_len = std::min(floor + len * gain, double(INT16_MAX));
++      // Aim mode reads the stick per axis (#30): floor per axis there.
++      const StickDeflection d =
++          MapMouseToStick(dx, dy, floor, gain, aim_stick && REXCVAR_GET(mnk_aim_axis_floor));
 +      if (aim_stick) {
-+        lx += static_cast<int32_t>(std::lround(dx / len * out_len));
-+        ly += static_cast<int32_t>(std::lround(dy / len * out_len));
++        lx += d.x;
++        ly += d.y;
 +      } else {
-+        rx += static_cast<int32_t>(std::lround(dx / len * out_len));
-+        ry += static_cast<int32_t>(std::lround(dy / len * out_len));
++        rx += d.x;
++        ry += d.y;
 +      }
 +    }
    }
    // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
    // mouse is off, and toggling it on would otherwise dump the whole backlog
-@@ -476,15 +819,23 @@ void MnkInputDriver::RecenterCursorFromUIThread(int32_t x, int32_t y) {
+@@ -476,15 +832,23 @@ void MnkInputDriver::RecenterCursorFromUIThread(int32_t x, int32_t y) {
  
  void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
    if (vk < 256) {
@@ -28187,7 +28225,7 @@ index 3f9422d..8f4fb53 100644
    SetKeyState(vk, true);
  }
  
-@@ -549,6 +900,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -549,6 +913,15 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
        mouse_dx_ += float(x - prev_mouse_x_);
        mouse_dy_ += float(y - prev_mouse_y_);
      }
@@ -28203,7 +28241,7 @@ index 3f9422d..8f4fb53 100644
    }
    prev_mouse_x_ = x;
    prev_mouse_y_ = y;
-@@ -558,6 +918,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+@@ -558,6 +931,17 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
    }
  }
  
@@ -28221,7 +28259,7 @@ index 3f9422d..8f4fb53 100644
  void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
    has_focus_ = false;
    // Withdraw the request too, or an update queued before the focus loss grabs
-@@ -568,6 +939,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+@@ -568,6 +952,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
      std::memset(key_down_, 0, sizeof(key_down_));
      mouse_dx_ = 0.0f;
      mouse_dy_ = 0.0f;
@@ -28377,7 +28415,7 @@ index c7c440d..19211ad 100644
    SDL_SetGamepadPlayerIndex(controller, ordinal);
  
 diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
-index 86c4353..2cc7e8f 100644
+index 86c4353..91e9c41 100644
 --- a/src/kernel/xam/xam_content.cpp
 +++ b/src/kernel/xam/xam_content.cpp
 @@ -9,6 +9,7 @@
@@ -28388,7 +28426,64 @@ index 86c4353..2cc7e8f 100644
  #include <rex/cvar.h>
  #include <rex/kernel/xam/private.h>
  #include <rex/logging.h>
-@@ -211,6 +212,22 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+@@ -146,6 +147,28 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+               license_mask_ptr](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+     X_RESULT result = X_ERROR_INVALID_PARAMETER;
+     kDispositionState disposition = kDispositionState::Unknown;
++    // DPRecomp #21: when the old package directory cannot be removed (a file
++    // inside is held open by another process for longer than the retry
++    // budget), overwrite in place instead of failing: the game recreates its
++    // files with CREATE_ALWAYS anyway, and the old save stays readable until
++    // it does. Failing here would make Deadly Premonition wait forever.
++    bool reuse_directory = false;
++    auto overwrite_existing = [&](const char* how) {
++      if (!content_manager->ContentExists(xuid, content_data)) {
++        return true;
++      }
++      if (content_manager->DeleteContent(xuid, content_data) == X_ERROR_SUCCESS) {
++        return true;
++      }
++      if (content_manager->ContentDirectoryUsable(xuid, content_data)) {
++        REXKRNL_WARN("XamContent {}: old container directory could not be removed; "
++                     "reusing it in place (see the delete warning above)",
++                     how);
++        reuse_directory = true;
++        return true;
++      }
++      return false;
++    };
+     switch (flags & 0xF) {
+       case 1:  // CREATE_NEW
+                // Fail if exists.
+@@ -160,8 +183,7 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+         // Close any existing mount under this root name first.
+         // Games may reuse the same root without explicitly closing.
+         content_manager->CloseContent(root_name);
+-        if (content_manager->ContentExists(xuid, content_data) &&
+-            content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
++        if (!overwrite_existing("create-always")) {
+           result = X_ERROR_ACCESS_DENIED;
+           break;
+         }
+@@ -189,7 +211,7 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+           result = X_ERROR_PATH_NOT_FOUND;
+         } else {
+           content_manager->CloseContent(root_name);
+-          if (content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
++          if (!overwrite_existing("truncate-existing")) {
+             result = X_ERROR_ACCESS_DENIED;
+           } else {
+             disposition = kDispositionState::Create;
+@@ -203,7 +225,7 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+ 
+     uint32_t content_license = 0;
+     if (disposition == kDispositionState::Create) {
+-      result = content_manager->CreateContent(root_name, xuid, content_data);
++      result = content_manager->CreateContent(root_name, xuid, content_data, reuse_directory);
+       if (result == X_ERROR_SUCCESS) {
+         content_manager->WriteContentHeaderFile(xuid, content_data);
+       }
+@@ -211,6 +233,22 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
        result = content_manager->OpenContent(root_name, xuid, content_data, content_license);
      }
  
@@ -28401,17 +28496,17 @@ index 86c4353..2cc7e8f 100644
 +                     disposition == kDispositionState::Create ? "create" : "open",
 +                     root_name, file_name, static_cast<uint32_t>(content_data.content_type.get()));
 +      } else {
-+        REXKRNL_WARN("XamContent {}: root '{}' file '{}' type {:#x} -> error {:#x}",
++        REXKRNL_WARN("XamContent {}: root '{}' file '{}' type {:#x} flags {:#x} -> error {:#x}",
 +                     disposition == kDispositionState::Create ? "create" : "open",
 +                     root_name, file_name, static_cast<uint32_t>(content_data.content_type.get()),
-+                     result);
++                     flags, result);
 +      }
 +    }
 +
      if (license_mask_ptr && result == X_ERROR_SUCCESS) {
        *license_mask_ptr = content_license;
      }
-@@ -276,6 +293,11 @@ u32 XamContentFlush_entry(mapped_string root_name, mapped_void overlapped_ptr) {
+@@ -276,6 +314,11 @@ u32 XamContentFlush_entry(mapped_string root_name, mapped_void overlapped_ptr) {
  u32 XamContentClose_entry(mapped_string root_name, mapped_void overlapped_ptr) {
    // Closes a previously opened root from XamContentCreate*.
    auto result = REX_KERNEL_STATE()->content_manager()->CloseContent(root_name.value());
@@ -28423,7 +28518,7 @@ index 86c4353..2cc7e8f 100644
  
    if (overlapped_ptr) {
      REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(), result);
-@@ -382,6 +404,17 @@ u32 XamContentDelete_entry(u32 user_index, mapped_void content_data_ptr,
+@@ -382,6 +425,17 @@ u32 XamContentDelete_entry(u32 user_index, mapped_void content_data_ptr,
    XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
  
    auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
@@ -28659,7 +28754,7 @@ index 57fd161..abd66ea 100644
    X_STATUS result = thread->Create();
    if (XFAILED(result)) {
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
-index fc46d86..f9e97b2 100644
+index fc46d86..06cede1 100644
 --- a/src/system/CMakeLists.txt
 +++ b/src/system/CMakeLists.txt
 @@ -8,6 +8,7 @@ set(REXSYSTEM_SOURCES
@@ -28670,6 +28765,14 @@ index fc46d86..f9e97b2 100644
      xevent.cpp
      xfile.cpp
      xmutant.cpp
+@@ -30,6 +31,7 @@ set(REXSYSTEM_SOURCES
+ 
+     # XAM services
+     xam/app_manager.cpp
++    xam/content_dir_ops.cpp
+     xam/content_manager.cpp
+     xam/user_profile.cpp
+ 
 diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
 index 697399c..b7f0478 100644
 --- a/src/system/kernel_state.cpp
@@ -28765,6 +28868,156 @@ index 6fbabd2..5fea3f5 100644
  void ObjectTable::PurgeAllObjects() {
    auto lock = global_critical_region_.Acquire();
    for (uint32_t slot = 0; slot < table_capacity_; slot++) {
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index d0c7bfd..6bd2af9 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -20,8 +20,11 @@
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/filesystem/devices/stfs_container_device.h>
+ #include <rex/string.h>
++#include <rex/cvar.h>
++#include <rex/logging.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/content_device.h>
++#include <rex/system/xam/content_dir_ops.h>
+ #include <rex/system/xam/content_manager.h>
+ #include <rex/system/xfile.h>
+ #include <rex/system/xobject.h>
+@@ -30,6 +33,16 @@ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++// DPRecomp #21 (2026-09-19): overwriting a save container removes its host
++// directory first; when another process holds a file inside it (real-time
++// antivirus on the freshly written save, an indexer) the removal fails for a
++// while. Retry within this budget before reporting the failure to the game.
++REXCVAR_DEFINE_INT32(content_delete_retry_ms, 3000, "Kernel",
++                     "How long XamContent delete/overwrite keeps retrying the removal of a "
++                     "content directory that another process holds open (ms; 0 = one attempt)")
++    .range(0, 30000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ static const char* kThumbnailFileName = "__thumbnail.png";
+ 
+ static const char* kGameUserContentDirName = "profile";
+@@ -188,6 +201,17 @@ bool ContentManager::ContentExists(uint64_t xuid, const XCONTENT_AGGREGATE_DATA&
+   return std::filesystem::exists(path);
+ }
+ 
++bool ContentManager::ContentDirectoryUsable(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
++  {
++    auto global_lock = global_critical_region_.Acquire();
++    if (IsContentOpen(data)) {
++      return false;
++    }
++  }
++  std::error_code ec;
++  return std::filesystem::is_directory(ResolvePackagePath(xuid, data), ec);
++}
++
+ X_RESULT ContentManager::WriteContentHeaderFile(uint64_t xuid, XCONTENT_AGGREGATE_DATA data,
+                                                 uint32_t license_mask) {
+   if (data.title_id == uint32_t(-1)) {
+@@ -256,7 +280,7 @@ X_RESULT ContentManager::ReadContentHeaderFile(const std::string_view file_name,
+ }
+ 
+ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_t xuid,
+-                                       const XCONTENT_AGGREGATE_DATA& data) {
++                                       const XCONTENT_AGGREGATE_DATA& data, bool reuse_directory) {
+   {
+     auto global_lock = global_critical_region_.Acquire();
+     if (open_packages_.count(string::string_key_case(root_name))) {
+@@ -265,10 +289,14 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_
+   }
+ 
+   auto package_path = ResolvePackagePath(xuid, data);
+-  if (std::filesystem::exists(package_path)) {
++  std::error_code ec;
++  const bool exists = std::filesystem::is_directory(package_path, ec);
++  if (exists && !reuse_directory) {
+     return X_ERROR_ALREADY_EXISTS;
+   }
+-  if (!std::filesystem::create_directories(package_path)) {
++  if (!exists && !std::filesystem::create_directories(package_path, ec)) {
++    REXSYS_WARN("XamContent create: cannot create '{}': {} ({})", package_path.string(),
++                ec.message(), ec.value());
+     return X_ERROR_ACCESS_DENIED;
+   }
+   auto package = ResolvePackage(root_name, xuid, data);
+@@ -369,16 +397,31 @@ X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_D
+ 
+   if (IsContentOpen(data)) {
+     // TODO(Gliniak): Get real error code for this case.
++    REXSYS_WARN("XamContent delete: '{}' is still open under another root",
++                std::string(data.file_name()));
+     return X_ERROR_ACCESS_DENIED;
+   }
+ 
+   auto package_path = ResolvePackagePath(xuid, data);
+-  std::error_code ec;
+-  auto dir_removed = std::filesystem::remove_all(package_path, ec);
+-  if (ec ||
+-      std::filesystem::status(package_path, ec).type() != std::filesystem::file_type::not_found) {
++  const bool had_directory = std::filesystem::is_directory(package_path);
++  const auto removal = RemoveDirWithRetry(
++      package_path, std::chrono::milliseconds(REXCVAR_GET(content_delete_retry_ms)),
++      std::chrono::milliseconds(50));
++  if (!removal.removed) {
++    // Which step failed and why, for the log (DPRecomp #21).
++    REXSYS_WARN("XamContent delete: '{}' still exists after {} attempt(s) over {} ms: {} ({}){}",
++                package_path.string(), removal.attempts, removal.waited.count(),
++                removal.last_error.message(), removal.last_error.value(),
++                removal.still_directory ? " - a file inside is held open by another process"
++                                        : "");
+     return X_ERROR_ACCESS_DENIED;
+   }
++  if (removal.attempts > 1) {
++    REXSYS_INFO("XamContent delete: '{}' removed after {} attempts ({} ms; last error {} ({}))",
++                package_path.string(), removal.attempts, removal.waited.count(),
++                removal.last_error.message(), removal.last_error.value());
++  }
++  const bool dir_removed = had_directory;
+ 
+   uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+   auto header_path =
+@@ -386,7 +429,7 @@ X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_D
+   std::error_code ec2;
+   bool header_removed = std::filesystem::remove(header_path, ec2);
+ 
+-  if (dir_removed > 0 || header_removed) {
++  if (dir_removed || header_removed) {
+     return X_ERROR_SUCCESS;
+   }
+   return X_ERROR_FILE_NOT_FOUND;
+@@ -426,17 +469,22 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+   auto header_path =
+       ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type);
+ 
+-  std::error_code ec;
+-  auto dir_removed = std::filesystem::remove_all(package_path, ec);
+-  if (ec ||
+-      std::filesystem::status(package_path, ec).type() != std::filesystem::file_type::not_found) {
++  const bool had_directory = std::filesystem::is_directory(package_path);
++  const auto removal = RemoveDirWithRetry(
++      package_path, std::chrono::milliseconds(REXCVAR_GET(content_delete_retry_ms)),
++      std::chrono::milliseconds(50));
++  if (!removal.removed) {
++    REXSYS_WARN("XamContent unmount+delete: '{}' still exists after {} attempt(s) over {} ms: {} ({})",
++                package_path.string(), removal.attempts, removal.waited.count(),
++                removal.last_error.message(), removal.last_error.value());
+     return X_ERROR_ACCESS_DENIED;
+   }
++  const bool dir_removed = had_directory;
+ 
+   std::error_code ec2;
+   bool header_removed = std::filesystem::remove(header_path, ec2);
+ 
+-  if (dir_removed > 0 || header_removed) {
++  if (dir_removed || header_removed) {
+     return X_ERROR_SUCCESS;
+   }
+   return X_ERROR_FILE_NOT_FOUND;
 diff --git a/src/system/xex_module.cpp b/src/system/xex_module.cpp
 index 0726516..3023d98 100644
 --- a/src/system/xex_module.cpp
@@ -29443,10 +29696,10 @@ index 2251429..cee7285 100644
        break;
      case SDL_EVENT_WINDOW_EXPOSED:
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bda2ad..1730946 100644
+index 7bda2ad..e399b79 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
-@@ -11,12 +11,15 @@ add_executable(unit_tests
+@@ -11,12 +11,17 @@ add_executable(unit_tests
      core/hash_test.cpp
      core/stream_test.cpp
      core/chrono_test.cpp
@@ -29456,13 +29709,15 @@ index 7bda2ad..1730946 100644
      ppc/stack_test.cpp
      system/guest_path_test.cpp
      system/achievement_manager_test.cpp
++    system/content_dir_ops_test.cpp
      system/function_dispatcher_test.cpp
      input/input_assignment_test.cpp
 +    input/state_filter_test.cpp
++    input/stick_mapping_test.cpp
      codegen/codegen_writer_test.cpp
      codegen/output_partition_test.cpp
      codegen/output_stamp_test.cpp
-@@ -36,6 +39,7 @@ target_include_directories(unit_tests PRIVATE
+@@ -36,6 +41,7 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime

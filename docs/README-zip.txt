@@ -1,4 +1,4 @@
-Deadly Premonition Recompilation 1.4.1  -  by the <<Little Bit>> team  -  MADE IN UKRAINE
+Deadly Premonition Recompilation 1.4.2  -  by the <<Little Bit>> team  -  MADE IN UKRAINE
 https://github.com/LittleBitUA/DPRecomp
 
 WHAT IS THIS
@@ -20,8 +20,11 @@ REGIONS
 SETTINGS
   PlayDeadlyPremonition.exe -> Settings: graphics (internal resolution, FSR 3,
   FXAA, 60 FPS), mouse (direct camera control, sensitivity), controls (every
-  key, DualSense adaptive triggers), advanced, debug. Inside the game: F4 =
-  live settings overlay, F3 = performance overlay, F7 = achievements.
+  key, DualSense adaptive triggers), advanced, debug, experimental. Inside the
+  game: F4 = live settings overlay, F3 = performance overlay, F7 = achievements.
+  The Experimental tab holds work in progress, all of it off by default: the
+  native D3D12 renderer preview there is NOT finished (white floor, bright
+  walls, PAL only) - leave it off to play, switch it on only to have a look.
 
 DEFAULT CONTROLS (full table and rebinding: launcher -> Settings -> Controls)
   WASD move, mouse look, wheel = weapon, E interact, R cancel/reload,

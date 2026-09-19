@@ -138,6 +138,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Mouse",             L"Миша"},
       {"Controls",          L"Керування"},
       {"Debug",             L"Діагностика"},
+      {"Experimental",      L"Експериментальне"},
       // Graphics cvars.
       {"Render Target Path",        L"Шлях рендеру"},
       {"ROV (recommended)",         L"ROV (рекомендовано)"},
@@ -300,6 +301,10 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Steam Overlay",             L"Оверлей Steam"},
       {"Button Prompts",            L"Підказки кнопок"},
       {"Texture Dump (textures\\dump)", L"Дамп текстур (textures\\dump)"},
+      {"Native Renderer (work in progress: broken picture, no floor; off = stock emulated path)",
+                                    L"Нативний рендер (у розробці: зламана картинка, без підлоги; вимк. = штатний емульований шлях)"},
+      {"Aim: per-axis mouse floor (fixes diagonal staircase)",
+                                    L"Приціл: поріг миші по кожній осі (лікує «сходинки» по діагоналі)"},
       {"Keyboard (keys from your bindings)", L"Клавіатура (ваші клавіші)"},
       {"Xbox (original icons)",     L"Xbox (рідні іконки)"},
       {"PlayStation - solid (DualShock / DualSense)", L"PlayStation - суцільні (DualShock / DualSense)"},
@@ -369,7 +374,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.4.1";
+constexpr const wchar_t* kLauncherVersion = L"v1.4.2";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -998,9 +1003,13 @@ enum CvarCategory {
   kCatMouse = 2,
   kCatControls = 3,
   kCatDebug = 4,
+  // 2026-09-19: work-in-progress features, every one off by default. What
+  // lives here can break the picture or the game; the stock path is one
+  // toggle away.
+  kCatExperimental = 5,
   // Auto-managed cvars not surfaced in the Settings UI. Saved/loaded
   // alongside the rest, but never get a label or control built for them.
-  kCatHidden = 5,
+  kCatHidden = 6,
 };
 
 struct CvarRow {
@@ -1199,6 +1208,12 @@ void DefineCvars() {
            {"xinput", "XInput (Xbox controllers only)"}});
   // v1.1.1: texture dump / replacement (rexglue-sdk texture/replacement.cpp).
   AddCvar("texture_dump", "Texture Dump (textures\\dump)", kCatAdvanced, K::kBool, "false");
+  // 2026-09-18: experimental native renderer (DPRecomp/src/native). Off = the
+  // Xenos emulator exactly as before. 2026-09-19: moved to the Experimental
+  // tab, off by default, released as a preview only (picture incomplete).
+  AddCvar("dp_native_render",
+          "Native Renderer (work in progress: broken picture, no floor; off = stock emulated path)",
+          kCatExperimental, K::kBool, "false");
   AddCvar("texture_replacement", "", kCatHidden, K::kBool, "true");
   AddCvar("texture_path", "", kCatHidden, K::kString, "");
   AddCvar("hid_mappings_file", "Controller Mappings (SDL)", kCatAdvanced,
@@ -1278,6 +1293,10 @@ void DefineCvars() {
   AddCvar("mnk_deadzone_floor", "Deadzone Floor (stick units)",
           kCatMouse, K::kInt, "8689", {}, 0, 32767);
   AddCvar("mnk_invert_y", "Invert Mouse Y", kCatMouse, K::kBool, "false");
+  // DPRecomp #30 (2026-09-19): the aim routine reads the stick per axis; the
+  // vector floor made diagonal aim staircase. On = floor added per axis while aiming.
+  AddCvar("mnk_aim_axis_floor", "Aim: per-axis mouse floor (fixes diagonal staircase)",
+          kCatMouse, K::kBool, "true");
   // v1.1: stick-shake QTEs on a keyboard - hold A + D to oscillate the stick.
   AddCvar("mnk_key_stick_ramp_ms", "Key Stick Ramp (ms)", kCatMouse, K::kFloat, "60.0", {}, 0.0, 300.0);
   AddCvar("mnk_auto_shake", "Auto-shake (hold A + D)", kCatMouse, K::kBool, "false");
@@ -2741,7 +2760,7 @@ constexpr int kSliderIdStart = 10000;
 // skip the round-trip and not loop.
 static bool g_slider_syncing = false;
 
-constexpr int kCatCount = 5;
+constexpr int kCatCount = 6;
 
 struct CtrlEntry {
   HWND label = nullptr;
@@ -2979,7 +2998,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           (WNDPROC)SetWindowLongPtrW(tab, GWLP_WNDPROC, (LONG_PTR)TabSubclassProc);
       TCITEMW ti = {};
       ti.mask = TCIF_TEXT;
-      const char* tab_names[] = {"Graphics", "Advanced", "Mouse", "Controls", "Debug"};
+      const char* tab_names[] = {"Graphics", "Advanced", "Mouse", "Controls", "Debug", "Experimental"};
       std::wstring tab_titles[kCatCount];
       for (int i = 0; i < kCatCount; ++i) {
         tab_titles[i] = TrW(tab_names[i]);

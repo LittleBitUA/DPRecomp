@@ -1,0 +1,988 @@
+diff --git a/XenosRecomp/dxc_compiler.cpp b/XenosRecomp/dxc_compiler.cpp
+index 3bf37ba..cdb76e6 100644
+--- a/XenosRecomp/dxc_compiler.cpp
++++ b/XenosRecomp/dxc_compiler.cpp
+@@ -13,6 +13,9 @@ DxcCompiler::~DxcCompiler()
+ 
+ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv)
+ {
++    // dpxr-fork: env XENOS_DXC_ERRORS=1 re-enables error reporting for a
++    // single-shader debug run (see the note in the failure path below).
++    static const bool dumpErrors = getenv("XENOS_DXC_ERRORS") != nullptr;
+     DxcBuffer source{};
+     source.Ptr = shaderSource.c_str();
+     source.Size = shaderSource.size();
+@@ -77,15 +80,20 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
+ 
+         if (FAILED(status))
+         {
+-            if (result->HasOutput(DXC_OUT_ERRORS))
++            // dpxr-fork: fetching the error blob out of a FAILED IDxcResult
++            // left dxcompiler's per-thread allocator in a state where every
++            // later allocation in this process failed with "bad allocation" -
++            // one shader that did not compile poisoned the whole batch. The
++            // diagnostics are not worth that; the caller reports the failure.
++            if (dumpErrors && result->HasOutput(DXC_OUT_ERRORS))
+             {
+                 IDxcBlobUtf8* errors = nullptr;
+                 hr = result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+-                assert(SUCCEEDED(hr) && errors != nullptr);
+-
+-                fputs(errors->GetStringPointer(), stderr);
+-
+-                errors->Release();
++                if (SUCCEEDED(hr) && errors != nullptr)
++                {
++                    fputs(errors->GetStringPointer(), stderr);
++                    errors->Release();
++                }
+             }
+         }
+         else
+diff --git a/XenosRecomp/main.cpp b/XenosRecomp/main.cpp
+index e1aba4a..8f849a6 100644
+--- a/XenosRecomp/main.cpp
++++ b/XenosRecomp/main.cpp
+@@ -31,8 +31,19 @@ struct RecompiledShader
+     // sees shaders through PM4 IM_LOAD (bare microcode in guest memory),
+     // never the full container, so cache lookup must key on ucode bytes.
+     XXH64_hash_t ucodeHash = 0;
++    // dpxr-fork: FNV-1a over the RAW big-endian microcode. The DPXR runtime now
++    // reads the microcode straight out of the shader object's physical
++    // allocation (FXeVertexShader::BaseAddress) at bind time, so the lookup key
++    // is the bytes exactly as they sit in guest memory - no normalization, and
++    // the same trivial hash on both sides so there is no library to match.
++    uint64_t rawUcodeHash = 0;
++    // dpxr-fork: what each vertex fetch slot reads, taken from the microcode
++    // itself. Without this the runtime would have to guess which bound stream
++    // feeds which fetch slot; with it the mapping is derived, not assumed.
++    std::vector<ShaderRecompiler::VertexFetchDesc> vertexFetches;
+     bool isPixelShader = false;
+     bool failed = false;
++    std::string sourceFile;   // dpxr-fork: diagnostics
+ };
+ 
+ // dpxr-fork: ucode section range per shader.h layout (verified against
+@@ -54,16 +65,35 @@ static size_t ucodeSize(const uint8_t* container)
+ // validation and still crash the recompiler on wild reflection offsets.
+ // An access violation in one shader must not kill the whole batch. This
+ // helper holds no C++ objects with destructors, so __try is legal here.
++static bool recompileCatching(ShaderRecompiler& recompiler,
++                              const uint8_t* data,
++                              const std::string_view& include)
++{
++    try
++    {
++        recompiler.recompile(data, include);
++        return true;
++    }
++    catch (const std::exception& e)
++    {
++        fmt::println("  C++ exception: {} (emitted {} bytes, tail: {})", e.what(), recompiler.out.size(),
++            recompiler.out.size() > 200 ? recompiler.out.substr(recompiler.out.size() - 200) : recompiler.out);
++        return false;
++    }
++}
++
+ static bool recompileGuarded(ShaderRecompiler& recompiler,
+                              const uint8_t* data,
+-                             const std::string_view& include)
++                             const std::string_view& include,
++                             uint32_t& exceptionCode)
+ {
+     __try
+     {
+-        recompiler.recompile(data, include);
+-        return true;
++        // dpxr-fork: __except also traps C++ exceptions (code 0xE06D7363) on
++        // Windows, which hid real diagnostics; report those separately.
++        return recompileCatching(recompiler, data, include);
+     }
+-    __except (EXCEPTION_EXECUTE_HANDLER)
++    __except (exceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
+     {
+         return false;
+     }
+@@ -98,6 +128,18 @@ static XXH64_hash_t normalizedUcodeHash(const uint8_t* ucode, size_t size)
+     return XXH3_64bits(le.data(), ndw * 4);
+ }
+ 
++// dpxr-fork: raw microcode hash, byte for byte as it lies in guest memory.
++static uint64_t rawUcodeFnv(const uint8_t* ucode, size_t size)
++{
++    uint64_t h = 1469598103934665603ull;
++    for (size_t i = 0; i < size; i++)
++    {
++        h ^= ucode[i];
++        h *= 1099511628211ull;
++    }
++    return h;
++}
++
+ int main(int argc, char** argv)
+ {
+ #ifndef XENOS_RECOMP_INPUT
+@@ -178,7 +220,7 @@ int main(int argc, char** argv)
+                     shaderContainer->field20 == 0 &&
+                     virtualSize >= sizeof(ShaderContainer) &&
+                     dataSize <= 0x100000 &&
+-                    ctOff >= 4 && ctOff + 8 <= dataSize &&
++                    (ctOff == 0 || (ctOff >= 4 && ctOff + 8 <= dataSize)) &&
+                     (dtOff == 0 || dtOff < dataSize) &&
+                     shOff >= sizeof(ShaderContainer) &&
+                     shOff + sizeof(Shader) <= dataSize &&
+@@ -202,9 +244,13 @@ int main(int argc, char** argv)
+                         const size_t uStart =
+                             i + virtualSize + sh->physicalOffset;
+                         const size_t uAvail = fileSize - uStart;
+-                        shader.first->second.ucodeHash = normalizedUcodeHash(
+-                            fileData.get() + uStart,
+-                            sh->size < uAvail ? sh->size : uAvail);
++                        const size_t uBytes = sh->size < uAvail ? sh->size : uAvail;
++                        shader.first->second.ucodeHash =
++                            normalizedUcodeHash(fileData.get() + uStart, uBytes);
++                        shader.first->second.rawUcodeHash =
++                            rawUcodeFnv(fileData.get() + uStart, uBytes);
++                        shader.first->second.sourceFile =
++                            file.path().filename().string() + "@" + std::to_string(i);
+                         foundAny = true;
+                     }
+ 
+@@ -220,58 +266,131 @@ int main(int argc, char** argv)
+                 files.emplace_back(std::move(fileData));
+         }
+ 
+-        std::atomic<uint32_t> progress = 0;
+-
+-        std::for_each(std::execution::par_unseq, shaders.begin(), shaders.end(), [&](auto& hashShaderPair)
++        // dpxr-fork: DXC and the microcode recompiler must not share a thread.
++        //
++        // dxcompiler.dll leaves per-thread state behind that makes every later
++        // allocation on that thread fail with "bad allocation" (and sometimes
++        // an access violation). One DXC call therefore poisoned the rest of the
++        // batch: 47 of 68 shaders were reported as recompiler crashes even
++        // though each of them recompiles perfectly on its own - proven by
++        // XENOS_NO_DXC=1, which drops the failures to 2.
++        //
++        // So the work is split: translate a chunk of shaders to HLSL with no
++        // DXC anywhere, then hand the finished HLSL to short-lived DXC threads
++        // which die afterwards and take their poisoned state with them. The
++        // main thread never calls DXC at all, so assembling the cache is safe.
++        std::vector<std::pair<XXH64_hash_t, RecompiledShader*>> order;
++        order.reserve(shaders.size());
++        for (auto& kv : shaders)
++            order.emplace_back(kv.first, &kv.second);
++
++        const bool skipDxc = getenv("XENOS_NO_DXC") != nullptr;
++
++        // The two phases are kept completely apart, and the HLSL goes through
++        // disk rather than memory: chunking them still left DXC poisoning later
++        // recompiles (8 failures with XENOS_NO_DXC=1, 27 without), and holding
++        // every shader's HLSL in RAM does not scale to a full game's worth.
++        const std::filesystem::path hlslDir =
++            std::filesystem::temp_directory_path() / "dpxr_hlsl";
++        std::error_code ec;
++        std::filesystem::remove_all(hlslDir, ec);
++        std::filesystem::create_directories(hlslDir, ec);
++
++        auto hlslPath = [&](size_t i) { return (hlslDir / fmt::format("{}.hlsl", i)).string(); };
++
++        // Phase 1 - microcode to HLSL. Parallel, DXC-free. A shader that still
++        // manages to crash is recorded and skipped; its entry keeps its hash
++        // with zero-size blobs so the runtime logs the miss.
++        std::vector<size_t> indices(order.size());
++        for (size_t i = 0; i < order.size(); i++)
++            indices[i] = i;
++
++        std::atomic<size_t> translated{ 0 };
++        std::for_each(std::execution::par, indices.begin(), indices.end(), [&](size_t i)
+             {
+-                auto& shader = hashShaderPair.second;
+-
+-                // dpxr-fork: never let one bad shader kill the batch.
+-                // Failures are recorded (hash logged at the end) and the
+-                // entry is emitted with zero-size blobs so the runtime can
+-                // fall back and log the miss. (ucodeHash computed at scan.)
+-                thread_local ShaderRecompiler recompiler;
+-                recompiler = {};
+-                if (!recompileGuarded(recompiler, shader.data, include))
++                auto& shader = *order[i].second;
++                ShaderRecompiler recompiler;
++                uint32_t exceptionCode = 0;
++                if (!recompileGuarded(recompiler, shader.data, include, exceptionCode))
+                 {
+-                    fmt::println("FAILED (recompile/SEH) 0x{:016X}", hashShaderPair.first);
+                     shader.failed = true;
+                     return;
+                 }
+-
+                 shader.specConstantsMask = recompiler.specConstantsMask;
+                 shader.isPixelShader = recompiler.isPixelShader;
++                shader.vertexFetches = std::move(recompiler.vertexFetches);
++                writeAllBytes(hlslPath(i).c_str(), recompiler.out.data(), recompiler.out.size());
++                ++translated;
++            });
+ 
+-                thread_local DxcCompiler dxcCompiler;
++        for (size_t i = 0; i < order.size(); i++)
++        {
++            if (order[i].second->failed)
++                fmt::println("FAILED (recompile) 0x{:016X} src={}", order[i].first,
++                    order[i].second->sourceFile);
++        }
++        fmt::println("Translated {} / {} shaders to HLSL, compiling...", translated.load(),
++            order.size());
+ 
+ #ifdef XENOS_RECOMP_DXIL
+-                shader.dxil = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, recompiler.specConstantsMask != 0, false);
+-                if (shader.dxil == nullptr ||
+-                    *(reinterpret_cast<uint32_t *>(shader.dxil->GetBufferPointer()) + 1) == 0)
+-                {
+-                    fmt::println("FAILED (dxc/dxil) 0x{:016X} ucode=0x{:016X} {}", hashShaderPair.first,
+-                        shader.ucodeHash, recompiler.isPixelShader ? "ps" : "vs");
+-                    shader.failed = true;
+-                    if (shader.dxil) { shader.dxil->Release(); shader.dxil = nullptr; }
+-                    return;
+-                }
+-#endif
++        if (!skipDxc)
++        {
++            const unsigned workers =
++                (std::max)(1u, (std::min)(8u, std::thread::hardware_concurrency()));
++            std::atomic<size_t> next{ 0 };
++            std::vector<std::thread> threads;
++            for (unsigned w = 0; w < workers; w++)
++            {
++                threads.emplace_back([&]
++                    {
++                        DxcCompiler dxcCompiler;
++                        for (;;)
++                        {
++                            const size_t i = next.fetch_add(1);
++                            if (i >= order.size())
++                                break;
++                            auto& shader = *order[i].second;
++                            if (shader.failed)
++                                continue;
++                            size_t size = 0;
++                            auto data = readAllBytes(hlslPath(i).c_str(), size);
++                            if (data == nullptr || size == 0)
++                            {
++                                shader.failed = true;
++                                continue;
++                            }
++                            std::string source(reinterpret_cast<const char*>(data.get()), size);
++                            shader.dxil = dxcCompiler.compile(source, shader.isPixelShader,
++                                shader.specConstantsMask != 0, false);
++                            if (shader.dxil == nullptr ||
++                                *(reinterpret_cast<uint32_t*>(shader.dxil->GetBufferPointer()) + 1) == 0)
++                            {
++                                shader.failed = true;
++                                if (shader.dxil) { shader.dxil->Release(); shader.dxil = nullptr; }
++                            }
++                        }
++                    });
++            }
++            for (auto& t : threads)
++                t.join();
+ 
+-                // dpxr-fork: SPIR-V disabled — DPXR targets D3D12 only and
+-                // the SPIR-V path's shared-constant defines are untested.
+-#ifdef XENOS_RECOMP_SPIRV
+-                IDxcBlob* spirv = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
+-                if (spirv != nullptr)
++            for (size_t i = 0; i < order.size(); i++)
++            {
++                auto& shader = *order[i].second;
++                if (shader.failed && std::filesystem::exists(hlslPath(i)))
+                 {
+-                    smolv::Encode(spirv->GetBufferPointer(), spirv->GetBufferSize(), shader.spirv, smolv::kEncodeFlagStripDebugInfo);
+-                    spirv->Release();
++                    fmt::println("FAILED (dxc/dxil) 0x{:016X} ucode=0x{:016X} {} src={}",
++                        order[i].first, shader.ucodeHash, shader.isPixelShader ? "ps" : "vs",
++                        shader.sourceFile);
++                    // Keep the HLSL of every failed shader for offline dxc runs.
++                    std::filesystem::copy_file(hlslPath(i),
++                        fmt::format("failed_{:016X}.hlsl", shader.ucodeHash),
++                        std::filesystem::copy_options::overwrite_existing, ec);
+                 }
++            }
++        }
+ #endif
+-
+-                size_t currentProgress = ++progress;
+-                if ((currentProgress % 10) == 0 || (currentProgress == shaders.size() - 1))
+-                    fmt::println("Recompiling shaders... {}%", currentProgress / float(shaders.size()) * 100.0f);
+-            });
++        std::filesystem::remove_all(hlslDir, ec);
+ 
+         fmt::println("Creating shader cache...");
+ 
+@@ -291,6 +410,24 @@ int main(int argc, char** argv)
+         // dpxr-fork: entry gains ucodeHash + isPixelShader + vertex element
+         // table range; failed shaders keep their hashes with zero-size
+         // blobs (runtime falls back).
++        // dpxr-fork: binary index the DPXR runtime loads directly - keyed by the
++        // raw microcode hash, which is what the runtime can compute at bind time
++        // from the shader object's physical allocation.
++        struct IdxEntry
++        {
++            uint64_t containerHash;
++            uint64_t rawUcodeHash;
++            uint32_t dxilOffset;
++            uint32_t dxilSize;
++            uint32_t specConstantsMask;
++            uint32_t flags;   // bit0 = pixel shader
++            // dpxr-fork: range inside the fetch table below.
++            uint32_t fetchOffset;
++            uint32_t fetchCount;
++        };
++        std::vector<IdxEntry> idx;
++        std::vector<ShaderRecompiler::VertexFetchDesc> fetchTable;
++
+         size_t failCount = 0;
+         for (auto& [hash, shader] : shaders)
+         {
+@@ -316,6 +453,14 @@ int main(int argc, char** argv)
+ 
+             if (shader.dxil != nullptr)
+             {
++                const uint32_t fetchOffset = uint32_t(fetchTable.size());
++                fetchTable.insert(fetchTable.end(), shader.vertexFetches.begin(),
++                    shader.vertexFetches.end());
++                idx.push_back({ hash, shader.rawUcodeHash, uint32_t(dxil.size()),
++                    uint32_t(shader.dxil->GetBufferSize()), shader.specConstantsMask,
++                    shader.isPixelShader ? 1u : 0u,
++                    fetchOffset, uint32_t(shader.vertexFetches.size()) });
++
+                 dxil.insert(dxil.end(), reinterpret_cast<uint8_t *>(shader.dxil->GetBufferPointer()),
+                     reinterpret_cast<uint8_t *>(shader.dxil->GetBufferPointer()) + shader.dxil->GetBufferSize());
+             }
+@@ -340,6 +485,29 @@ int main(int argc, char** argv)
+             std::string binPath = std::string(output) + ".bin";
+             writeAllBytes(binPath.c_str(), dxil.data(), dxil.size());
+             fmt::println("DXIL sidecar: {} ({} bytes)", binPath, dxil.size());
++
++            // dpxr-fork: format 2 adds the per-shader vertex fetch table. The
++            // magic is bumped so an old runtime refuses a new file outright
++            // instead of reading entries at the wrong stride.
++            std::vector<uint8_t> idxFile;
++            const char magic[8] = { 'D','P','X','R','S','H','D','2' };
++            const uint32_t count = uint32_t(idx.size());
++            const uint32_t fetchCount = uint32_t(fetchTable.size());
++            idxFile.insert(idxFile.end(), magic, magic + 8);
++            idxFile.insert(idxFile.end(), reinterpret_cast<const uint8_t*>(&count),
++                reinterpret_cast<const uint8_t*>(&count) + 4);
++            idxFile.insert(idxFile.end(), reinterpret_cast<const uint8_t*>(&fetchCount),
++                reinterpret_cast<const uint8_t*>(&fetchCount) + 4);
++            idxFile.insert(idxFile.end(), reinterpret_cast<const uint8_t*>(idx.data()),
++                reinterpret_cast<const uint8_t*>(idx.data()) + idx.size() * sizeof(IdxEntry));
++            idxFile.insert(idxFile.end(), reinterpret_cast<const uint8_t*>(fetchTable.data()),
++                reinterpret_cast<const uint8_t*>(fetchTable.data()) +
++                    fetchTable.size() * sizeof(ShaderRecompiler::VertexFetchDesc));
++
++            std::string idxPath = std::string(output) + ".idx";
++            writeAllBytes(idxPath.c_str(), idxFile.data(), idxFile.size());
++            fmt::println("Shader index: {} ({} entries, {} fetch slots)", idxPath, count,
++                fetchCount);
+         }
+         f.println("const size_t g_dxilCacheSize = {};", dxil.size());
+ 
+diff --git a/XenosRecomp/pch.h b/XenosRecomp/pch.h
+index c9592ad..958a478 100644
+--- a/XenosRecomp/pch.h
++++ b/XenosRecomp/pch.h
+@@ -9,6 +9,7 @@
+ #include <bit>
+ #include <cassert>
+ #include <cstdint>
++#include <algorithm>
+ #include <execution>
+ #include <filesystem>
+ #include <map>
+@@ -16,6 +17,8 @@
+ #include <smolv.h>
+ #include <fmt/core.h>
+ #include <string>
++#include <thread>
++#include <vector>
+ #include <unordered_map>
+ #include <xxhash.h>
+ #include <zstd.h>
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index b279ee4..919d6c0 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -48,6 +48,10 @@ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
+ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
+ TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
+ SamplerState g_SamplerDescriptorHeap[] : register(s0, space3);
++// dpxr-fork: Downpour's XDK video-decode shaders fetch from 1D textures. Same
++// descriptor heap, same slot indices - only the view type differs, so the
++// index tables are shared with the 2D ones.
++Texture1D<float4> g_Texture1DDescriptorHeap[] : register(t0, space6);
+ 
+ // dpxr-fork: vertex shaders cannot use gradient sampling.
+ #ifdef DPXR_STAGE_VS
+@@ -152,6 +156,11 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
+     return DPXR_SAMPLE(g_Texture3DDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
+ }
+ 
++float4 tfetch1D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float texCoord)
++{
++    return DPXR_SAMPLE(g_Texture1DDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
++}
++
+ struct CubeMapData
+ {
+     float3 cubeMapDirections[2];
+@@ -163,10 +172,18 @@ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, flo
+     return DPXR_SAMPLE(g_TextureCubeDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
+ }
+ 
+-float4 tfetchR11G11B10(uint enable, uint4 value)
++float4 tfetchR11G11B10(uint mode, uint4 value)
+ {
+-    // dpxr-fork: runtime-uniform gate (was a spec constant).
+-    if (enable != 0)
++    // dpxr-fork: `mode` is the guest's own EVertexElementType for this element
++    // (Development/Src/Engine/Inc/RHI.h:245), not a boolean gate. UnleashedRecomp
++    // only ever needs "float bits" or "packed 11/11/10", because those are the
++    // only normal encodings Sonic uses; Downpour also stores normals and tangents
++    // as UBYTE4 and as SHORT2, so carrying the type through loses nothing and
++    // lets the shader decode exactly what the declaration said.
++    //
++    // Anything that lives in a single dword arrives in value.x already in native
++    // order, because the vertex upload byte-swaps per dword.
++    if (mode == 12)        // VET_Pos3N -> D3DDECLTYPE_HEND3N, signed 11/11/10
+     {
+         return float4(
+             (value.x & 0x00000400 ? -1.0 : 0.0) + ((value.x & 0x3FF) / 1024.0),
+@@ -174,10 +191,32 @@ float4 tfetchR11G11B10(uint enable, uint4 value)
+             (value.x & 0x80000000 ? -1.0 : 0.0) + (((value.x >> 22) & 0x1FF) / 512.0),
+             0.0);
+     }
+-    else
++    else if (mode == 5 || mode == 6)   // VET_PackedNormal / VET_UByte4 -> UBYTE4
++    {
++        return float4(value);
++    }
++    else if (mode == 7 || mode == 8)   // VET_UByte4N / VET_Color -> normalized
++    {
++        return float4(value) / 255.0;
++    }
++    else if (mode == 9 || mode == 10)  // VET_Short2 / VET_Short2N
++    {
++        float2 s = float2(asint(value.x << 16) >> 16, asint(value.x) >> 16);
++        return float4(mode == 10 ? s / 32767.0 : s, 0.0, 0.0);
++    }
++    else if (mode == 20)               // dp1: FLOAT16_4 as R16G16B16A16_UINT lanes, halves pair-swapped by the dword swap
++    {
++        return float4(f16tof32(value.y), f16tof32(value.x), f16tof32(value.w), f16tof32(value.z));
++    }
++    else if (mode == 21)               // dp1: FLOAT16_2 as R16G16_UINT lanes
+     {
+-        return asfloat(value);
++        return float4(f16tof32(value.y), f16tof32(value.x), 0.0, 0.0);
+     }
++    else if (mode == 11)               // VET_Half2 -> FLOAT16_2
++    {
++        return float4(f16tof32(value.x & 0xFFFF), f16tof32(value.x >> 16), 0.0, 0.0);
++    }
++    return asfloat(value);             // VET_Float1..4, bound as UINT
+ }
+ 
+ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
+@@ -185,6 +224,55 @@ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
+     return (swappedTexcoords & (1ull << semanticIndex)) != 0 ? value.yxwz : value;
+ }
+ 
++// dpxr-fork: the SAME transposition tfetchTexcoord undoes, for the semantics
++// nothing else covered.
++//
++// A vertex buffer is byte-swapped a DWORD at a time, so two 16-bit fields
++// sharing one dword come out with their halves exchanged. TEXCOORD has had the
++// fix above since day one and NORMAL/TANGENT/BINORMAL get it through
++// tfetchR11G11B10 - but Silent Hill: Downpour also declares POSITION as
++// VET_Short2 and COLOR as VET_Half2 (measured: three distinct declarations with
++// a transposed POSITION), and those reached the rasteriser transposed. A
++// transposed position puts the vertex somewhere else entirely: triangles
++// fanning out of a wrong point, and flat geometry reading mirrored.
++//
++// Sonic Unleashed never hits this - its swappedTexcoords covers TEXCOORD only
++// because no other semantic in that game is a 16-bit pair - so there was no
++// reference behaviour to copy here, only a reference MECHANISM.
++//
++// The mask is a runtime constant. With it zero this is the identity, so a build
++// carrying these calls behaves exactly as one without them until the host says
++// otherwise.
++// NOTE the swizzle is .yxzw, NOT the .yxwz above. tfetchTexcoord swaps BOTH
++// pairs because Unleashed's list includes the four-component SHORT4 / FLOAT16_4,
++// where .zw is a second dword that was transposed the same way. UE3 has no such
++// type: VET_Short2, VET_Short2N and VET_Half2 are the only 16-bit pairs it can
++// declare, and they are all TWO components - so .zw is not data at all, it is
++// the (0,1) the input assembler fills in. Swapping that pair would hand a
++// position w=0 instead of w=1 and kill the transform outright, and a colour
++// alpha=0.
++float4 tfetchSwap16(uint swapped, float4 value, uint semanticIndex)
++{
++    return (swapped & (1ull << semanticIndex)) != 0 ? value.yxzw : value;
++}
++
++// dp1: BLENDINDICES / BLENDWEIGHT arrive as uint4 lanes of an 8-bit-per-lane
++// host format after the per-dword byte swap. mode 1 = UBYTE4 (memory order
++// x,y,z,w comes out reversed), mode 2 = D3DCOLOR (memory A,R,G,B; canonical
++// x,y,z,w = R,G,B,A). 0 = identity.
++float4 tfetchSwapBytes(uint mode, float4 value)
++{
++    if (mode == 1) return value.wzyx;
++    if (mode == 2) return value.zyxw;
++    return value;
++}
++uint4 tfetchSwapBytes(uint mode, uint4 value)
++{
++    if (mode == 1) return value.wzyx;
++    if (mode == 2) return value.zyxw;
++    return value;
++}
++
+ float4 cube(float4 value, inout CubeMapData cubeMapData)
+ {
+     uint index = cubeMapData.cubeMapIndex;
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 81ef3c5..6be2c89 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -16,8 +16,8 @@ static constexpr char SWIZZLES[] =
+ static constexpr const char* USAGE_TYPES[] =
+ {
+     "float4", // POSITION
+-    "float4", // BLENDWEIGHT
+-    "uint4", // BLENDINDICES
++    "uint4", // BLENDWEIGHT (dp1: UBYTE4 = integer percent 0..100, the bone matrices carry the 0.01)
++    "float4", // BLENDINDICES (dp1: D3DCOLOR = normalized; the ucode multiplies by 255 itself)
+     "uint4", // NORMAL
+     "float4", // PSIZE
+     "float4", // TEXCOORD
+@@ -161,6 +161,8 @@ void ShaderRecompiler::printDstSwizzle01(uint32_t dstRegister, uint32_t dstSwizz
+ 
+ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t address)
+ {
++    (void)address;
++
+     if (instr.isPredicated)
+     {
+         indent();
+@@ -177,8 +179,19 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+ 
+     out += " = ";
+ 
++    // Upstream behaviour, restored: a vertex fetch reads the host input the
++    // container's vertex element table names for this fetch address. A miss
++    // means the table does not describe this shader's microcode, which is worth
++    // failing loudly over rather than emitting something that compiles and
++    // reads the wrong data.
+     auto findResult = vertexElements.find(address);
+-    assert(findResult != vertexElements.end());
++    if (findResult == vertexElements.end())
++    {
++        ++unresolvedVertexFetches;
++        throw std::runtime_error(fmt::format(
++            "vertex fetch at address {} has no matching vertex element ({} in the table)",
++            address, vertexElements.size()));
++    }
+ 
+     switch (findResult->second.usage)
+     {
+@@ -193,6 +206,24 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+     case DeclUsage::TexCoord:
+         print("tfetchTexcoord(g_SwappedTexcoords, ");
+         break;
++
++    // dpxr-fork: see tfetchSwap16 in shader_common.h. Identity while the host
++    // leaves the mask at zero, so this is inert until it is asked for.
++    case DeclUsage::Position:
++        print("tfetchSwap16(g_SwappedPosition, ");
++        break;
++
++    case DeclUsage::Color:
++        print("tfetchSwap16(g_SwappedColor, ");
++        break;
++
++    // dp1: 8-bit lanes come out of the dword swap reordered; the host says how.
++    case DeclUsage::BlendIndices:
++        print("float4(tfetchSwapBytes(g_SwappedBlend & 3u, ");
++        break;
++    case DeclUsage::BlendWeight:
++        print("float4(tfetchSwapBytes((g_SwappedBlend >> 2) & 3u, ");
++        break;
+     }
+ 
+     print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
+@@ -206,8 +237,15 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+         break;
+ 
+     case DeclUsage::TexCoord:
++    case DeclUsage::Position:
++    case DeclUsage::Color:
+         print(", {})", uint32_t(findResult->second.usageIndex));
+         break;
++
++    case DeclUsage::BlendIndices:
++    case DeclUsage::BlendWeight:
++        out += "))";
++        break;
+     }
+ 
+     out += '.';
+@@ -482,11 +520,20 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                         regFormatted = constantName;
+                     }
+                 }
+-                else
++                else if (definedFloat4s.count(reg) != 0 && !instr.const0Relative && !instr.const1Relative)
+                 {
+-                    assert(!instr.const0Relative && !instr.const1Relative);
++                    // Baked by the container's definition table.
+                     regFormatted = fmt::format("c{}", reg);
+                 }
++                else
++                {
++                    // dpxr-fork: no reflection -> read the live constant bank by
++                    // register number. This also makes relative addressing work
++                    // (c[a0 + N]), which the reflection-less path used to assert
++                    // away and then emit an undeclared identifier for.
++                    regFormatted = fmt::format("XE_CONST({}{})", reg,
++                        instr.const0Relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
++                }
+             }
+ 
+             std::string result;
+@@ -1105,14 +1152,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
+ 
+     assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
+-    assert(shaderContainer->constantTableOffset != NULL);
+ 
+     out += include;
+     out += '\n';
+ 
+     isPixelShader = (shaderContainer->flags & 0x1) == 0;
+ 
+-    const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
++    // dpxr-fork: Downpour's shaders carry no reflection data - every container
++    // in GlobalShaderCache-Xbox360.bin has constantTableOffset == 0. That is
++    // fine: constants are then referenced purely by register number, which the
++    // full-range c#/s#/b#/i# fallbacks emitted below already cover. The old
++    // code asserted (i.e. silently read garbage in release) and rejected all
++    // 73 of them.
++    alignas(4) static const uint8_t kEmptyConstantTable[sizeof(ConstantTableContainer)]{};
++    const auto constantTableContainer = shaderContainer->constantTableOffset != 0
++        ? reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset)
++        : reinterpret_cast<const ConstantTableContainer*>(kEmptyConstantTable);
+     constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
+ 
+     out += "#ifdef __spirv__\n\n";
+@@ -1165,8 +1220,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     constantName, shaderName, constantInfo->registerIndex * 16);
+             }
+             
+-            for (uint16_t j = 0; j < constantInfo->registerCount; j++)
+-                float4Constants.emplace(constantInfo->registerIndex + j, constantInfo);
++            // dpxr-fork: named constants are no longer declared (the whole
++            // float4 register bank is, see the cbuffer emission below), so the
++            // ALU must not reference them by name.
+ 
+             break;
+         }
+@@ -1208,8 +1264,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     out += "\n#else\n\n";
+ 
++    // dpxr-fork: the whole float4 register bank, not reflection-named
++    // constants. Downpour compiles its shaders without a constant table, so
++    // there is nothing to name - the microcode addresses registers directly,
++    // including relatively (c[a0 + N]).
+     println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
+     out += "{\n";
++    println("\tfloat4 g_{}Constants[256] : packoffset(c0);", isPixelShader ? "Pixel" : "Vertex");
++    out += "};\n";
++    println("#define XE_CONST(INDEX) g_{}Constants[min(uint(INDEX), 255u)]\n",
++        isPixelShader ? "Pixel" : "Vertex");
++
++    out += "#if 0   // reflection-named constants (unused: no constant table)\n";
++    out += "cbuffer UnusedNamedConstants\n";
++    out += "{\n";
+ 
+     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
+     {
+@@ -1235,7 +1303,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         }
+     }
+ 
+-    out += "};\n\n";
++    out += "};\n";
++    out += "#endif\n\n";
+ 
+     // dpxr-fork: fixed full-range shared-constants layout (704 bytes).
+     // DP shaders reference fetch slots (s16+), bool registers by raw bank
+@@ -1262,6 +1331,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     out += "\tfloat g_AlphaThreshold : packoffset(c42.w);\n";
+     out += "\tuint g_AlphaTest : packoffset(c43.x);\n";
+     out += "\tuint g_R11G11B10Normal : packoffset(c43.y);\n";
++    // dpxr-fork: c43.z/.w were the two padding words that took the struct to its
++    // 704 bytes, so these cost nothing and the byte-for-byte verified layout is
++    // unchanged. See tfetchSwap16 in shader_common.h.
++    out += "\tuint g_SwappedPosition : packoffset(c43.z);\n";
++    out += "\tuint g_SwappedColor : packoffset(c43.w);\n";
++    // dp1: BLENDINDICES / BLENDWEIGHT byte-order mode (tfetchSwapBytes), c44 = bytes 704..719.
++    out += "\tuint g_SwappedBlend : packoffset(c44.x);\n";
++    // dp1: NDC scale (xy) / offset (zw) for draws with the viewport transform disabled (c45 = bytes 720..735).
++    out += "\tfloat4 g_NdcScaleOffset : packoffset(c45);\n";
++    out += "\tfloat4 g_NdcZ : packoffset(c46);\n";
++    // dp1: user clip plane 0 in clip space (PA_CL_UCP_0), enabled by g_NdcZ.z != 0 (c47 = bytes 752..767).
++    out += "\tfloat4 g_ClipPlane : packoffset(c47);\n";
+     out += "};\n\n";
+     out += "#define LOOP_CONST(N) (g_Loops[(N) >> 2][(N) & 3])\n\n";
+ 
+@@ -1272,6 +1353,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     {
+         if (samplers.find(n) != samplers.end())
+             continue;
++        // dpxr-fork: 1D shares the 2D slot table - same descriptor index, only
++        // the view type in the heap differs.
++        println("#define s{0}_Texture1DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", n, n >> 2, n & 3);
+         println("#define s{0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", n, n >> 2, n & 3);
+         println("#define s{0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", n, n >> 2, n & 3);
+         println("#define s{0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", n, n >> 2, n & 3);
+@@ -1281,6 +1365,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     {
+         if (reg >= 32)
+             continue;
++        println("#define {0}_Texture1DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
+         println("#define {0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
+         println("#define {0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
+         println("#define {0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", name, reg >> 2, reg & 3);
+@@ -1335,7 +1420,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     }
+     else
+     {
++        // Upstream behaviour, restored: declare one input per vertex element the
++        // container describes, and let the host input assembler feed them. The
++        // vertex declaration the game binds is turned into a matching host input
++        // layout at runtime, exactly as UnleashedRecomp does it.
+         auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
++        // dpxr-fork: a few DP declarations list the same usage+index in more
++        // than one element (multi-stream duplicates). Same semantic = same
++        // data, so declare the parameter once; every fetch address still maps
++        // to that one input via vertexElements.
++        std::set<uint64_t> declaredInputs;
+         for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
+         {
+             union
+@@ -1348,43 +1442,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+ 
+-        #ifdef UNLEASHED_RECOMP
+-            if ((vertexElement.usage == DeclUsage::TexCoord && vertexElement.usageIndex == 2 && isMetaInstancer) ||
+-                (vertexElement.usage == DeclUsage::Position && vertexElement.usageIndex == 1))
++            const uint64_t inputKey = (uint64_t(vertexElement.usage) << 32) | uint32_t(vertexElement.usageIndex);
++            if (declaredInputs.insert(inputKey).second)
+             {
+-                usageType = "uint4";
++                out += '\t';
++                println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
++                    uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+             }
+-        #endif
+-
+-            out += '\t';
+-
+-            for (auto& usageLocation : USAGE_LOCATIONS)
+-            {
+-                if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
+-                {
+-                    print("[[vk::location({})]] ", usageLocation.location);
+-                    break;
+-                }
+-            }
+-
+-            println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
+-                uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+ 
+             vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
+         }
+ 
+-    #ifdef UNLEASHED_RECOMP
+-        if (hasIndexCount)
+-        {
+-            out += "\tin uint iVertexId : SV_VertexID,\n";
+-            out += "\tin uint iInstanceId : SV_InstanceID,\n";
+-        }
+-    #endif
++        out += "\tin uint iVertexId : SV_VertexID,\n";
++        out += "\tin uint iInstanceId : SV_InstanceID,\n";
+ 
+-        out += "\tout float4 oPos : SV_Position";
++        // dp1: `precise` keeps every op feeding the position IEEE-exact and uncontracted, so two
++        // shaders with the same microcode sequence (depth prepass vs the shadow-mask passes,
++        // which draw with depth func EQUAL) rasterize the same z.
++        out += "\tout precise float4 oPos : SV_Position";
+ 
+         for (auto& [usage, usageIndex] : INTERPOLATORS)
+             print(",\n\tout float4 o{0}{1} : {2}{1}", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
++
++        // dp1: after the interpolators so the TEXCOORD/COLOR register packing matches the pixel shaders.
++        out += ",\n\tout float oClipDist : SV_ClipDistance0";
+     }
+ 
+     out += ")\n";
+@@ -1416,8 +1497,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
+             for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
+             {
++                const uint32_t bakedRegister = definition->registerIndex + i - (isPixelShader ? 256 : 0);
++                definedFloat4s.insert(bakedRegister);
+                 println("\tfloat4 c{} = asfloat(uint4(0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}));",
+-                    definition->registerIndex + i - (isPixelShader ? 256 : 0), value[0].get(), value[1].get(), value[2].get(), value[3].get());
++                    bakedRegister, value[0].get(), value[1].get(), value[2].get(), value[3].get());
+ 
+                 value += 4;
+             }
+@@ -1502,12 +1585,6 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             {
+                 out += "float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n";
+             }
+-        #ifdef UNLEASHED_RECOMP
+-            else if (!isPixelShader && hasIndexCount && i == 0)
+-            {
+-                out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
+-            }
+-        #endif
+             else
+             {
+                 out += "0.0;\n";
+@@ -1517,6 +1594,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     out += "\tint a0 = 0;\n";
+     out += "\tint aL = 0;\n";
++    out += "\tint aLn = 0;\n";  // dp1: iteration counter; aL starts at the loop constant start and moves by its step
+     out += "\tbool p0 = false;\n";
+     out += "\tfloat ps = 0.0;\n";
+ 
+@@ -1613,7 +1691,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     else
+     {
+         out += "\n\tuint pc = 0;\n";
+-        out += "\twhile (true)\n";
++        // dpxr-fork: bounded instead of while(true). The loop exit tests bool
++        // constants (b{N}); if the app never supplies them a shader would spin
++        // forever and remove the device (TDR). No legit UE3 shader needs more
++        // than a few hundred control-flow transfers (bones<=75, samples<=64).
++        out += "\t[loop] for (uint pcGuard = 0u; pcGuard < 1024u; pcGuard++)\n";
+         out += "\t{\n";
+         out += "\t\tswitch (pc)\n";
+         out += "\t\t{\n";
+@@ -1694,14 +1776,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 #ifdef UNLEASHED_RECOMP
+                     print("[unroll] ");
+                 #endif
+-                    println("for (aL = 0; aL < i{}.x; aL++)", uint32_t(cfInstr.loopStart.loopId));
++                    // dp1: Xenos loop constant = count (bits 0-7), initial aL (8-15), step (16-23).
++                    println("for (aLn = 0, aL = i{0}.y; aLn < i{0}.x; aLn++, aL += i{0}.z)", uint32_t(cfInstr.loopStart.loopId));
+                     indent();
+                     out += "{\n";
+                     ++indentation;
+                 }
+                 else 
+                 {
+-                    out += "\t\t\taL = 0;\n";
++                    println("\t\t\taL = i{}.y;", uint32_t(cfInstr.loopStart.loopId));
++                    out += "\t\t\taLn = 0;\n";
++                    // dp1: a zero loop count skips the body (Xenos / Xenia semantics, DP1 leaves the
++                    // light loops of its floor material at 0); the loop start carries the address
++                    // past the loop end. The simple path's for-loop already skips.
++                    println("\t\t\tif (i{}.x == 0)", uint32_t(cfInstr.loopStart.loopId));
++                    out += "\t\t\t{\n";
++                    println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopStart.address));
++                    out += "\t\t\t\tcontinue;\n";
++                    out += "\t\t\t}\n";
+                 }
+                 break;
+ 
+@@ -1714,8 +1806,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 }
+                 else
+                 {
+-                    out += "\t\t\t++aL;\n";
+-                    println("\t\t\tif (aL < i{}.x)", uint32_t(cfInstr.loopEnd.loopId));
++                    out += "\t\t\t++aLn;\n";
++                    println("\t\t\taL += i{}.z;", uint32_t(cfInstr.loopEnd.loopId));
++                    println("\t\t\tif (aLn < i{}.x)", uint32_t(cfInstr.loopEnd.loopId));
+                     out += "\t\t\t{\n";
+                     println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopEnd.address));
+                     out += "\t\t\t\tcontinue;\n";
+@@ -1876,6 +1969,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     if (!hasMtxProjection)
+                 #endif
+                     {
++                        // dp1: user clip plane against the untouched clip-space position (D3D9 semantics).
++                        out += "\toClipDist = g_NdcZ.z != 0.0 ? dot(g_ClipPlane, oPos) : 1.0;\n";
++                        out += "\toPos.xy = oPos.xy * g_NdcScaleOffset.xy + g_NdcScaleOffset.zw * oPos.w;\n";
++                        out += "\toPos.z = oPos.z * g_NdcZ.x + g_NdcZ.y * oPos.w;\n";
+                         out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
+                     }
+                 }
+@@ -1925,7 +2022,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "\t}\n";
+ 
+     if (!isPixelShader && hasMtxProjection)
+-        out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
++        out += "\toPos.xy = oPos.xy * g_NdcScaleOffset.xy + g_NdcScaleOffset.zw * oPos.w;\n";
++        out += "\toPos.z = oPos.z * g_NdcZ.x + g_NdcZ.y * oPos.w;\n";
++                        out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
+ #endif
+ 
+     out += "}";
+diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
+index b2e317d..e02e049 100644
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -34,6 +34,36 @@ struct ShaderRecompiler : StringBuffer
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;
+ 
++    // dpxr-fork: vfetch_mini reuses the address computed by the preceding
++    // vfetch_full (fetch slot, stride and vertex index), exactly as the
++    // hardware does - see ShaderInterpreter::ExecuteVertexFetchInstruction.
++    // The slot is known statically, the address is a shader-side variable.
++    uint32_t lastVertexFetchSlot = 0;
++    // Set when the shader fetches anything, so the preamble declares the state.
++    bool usesVertexFetch = false;
++
++    // dpxr-fork: how many vertex fetches found no entry in the container's
++    // vertex element table. Any non-zero value means the table does not
++    // describe this shader's microcode, so the translation is not usable.
++    uint32_t unresolvedVertexFetches = 0;
++
++    // Kept so the cache file format does not have to change back and forth
++    // while the vertex path is being settled; empty on the input-layout path.
++    struct VertexFetchDesc
++    {
++        uint32_t slot;
++        uint32_t strideDwords;
++        uint32_t offsetDwords;
++        uint32_t format;
++    };
++    std::vector<VertexFetchDesc> vertexFetches;
++
++    // dpxr-fork: float4 registers with a compile-time value baked in by the
++    // container's definition table. Everything else reads the live constant
++    // bank - Downpour's shaders carry no reflection, so there are no named
++    // constants to bind against.
++    std::set<uint32_t> definedFloat4s;
++
+ #ifdef UNLEASHED_RECOMP
+     bool hasMtxProjection = false;
+     bool hasMtxPrevInvViewProjection = false;

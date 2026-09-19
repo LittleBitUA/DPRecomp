@@ -471,3 +471,69 @@ after_instruction = false
 address = 0x82356948
 name = "DPVehicleFrameHook"
 after_instruction = false
+
+# Native-renderer study (2026-09-18): draw-mix counters (dp_draw_mix_log) at the
+# entries of DrawVerticesUP / DrawVertices / DrawIndexedVertices and the
+# frame-end routine (src/deadlyprem_hooks.cpp).
+[[midasm_hook]]
+address = 0x825CD7A0
+name = "DPDrawUPHook"
+registers = ["r4", "r5", "r7"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x825CD7E8
+name = "DPDrawVHook"
+registers = ["r4", "r6"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x825CDBD8
+name = "DPDrawIVHook"
+registers = ["r4", "r7"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x825224B0
+name = "DPFrameEndHook"
+after_instruction = false
+
+# Native-renderer study part 2: resource origin (are VB/IB/textures reaching
+# the setters created through the XDK Create entries?). Exits of
+# CreateVertexBuffer / CreateIndexBuffer / CreateTexture and entries of
+# SetStreamSource / SetIndices / SetTexture.
+[[midasm_hook]]
+address = 0x824D4C20
+name = "DPCreateVBExitHook"
+registers = ["r3", "r31"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824D4CDC
+name = "DPCreateIBExitHook"
+registers = ["r3", "r31"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824D0610
+name = "DPCreateTexExitHook"
+registers = ["r3", "r31"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824CD6E0
+name = "DPSetStreamSourceHook"
+registers = ["r5"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824CD888
+name = "DPSetIndicesHook"
+registers = ["r4"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824D0878
+name = "DPSetTextureHook"
+registers = ["r5"]
+after_instruction = false

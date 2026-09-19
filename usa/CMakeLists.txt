@@ -43,6 +43,9 @@ set(DEADLYPREM_SOURCES
     src/deadlyprem_camera_hook.cpp
     src/deadlyprem_iso_installer.cpp
     src/deadlyprem_acquire_wizard.cpp
+    src/native/native_graphics_system.cpp
+    src/native/native_hooks.cpp
+    src/native/native_renderer.cpp
 )
 
 # DP1 2026-09-06: embed the game icon on Windows (see src/deadlyprem.rc).

@@ -30,6 +30,7 @@
 //     integer -> float conversion of the vblank delta; the hook overrides f0.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -490,4 +491,178 @@ void DPInstallPadLayoutFilter() {
     pad.right_trigger = rt;
   });
   REXLOG_INFO("Controller layout filter installed (dp_pad_layout = {})", REXCVAR_GET(dp_pad_layout));
+}
+
+// ---------------------------------------------------------------------------
+// Native-renderer study (2026-09-18): draw-mix counters at the three XDK draw
+// entries the game calls (DrawVerticesUP sub_825CD7A0, DrawVertices
+// sub_825CD7E8, DrawIndexedVertices sub_825CDBD8) and the frame-end routine
+// sub_825224B0 (Resolve + Swap). Off by default; dp_draw_mix_log prints one
+// line per 60 frames with per-frame averages and a primitive-type histogram.
+// ---------------------------------------------------------------------------
+REXCVAR_DEFINE_BOOL(dp_draw_mix_log, false, "DP1",
+                    "Log the per-frame mix of DrawVerticesUP / DrawVertices / DrawIndexedVertices "
+                    "calls (counts, vertices, immediate bytes, primitive types) every 60 frames")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+struct DrawMix {
+  std::atomic<uint64_t> up_calls{0}, up_verts{0}, up_bytes{0};
+  std::atomic<uint64_t> dv_calls{0}, dv_verts{0};
+  std::atomic<uint64_t> div_calls{0}, div_indices{0};
+  std::atomic<uint64_t> prim[16]{};
+  std::atomic<uint32_t> frames{0};
+};
+DrawMix g_draw_mix;
+inline void DrawMixPrim(uint32_t prim) {
+  g_draw_mix.prim[prim < 16 ? prim : 15].fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace
+
+// D3DDevice_DrawVerticesUP(dev, prim, vertexCount, data, stride)
+void DPDrawUPHook(PPCRegister& r4, PPCRegister& r5, PPCRegister& r7) {
+  if (!REXCVAR_GET(dp_draw_mix_log)) return;
+  g_draw_mix.up_calls.fetch_add(1, std::memory_order_relaxed);
+  g_draw_mix.up_verts.fetch_add(r5.u32, std::memory_order_relaxed);
+  g_draw_mix.up_bytes.fetch_add(uint64_t(r5.u32) * r7.u32, std::memory_order_relaxed);
+  DrawMixPrim(r4.u32);
+}
+// D3DDevice_DrawVertices(dev, prim, startVertex, vertexCount)
+void DPDrawVHook(PPCRegister& r4, PPCRegister& r6) {
+  if (!REXCVAR_GET(dp_draw_mix_log)) return;
+  g_draw_mix.dv_calls.fetch_add(1, std::memory_order_relaxed);
+  g_draw_mix.dv_verts.fetch_add(r6.u32, std::memory_order_relaxed);
+  DrawMixPrim(r4.u32);
+}
+// D3DDevice_DrawIndexedVertices(dev, prim, baseVertex, startIndex, indexCount)
+void DPDrawIVHook(PPCRegister& r4, PPCRegister& r7) {
+  if (!REXCVAR_GET(dp_draw_mix_log)) return;
+  g_draw_mix.div_calls.fetch_add(1, std::memory_order_relaxed);
+  g_draw_mix.div_indices.fetch_add(r7.u32, std::memory_order_relaxed);
+  DrawMixPrim(r4.u32);
+}
+void DPResourceOriginReport();
+// Frame end (sub_825224B0: GPR alloc, Resolve, Swap).
+void DPFrameEndHook() {
+  if (!REXCVAR_GET(dp_draw_mix_log)) return;
+  const uint32_t f = g_draw_mix.frames.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (f % 60 != 0) return;
+  DPResourceOriginReport();
+  const double n = 60.0;
+  std::string hist;
+  for (int i = 0; i < 16; ++i) {
+    const uint64_t c = g_draw_mix.prim[i].exchange(0, std::memory_order_relaxed);
+    if (c) hist += fmt::format(" p{}={:.1f}", i, c / n);
+  }
+  REXLOG_INFO("Draw mix (60 frames, per frame): UP {:.1f} calls {:.0f} verts {:.0f} KB | DV {:.1f} calls {:.0f} verts | "
+              "DIV {:.1f} calls {:.0f} idx | prims:{}",
+              g_draw_mix.up_calls.exchange(0) / n, g_draw_mix.up_verts.exchange(0) / n,
+              g_draw_mix.up_bytes.exchange(0) / n / 1024.0, g_draw_mix.dv_calls.exchange(0) / n,
+              g_draw_mix.dv_verts.exchange(0) / n, g_draw_mix.div_calls.exchange(0) / n,
+              g_draw_mix.div_indices.exchange(0) / n, hist);
+}
+
+// ---------------------------------------------------------------------------
+// Native-renderer study (2026-09-18), part 2: do the objects reaching
+// SetStreamSource / SetIndices / SetTexture all come from the XDK's own
+// CreateVertexBuffer / CreateIndexBuffer / CreateTexture (i.e. can a hook layer
+// own every resource), or does the game build headers itself? Tags the
+// objects at the single exit of each Create function and checks the setters.
+// Shares dp_draw_mix_log and its 60-frame report.
+// ---------------------------------------------------------------------------
+namespace {
+std::mutex g_res_tag_mutex;
+std::unordered_map<uint32_t, uint8_t> g_res_tags;  // object addr -> 1 vb, 2 ib, 3 tex
+std::atomic<uint64_t> g_res_hit[4]{}, g_res_miss[4]{};
+std::atomic<uint32_t> g_res_miss_logged{0};
+void ResTag(uint32_t addr, uint8_t kind) {
+  if (!addr) return;
+  std::lock_guard<std::mutex> lock(g_res_tag_mutex);
+  g_res_tags[addr] = kind;
+}
+void ResCheck(uint32_t addr, uint8_t kind, const char* what) {
+  if (!addr) return;
+  bool hit;
+  {
+    std::lock_guard<std::mutex> lock(g_res_tag_mutex);
+    hit = g_res_tags.count(addr) != 0;
+  }
+  (hit ? g_res_hit : g_res_miss)[kind].fetch_add(1, std::memory_order_relaxed);
+  if (!hit && g_res_miss_logged.fetch_add(1, std::memory_order_relaxed) < 12) {
+    auto* mem = REX_KERNEL_MEMORY();
+    const uint32_t hdr0 = rex::memory::load_and_swap<uint32_t>(mem->TranslateVirtual(addr));
+    const uint32_t hdr1 = rex::memory::load_and_swap<uint32_t>(mem->TranslateVirtual(addr + 4));
+    REXLOG_INFO("Resource origin: {} object {:08X} was NOT created through the XDK Create entry (hdr {:08X} {:08X})", what,
+                addr, hdr0, hdr1);
+  }
+}
+}  // namespace
+
+// Exit of CreateVertexBuffer sub_824D4B60 (0x824D4C20), CreateIndexBuffer
+// sub_824D4C38 (0x824D4CDC), CreateTexture sub_824D04F8 (0x824D0610): r3 and
+// r31 are both tagged (return value / object register).
+void DPCreateVBExitHook(PPCRegister& r3, PPCRegister& r31) { if (REXCVAR_GET(dp_draw_mix_log)) { ResTag(r3.u32, 1); ResTag(r31.u32, 1); } }
+void DPCreateIBExitHook(PPCRegister& r3, PPCRegister& r31) { if (REXCVAR_GET(dp_draw_mix_log)) { ResTag(r3.u32, 2); ResTag(r31.u32, 2); } }
+void DPCreateTexExitHook(PPCRegister& r3, PPCRegister& r31) { if (REXCVAR_GET(dp_draw_mix_log)) { ResTag(r3.u32, 3); ResTag(r31.u32, 3); } }
+// SetStreamSource(dev, stream, vb, offset, stride) / SetIndices(dev, ib) / SetTexture(dev, sampler, tex)
+void DPSetStreamSourceHook(PPCRegister& r5) { if (REXCVAR_GET(dp_draw_mix_log)) ResCheck(r5.u32, 1, "SetStreamSource vb"); }
+void DPSetIndicesHook(PPCRegister& r4) { if (REXCVAR_GET(dp_draw_mix_log)) ResCheck(r4.u32, 2, "SetIndices ib"); }
+void DPSetTextureHook(PPCRegister& r5) { if (REXCVAR_GET(dp_draw_mix_log)) ResCheck(r5.u32, 3, "SetTexture tex"); }
+
+void DPResourceOriginReport() {
+  size_t tagged;
+  { std::lock_guard<std::mutex> lock(g_res_tag_mutex); tagged = g_res_tags.size(); }
+  REXLOG_INFO("Resource origin (60 frames): tagged objects {} | vb hit {} miss {} | ib hit {} miss {} | tex hit {} miss {}",
+              tagged, g_res_hit[1].exchange(0), g_res_miss[1].exchange(0), g_res_hit[2].exchange(0),
+              g_res_miss[2].exchange(0), g_res_hit[3].exchange(0), g_res_miss[3].exchange(0));
+}
+
+// ---------------------------------------------------------------------------
+// DP1 #21 (2026-09-19): save hang safety net.
+//
+// The game's save routine (PAL sub_82260B18, state byte this+9283) calls XamContentCreateEx(CREATE_ALWAYS) through the
+// thin wrapper hooked below, then maps the error it got: 1167 (device not
+// connected) and 19 (write protected) become messages the player can dismiss,
+// EVERYTHING ELSE becomes "no result yet", polled every frame forever - the
+// "Saving" screen never ends (Crowley9's log: ACCESS_DENIED from the runtime,
+// then XamContentClose every frame for two minutes). On a console the
+// container overwrite cannot fail any other way, so that path was never
+// reachable there. The runtime now retries and overwrites in place (SDK
+// content_manager.cpp); if it still has to fail, hand the game the one error
+// it knows how to show instead of the one it treats as "keep waiting".
+// ---------------------------------------------------------------------------
+#include <rex/hook.h>
+#if defined(DP_REGION_USA)
+#define DP_XAM_CONTENT_CREATE_WRAPPER sub_824E8568
+#else
+#define DP_XAM_CONTENT_CREATE_WRAPPER sub_825C2560
+#endif
+#define DP_CONCAT2(a, b) a##b
+#define DP_CONCAT(a, b) DP_CONCAT2(a, b)
+#define DP_XAM_CONTENT_CREATE_IMP DP_CONCAT(__imp__, DP_XAM_CONTENT_CREATE_WRAPPER)
+
+REX_EXTERN(DP_XAM_CONTENT_CREATE_IMP);
+
+REXCVAR_DEFINE_BOOL(dp_save_error_remap, true, "DP1",
+                    "When the runtime cannot overwrite the save container, report 'storage "
+                    "device not connected' to the game instead of the error it waits on forever "
+                    "(#21)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REX_HOOK_RAW(DP_XAM_CONTENT_CREATE_WRAPPER) {
+  const uint32_t flags = ctx.r6.u32;
+  DP_XAM_CONTENT_CREATE_IMP(ctx, base);
+  const uint32_t result = ctx.r3.u32;
+  // Only the overwrite dispositions (CREATE_ALWAYS = 2, TRUNCATE_EXISTING = 5)
+  // and only the code the game cannot act on. OPEN_EXISTING misses (3 = path
+  // not found, "no save yet") stay as they are.
+  const uint32_t disposition = flags & 0xF;
+  if (!REXCVAR_GET(dp_save_error_remap) || result != 5 ||
+      (disposition != 2 && disposition != 5)) {
+    return;
+  }
+  REXLOG_WARN("Save: XamContentCreate(flags {:#x}) failed with ACCESS_DENIED; reporting "
+              "ERROR_DEVICE_NOT_CONNECTED (1167) to the game so its save screen can end (#21)",
+              flags);
+  ctx.r3.u64 = 1167;
 }

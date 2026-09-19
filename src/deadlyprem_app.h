@@ -18,6 +18,7 @@
 #include <rex/ui/overlay/debug_overlay.h>
 
 #include "deadlyprem_iso_installer.h"
+#include "native/native_graphics_system.h"
 
 void DPInstallPadLayoutFilter();  // src/deadlyprem_hooks.cpp
 
@@ -41,6 +42,13 @@ class DeadlypremApp : public rex::ReXApp {
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }
+    // 2026-09-18: experimental native renderer (launcher switch "Native
+    // renderer (experimental)" = cvar dp_native_render). With it on, the
+    // Xenos plugin is not loaded at all; off = the emulated path unchanged.
+    if (dp::native::Enabled()) {
+      REXLOG_INFO("Native renderer ENABLED (dp_native_render): replacing the Xenos GPU emulator");
+      config.graphics = std::make_unique<dp::native::NativeGraphicsSystem>();
+    }
   }
 
   // First-run install chain (ported 2026-09-06 from DownpourRecomp PR #27 by
@@ -54,7 +62,7 @@ class DeadlypremApp : public rex::ReXApp {
     // stamp>" in SetupPresentation; this hook runs right after it.
     // F3 debug overlay watermark (ASCII only: the overlay font has no special glyphs).
     rex::ui::SetDebugOverlayBuildStamp(
-        "Deadly Premonition Recompilation 1.4.1 (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+        "Deadly Premonition Recompilation 1.4.2 (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
     if (window()) {
       window()->SetTitle("Deadly Premonition Recompilation | 1.3 «Little Bit»");
     }
@@ -166,7 +174,7 @@ class DeadlypremApp : public rex::ReXApp {
   void OnPostInitLogging() override {
     DPInstallPadLayoutFilter();  // #19 controller layout (deadlyprem_hooks.cpp)
     // DP1 diagnostics: build stamp as the first application line of every log.
-    REXLOG_INFO("Deadly Premonition Recompilation 1.4.1 (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+    REXLOG_INFO("Deadly Premonition Recompilation 1.4.2 (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
   }
 
   // Other virtual hooks (unused here):

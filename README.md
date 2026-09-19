@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.1 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.4.2 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.4.1.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.4.2.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.4.2:** the rare endless "Saving" screen is fixed (#21: the runtime could not clear the old save folder while another program held a file in it, and the game waits forever on that error; it now retries, overwrites in place, and if it still must fail tells the game something it can show), diagonal mouse aim no longer staircases (#30), and the work-in-progress native renderer ships as an off-by-default preview under a new Experimental tab. [Notes](docs/RELEASE-NOTES-1.4.2.md).
 
 **1.4.1:** the Director's Cut controller layout now stands down in the car (#28: 1.4.0 remapped the triggers while driving), the launcher's Game Language works on the European disc (#27: the game wanted a retail console region and got a dev-kit one), and PlayStation prompt sets swap L2/R2 with that layout. [Notes](docs/RELEASE-NOTES-1.4.1.md).
 
