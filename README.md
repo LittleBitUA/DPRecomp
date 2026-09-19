@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.2 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.4.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.4.2.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.4.3.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.4.3:** launcher hotfix: "Share Shader Cache" never actually delivered anything (Windows PowerShell mangled the upload's JSON and the error was silent); it works now and re-sends once. [Notes](docs/RELEASE-NOTES-1.4.3.md).
 
 **1.4.2:** the rare endless "Saving" screen is fixed (#21: the runtime could not clear the old save folder while another program held a file in it, and the game waits forever on that error; it now retries, overwrites in place, and if it still must fail tells the game something it can show), diagonal mouse aim no longer staircases (#30), and the work-in-progress native renderer ships as an off-by-default preview under a new Experimental tab. [Notes](docs/RELEASE-NOTES-1.4.2.md).
 

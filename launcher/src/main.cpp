@@ -374,7 +374,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.4.2";
+constexpr const wchar_t* kLauncherVersion = L"v1.4.3";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -3908,27 +3908,51 @@ void MaybeShareShaderCache() {
   for (unsigned char c : fp) { h ^= c; h *= 1099511628211ull; }
   char hex[17];
   std::snprintf(hex, sizeof(hex), "%016llx", h);
-  auto done = g_launcher_ini.find("shader_cache_shared_fp");
-  if (done != g_launcher_ini.end() && done->second == hex) return;
-  g_launcher_ini["shader_cache_shared_fp"] = hex;
+  // 1.4.3: "already shared" is proven by a marker the upload script writes
+  // only after curl returned 0 (userdata\cache\shaders\shareable\.shared_fp);
+  // the old launcher.ini stamp was written before the upload ran and could
+  // never notice a failed send. Anything shared by 1.1..1.4.2 is re-sent once.
+  const fs::path marker = dir / L".shared_fp";
+  {
+    std::ifstream mf(marker, std::ios::binary);
+    std::string prev;
+    if (mf) std::getline(mf, prev);
+    while (!prev.empty() && (prev.back() == '\r' || prev.back() == '\n' || prev.back() == ' ')) prev.pop_back();
+    if (prev == hex) return;
+  }
+  g_launcher_ini["shader_cache_shared_fp"] = hex;  // informational only
   WriteLauncherIni();
 
   wchar_t tmp[MAX_PATH];
   if (!GetTempPathW(MAX_PATH, tmp)) return;
   const std::wstring script = std::wstring(tmp) + L"dp1_share_cache.ps1";
   const std::wstring zip = std::wstring(tmp) + L"DPRecomp_shadercache_" + Widen(hex) + L".zip";
+  const std::wstring json_path = std::wstring(tmp) + L"dp1_share_cache.json";
   std::string content = "DPRecomp shader cache | launcher " + Narrow(kLauncherVersion) +
                         " | " + summary + "total " + std::to_string(total / 1024) + " KB | fp " + hex;
+  // 1.4.3 (2026-09-20): the payload used to be passed inline as
+  // -F "payload_json={...}". Windows PowerShell 5.1 drops the embedded double
+  // quotes when it builds a native command line, so Discord received
+  // {content:...}, answered 400 "Expected payload_json to be a valid JSON
+  // string", and -s -f hid it: not one cache ever arrived. The JSON now goes
+  // through a file (curl's "<file" form), which no shell touches.
+  {
+    std::ofstream jf(json_path, std::ios::binary | std::ios::trunc);
+    if (!jf) return;
+    jf << "{\"content\":\"" << content << "\"}";
+  }
   std::string ps;
   ps += "$ErrorActionPreference = 'Stop'\r\n";
   ps += "$src = '" + Narrow(dir.wstring().c_str()) + "'\r\n";
   ps += "$zip = '" + Narrow(zip.c_str()) + "'\r\n";
+  ps += "$jf = '" + Narrow(json_path.c_str()) + "'\r\n";
   ps += "Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue\r\n";
   ps += "Compress-Archive -Path (Join-Path $src '*.xsh'), (Join-Path $src '*.xpso') -DestinationPath $zip -Force\r\n";
-  ps += "$json = '{\"content\":\"" + content + "\"}'\r\n";
-  ps += "& curl.exe -s -S -f -F \"payload_json=$json\" -F \"file=@$zip\" '" +
+  ps += "$marker = '" + Narrow(marker.wstring().c_str()) + "'\r\n";
+  ps += "& curl.exe -s -S -f -F \"payload_json=<$jf\" -F \"file=@$zip\" '" +
         Narrow(kShaderCacheWebhookUrl) + "' | Out-Null\r\n";
-  ps += "Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue\r\n";
+  ps += "if ($LASTEXITCODE -eq 0) { [IO.File]::WriteAllText($marker, '" + std::string(hex) + "') }\r\n";
+  ps += "Remove-Item -LiteralPath $zip, $jf -ErrorAction SilentlyContinue\r\n";
   {
     std::ofstream f(script, std::ios::binary | std::ios::trunc);
     if (!f) return;
