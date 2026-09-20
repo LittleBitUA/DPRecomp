@@ -40,10 +40,17 @@ index 3bf37ba..cdb76e6 100644
          }
          else
 diff --git a/XenosRecomp/main.cpp b/XenosRecomp/main.cpp
-index e1aba4a..8f849a6 100644
+index e1aba4a..b08321c 100644
 --- a/XenosRecomp/main.cpp
 +++ b/XenosRecomp/main.cpp
-@@ -31,8 +31,19 @@ struct RecompiledShader
+@@ -27,12 +27,26 @@ struct RecompiledShader
+     IDxcBlob* dxil = nullptr;
+     std::vector<uint8_t> spirv;
+     uint32_t specConstantsMask = 0;
++    // dpxr-fork (2026-09-20): bit 0 = vertex fetch indexed by a computed
++    // register (host expands with instancing); cache "reserved" word.
++    uint32_t hostFlags = 0;
+     // dpxr-fork: hash over the raw ucode section only. The DPXR runtime
      // sees shaders through PM4 IM_LOAD (bare microcode in guest memory),
      // never the full container, so cache lookup must key on ucode bytes.
      XXH64_hash_t ucodeHash = 0;
@@ -63,7 +70,7 @@ index e1aba4a..8f849a6 100644
  };
  
  // dpxr-fork: ucode section range per shader.h layout (verified against
-@@ -54,16 +65,35 @@ static size_t ucodeSize(const uint8_t* container)
+@@ -54,16 +68,35 @@ static size_t ucodeSize(const uint8_t* container)
  // validation and still crash the recompiler on wild reflection offsets.
  // An access violation in one shader must not kill the whole batch. This
  // helper holds no C++ objects with destructors, so __try is legal here.
@@ -103,7 +110,7 @@ index e1aba4a..8f849a6 100644
      {
          return false;
      }
-@@ -98,6 +128,18 @@ static XXH64_hash_t normalizedUcodeHash(const uint8_t* ucode, size_t size)
+@@ -98,6 +131,18 @@ static XXH64_hash_t normalizedUcodeHash(const uint8_t* ucode, size_t size)
      return XXH3_64bits(le.data(), ndw * 4);
  }
  
@@ -122,7 +129,7 @@ index e1aba4a..8f849a6 100644
  int main(int argc, char** argv)
  {
  #ifndef XENOS_RECOMP_INPUT
-@@ -178,7 +220,7 @@ int main(int argc, char** argv)
+@@ -178,7 +223,7 @@ int main(int argc, char** argv)
                      shaderContainer->field20 == 0 &&
                      virtualSize >= sizeof(ShaderContainer) &&
                      dataSize <= 0x100000 &&
@@ -131,7 +138,7 @@ index e1aba4a..8f849a6 100644
                      (dtOff == 0 || dtOff < dataSize) &&
                      shOff >= sizeof(ShaderContainer) &&
                      shOff + sizeof(Shader) <= dataSize &&
-@@ -202,9 +244,13 @@ int main(int argc, char** argv)
+@@ -202,9 +247,13 @@ int main(int argc, char** argv)
                          const size_t uStart =
                              i + virtualSize + sh->physicalOffset;
                          const size_t uAvail = fileSize - uStart;
@@ -148,7 +155,7 @@ index e1aba4a..8f849a6 100644
                          foundAny = true;
                      }
  
-@@ -220,58 +266,131 @@ int main(int argc, char** argv)
+@@ -220,58 +269,132 @@ int main(int argc, char** argv)
                  files.emplace_back(std::move(fileData));
          }
  
@@ -217,6 +224,7 @@ index e1aba4a..8f849a6 100644
                  }
 -
                  shader.specConstantsMask = recompiler.specConstantsMask;
++                shader.hostFlags = recompiler.vfetchIndexScaled ? 1u : 0u;
                  shader.isPixelShader = recompiler.isPixelShader;
 +                shader.vertexFetches = std::move(recompiler.vertexFetches);
 +                writeAllBytes(hlslPath(i).c_str(), recompiler.out.data(), recompiler.out.size());
@@ -318,7 +326,7 @@ index e1aba4a..8f849a6 100644
  
          fmt::println("Creating shader cache...");
  
-@@ -291,6 +410,24 @@ int main(int argc, char** argv)
+@@ -291,6 +414,24 @@ int main(int argc, char** argv)
          // dpxr-fork: entry gains ucodeHash + isPixelShader + vertex element
          // table range; failed shaders keep their hashes with zero-size
          // blobs (runtime falls back).
@@ -343,7 +351,15 @@ index e1aba4a..8f849a6 100644
          size_t failCount = 0;
          for (auto& [hash, shader] : shaders)
          {
-@@ -316,6 +453,14 @@ int main(int argc, char** argv)
+@@ -310,12 +451,20 @@ int main(int argc, char** argv)
+                         vertexElements.push_back(vs->vertexElementsAndInterpolators[vs->field18 + i]);
+                 }
+             }
+-            f.println("\t{{ 0x{:X}, 0x{:X}, {}, {}, {}, {}, {}, {}, {}, {} }},",
++            f.println("\t{{ 0x{:X}, 0x{:X}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},",
+                 hash, shader.ucodeHash, dxil.size(), (shader.dxil != nullptr) ? shader.dxil->GetBufferSize() : 0, spirv.size(), shader.spirv.size(), shader.specConstantsMask,
+-                shader.isPixelShader ? 1 : 0, veOffset, veCount);
++                shader.isPixelShader ? 1 : 0, veOffset, veCount, shader.hostFlags);
  
              if (shader.dxil != nullptr)
              {
@@ -358,7 +374,7 @@ index e1aba4a..8f849a6 100644
                  dxil.insert(dxil.end(), reinterpret_cast<uint8_t *>(shader.dxil->GetBufferPointer()),
                      reinterpret_cast<uint8_t *>(shader.dxil->GetBufferPointer()) + shader.dxil->GetBufferSize());
              }
-@@ -340,6 +485,29 @@ int main(int argc, char** argv)
+@@ -340,6 +489,29 @@ int main(int argc, char** argv)
              std::string binPath = std::string(output) + ".bin";
              writeAllBytes(binPath.c_str(), dxil.data(), dxil.size());
              fmt::println("DXIL sidecar: {} ({} bytes)", binPath, dxil.size());
@@ -550,7 +566,7 @@ index b279ee4..919d6c0 100644
  {
      uint index = cubeMapData.cubeMapIndex;
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 81ef3c5..6be2c89 100644
+index 81ef3c5..fb5ac06 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -16,8 +16,8 @@ static constexpr char SWIZZLES[] =
@@ -573,7 +589,21 @@ index 81ef3c5..6be2c89 100644
      if (instr.isPredicated)
      {
          indent();
-@@ -177,8 +179,19 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -171,14 +173,33 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+         ++indentation;
+     }
+ 
++    // dpxr-fork (2026-09-20): the fetch index register. Anything but r0.x
++    // means the shader computes its own record index (particles: r2.z =
++    // index * 0.25); the input assembler cannot follow, the host instances.
++    if (instr.srcRegister != 0 || (instr.srcSwizzle & 3) != 0)
++        vfetchIndexScaled = true;
++    indent();
++    println("// vfetch src r{}.{} stride {} offset {} rounded {}", uint32_t(instr.srcRegister),
++        "xyzw"[instr.srcSwizzle & 3], uint32_t(instr.stride), int32_t(instr.offset), uint32_t(instr.isIndexRounded));
+     indent();
+     print("r{}.", instr.dstRegister);
+     printDstSwizzle(instr.dstSwizzle, false);
  
      out += " = ";
  
@@ -594,7 +624,7 @@ index 81ef3c5..6be2c89 100644
  
      switch (findResult->second.usage)
      {
-@@ -193,6 +206,24 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -193,6 +214,24 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
      case DeclUsage::TexCoord:
          print("tfetchTexcoord(g_SwappedTexcoords, ");
          break;
@@ -619,7 +649,7 @@ index 81ef3c5..6be2c89 100644
      }
  
      print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
-@@ -206,8 +237,15 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -206,8 +245,15 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
          break;
  
      case DeclUsage::TexCoord:
@@ -635,7 +665,7 @@ index 81ef3c5..6be2c89 100644
      }
  
      out += '.';
-@@ -482,11 +520,20 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -482,11 +528,20 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
                          regFormatted = constantName;
                      }
                  }
@@ -658,7 +688,7 @@ index 81ef3c5..6be2c89 100644
              }
  
              std::string result;
-@@ -1105,14 +1152,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1105,14 +1160,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
  
      assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
@@ -683,7 +713,7 @@ index 81ef3c5..6be2c89 100644
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
  
      out += "#ifdef __spirv__\n\n";
-@@ -1165,8 +1220,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1165,8 +1228,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      constantName, shaderName, constantInfo->registerIndex * 16);
              }
              
@@ -695,7 +725,7 @@ index 81ef3c5..6be2c89 100644
  
              break;
          }
-@@ -1208,8 +1264,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1208,8 +1272,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
      out += "\n#else\n\n";
  
@@ -716,7 +746,7 @@ index 81ef3c5..6be2c89 100644
  
      for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
      {
-@@ -1235,7 +1303,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1235,7 +1311,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      }
  
@@ -726,7 +756,7 @@ index 81ef3c5..6be2c89 100644
  
      // dpxr-fork: fixed full-range shared-constants layout (704 bytes).
      // DP shaders reference fetch slots (s16+), bool registers by raw bank
-@@ -1262,6 +1331,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1262,6 +1339,21 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      out += "\tfloat g_AlphaThreshold : packoffset(c42.w);\n";
      out += "\tuint g_AlphaTest : packoffset(c43.x);\n";
      out += "\tuint g_R11G11B10Normal : packoffset(c43.y);\n";
@@ -737,6 +767,9 @@ index 81ef3c5..6be2c89 100644
 +    out += "\tuint g_SwappedColor : packoffset(c43.w);\n";
 +    // dp1: BLENDINDICES / BLENDWEIGHT byte-order mode (tfetchSwapBytes), c44 = bytes 704..719.
 +    out += "\tuint g_SwappedBlend : packoffset(c44.x);\n";
++    // dp1: vertices per instance when the host expands an index-scaled vertex
++    // fetch shader with instancing (0 = plain draw). c44.y = bytes 708..711.
++    out += "\tuint g_IndexCount : packoffset(c44.y);\n";
 +    // dp1: NDC scale (xy) / offset (zw) for draws with the viewport transform disabled (c45 = bytes 720..735).
 +    out += "\tfloat4 g_NdcScaleOffset : packoffset(c45);\n";
 +    out += "\tfloat4 g_NdcZ : packoffset(c46);\n";
@@ -745,7 +778,7 @@ index 81ef3c5..6be2c89 100644
      out += "};\n\n";
      out += "#define LOOP_CONST(N) (g_Loops[(N) >> 2][(N) & 3])\n\n";
  
-@@ -1272,6 +1353,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1272,6 +1364,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      {
          if (samplers.find(n) != samplers.end())
              continue;
@@ -755,7 +788,7 @@ index 81ef3c5..6be2c89 100644
          println("#define s{0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", n, n >> 2, n & 3);
          println("#define s{0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", n, n >> 2, n & 3);
          println("#define s{0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", n, n >> 2, n & 3);
-@@ -1281,6 +1365,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1281,6 +1376,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      {
          if (reg >= 32)
              continue;
@@ -763,7 +796,7 @@ index 81ef3c5..6be2c89 100644
          println("#define {0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
          println("#define {0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
          println("#define {0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", name, reg >> 2, reg & 3);
-@@ -1335,7 +1420,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1335,7 +1431,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      }
      else
      {
@@ -780,7 +813,7 @@ index 81ef3c5..6be2c89 100644
          for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
          {
              union
-@@ -1348,43 +1442,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1348,43 +1453,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
              const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
  
@@ -838,7 +871,7 @@ index 81ef3c5..6be2c89 100644
      }
  
      out += ")\n";
-@@ -1416,8 +1497,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1416,8 +1508,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
              for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
              {
@@ -850,20 +883,30 @@ index 81ef3c5..6be2c89 100644
  
                  value += 4;
              }
-@@ -1502,12 +1585,6 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1502,12 +1596,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              {
                  out += "float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n";
              }
 -        #ifdef UNLEASHED_RECOMP
 -            else if (!isPixelShader && hasIndexCount && i == 0)
--            {
++            // dpxr-fork (2026-09-20): Xenos starts every vertex shader with the
++            // vertex index in r0.x (as a float). Deadly Premonition's particle
++            // shaders read it before any fetch (particle = index / 4, corner =
++            // index % 4 via a0-relative constants); with r0 = 0 every corner
++            // collapsed onto particle 0 and the flamethrower had no sprites.
++            else if (!isPixelShader && i == 0)
+             {
 -                out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
--            }
++                // g_IndexCount = 0 on ordinary draws (r0.x = vertex index);
++                // = vertices per instance on the host's instanced expansion
++                // of index-scaled fetches (see vfetchIndexScaled).
++                out += "float4(float(iVertexId + g_IndexCount * iInstanceId), 0.0, 0.0, 0.0);\n";
+             }
 -        #endif
              else
              {
                  out += "0.0;\n";
-@@ -1517,6 +1594,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1517,6 +1617,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
      out += "\tint a0 = 0;\n";
      out += "\tint aL = 0;\n";
@@ -871,7 +914,7 @@ index 81ef3c5..6be2c89 100644
      out += "\tbool p0 = false;\n";
      out += "\tfloat ps = 0.0;\n";
  
-@@ -1613,7 +1691,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1613,7 +1714,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      else
      {
          out += "\n\tuint pc = 0;\n";
@@ -884,7 +927,7 @@ index 81ef3c5..6be2c89 100644
          out += "\t{\n";
          out += "\t\tswitch (pc)\n";
          out += "\t\t{\n";
-@@ -1694,14 +1776,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1694,14 +1799,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  #ifdef UNLEASHED_RECOMP
                      print("[unroll] ");
                  #endif
@@ -911,7 +954,7 @@ index 81ef3c5..6be2c89 100644
                  }
                  break;
  
-@@ -1714,8 +1806,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1714,8 +1829,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  }
                  else
                  {
@@ -923,7 +966,7 @@ index 81ef3c5..6be2c89 100644
                      out += "\t\t\t{\n";
                      println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopEnd.address));
                      out += "\t\t\t\tcontinue;\n";
-@@ -1876,6 +1969,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1876,6 +1992,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      if (!hasMtxProjection)
                  #endif
                      {
@@ -934,7 +977,7 @@ index 81ef3c5..6be2c89 100644
                          out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
                      }
                  }
-@@ -1925,7 +2022,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1925,7 +2045,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\t}\n";
  
      if (!isPixelShader && hasMtxProjection)
@@ -946,10 +989,10 @@ index 81ef3c5..6be2c89 100644
  
      out += "}";
 diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
-index b2e317d..e02e049 100644
+index b2e317d..d8f3653 100644
 --- a/XenosRecomp/shader_recompiler.h
 +++ b/XenosRecomp/shader_recompiler.h
-@@ -34,6 +34,36 @@ struct ShaderRecompiler : StringBuffer
+@@ -34,6 +34,40 @@ struct ShaderRecompiler : StringBuffer
      std::unordered_map<uint32_t, uint32_t> ifEndLabels;
      uint32_t specConstantsMask = 0;
  
@@ -960,6 +1003,10 @@ index b2e317d..e02e049 100644
 +    uint32_t lastVertexFetchSlot = 0;
 +    // Set when the shader fetches anything, so the preamble declares the state.
 +    bool usesVertexFetch = false;
++    // dpxr-fork (2026-09-20): a vertex fetch indexed by something other than
++    // the plain vertex index register (r0.x): the host must expand such draws
++    // per record (instancing) - see g_IndexCount.
++    bool vfetchIndexScaled = false;
 +
 +    // dpxr-fork: how many vertex fetches found no entry in the container's
 +    // vertex element table. Any non-zero value means the table does not

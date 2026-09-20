@@ -50,6 +50,8 @@ async_shader_compilation = true
 texture_cache_memory_limit_soft = 384
 texture_cache_memory_limit_hard = 768
 audio_mute = false
+# Output layout: auto (follow the Windows device), stereo (always fold 5.1 to 2.0), surround (always 5.1). DPRecomp #19.
+audio_channels = "auto"
 dp_skip_intro = "off"
 # Experimental native renderer test build (launcher: Native Renderer). false = Xenos emulator.
 dp_native_render = false

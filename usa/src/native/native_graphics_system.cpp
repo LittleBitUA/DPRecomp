@@ -43,18 +43,7 @@ using Microsoft::WRL::ComPtr;
 using rex::X_STATUS;
 
 bool Enabled() {
-#if defined(DP_REGION_USA)
-  // The USA build has no native hooks yet (PAL addresses only); the switch
-  // is ignored there so the game keeps the emulated path.
-  static const bool enabled = [] {
-    if (REXCVAR_GET(dp_native_render)) {
-      REXLOG_WARN("dp_native_render is not available on the USA build yet; using the Xenos emulator");
-    }
-    return false;
-  }();
-#else
   static const bool enabled = REXCVAR_GET(dp_native_render);
-#endif
   return enabled;
 }
 

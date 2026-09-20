@@ -1,6 +1,10 @@
 # Changelog
 
-Release notes for each version: [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.4.4 (September 2026)
+
+- **Audio Output** (#19, launcher → Advanced → *Audio Output*; `audio_channels`, default `auto`). The game renders 5.1 and the runtime submits those six channels whenever the Windows output device reports more than two; with a stereo endpoint it runs its own 5.1-to-2.0 fold (center and surrounds at -3 dB, LFE dropped). A Windows device configured as 5.1 with stereo speakers or headphones behind it therefore played the dialogue into a center channel nobody could hear. `stereo` forces the fold regardless of what Windows reports, `surround` always submits the six channels, `auto` keeps the old behaviour. The log line `audio endpoint '…': N ch … submitting M ch (audio_channels …)` shows what was decided. Unit-tested policy (`rex/audio/output_layout.h`).
 
 ## 1.4.3 (September 2026)
 

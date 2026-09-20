@@ -42,6 +42,10 @@
 #pragma comment(lib, "d3d12.lib")
 
 REXCVAR_DEFINE_BOOL(dp_native_no_alphatest, false, "DP1", "Diagnostic: ignore the guest alpha test");
+REXCVAR_DEFINE_BOOL(dp_native_7e3_resolve, true, "DP1",
+                    "Native renderer: clamp and quantize 7e3 (k_2_10_10_10_FLOAT) colour targets to the "
+                    "console's range (max 31.875) when resolving them")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(dp_native_dump_all, false, "DP1", "Dump frame: detailed state for every draw (not just the first per shader/target key)");
 REXCVAR_DEFINE_STRING(dp_native_dump_ps, "", "DP1",
                       "Dump frame: also record the bound render target after every draw whose pixel shader hash (hex) matches");
@@ -112,6 +116,8 @@ constexpr uint32_t kDevPaSuPolyOffsetFrontOffset = 10836;
 constexpr uint32_t kDevPaSuPolyOffsetBackScale = 10840;
 constexpr uint32_t kDevPaSuPolyOffsetBackOffset = 10844;
 constexpr uint32_t kDevPaClVteCntl = 10572;  // viewport transform enable bits 0-5
+constexpr uint32_t kDevPaScWindowScissorTl = 10436;  // PA_SC_WINDOW_SCISSOR_TL: x bits 0-14, y bits 16-30
+constexpr uint32_t kDevPaScWindowScissorBr = 10440;  // PA_SC_WINDOW_SCISSOR_BR
 constexpr uint32_t kDevPaClClipCntl = 10564;  // PA_CL_CLIP_CNTL: bit 0 ucp_ena_0 (the floor reflection pass)
 constexpr uint32_t kDevPaClUcp0 = 8528;       // PA_CL_UCP_0 X,Y,Z,W (clip-space plane; dev-block scan, shadow is not linear here)
 constexpr uint32_t kDevBlendFactors = 12024;    // game-level packed D3DRS blend states (diagnostics only)
@@ -228,6 +234,8 @@ struct GuestBuffer {
   bool index = false;
   bool index32 = false;  // index buffers: D3DIndexBuffer::Common bit 31 (XDK DrawIndexedVertices reads it there)
   bool dirty = true;
+  std::atomic<bool> written{false};  // page-watch callback: the CPU wrote the guest memory since the upload
+  bool watched = false;              // pages write-protected since the last upload
   uint32_t endian = 0;   // VB: fetch dword1 bits 0-1; IB: Common bits 29-30 (1 = 8in16, 2 = 8in32)
   ComPtr<ID3D12Resource> resource;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
@@ -374,6 +382,7 @@ struct PipelineKey {
   int32_t depth_bias = 0;
   uint32_t slope_bias_bits = 0;  // float bits
   uint32_t strides[2] = {0, 0};
+  uint32_t instanced = 0;  // per-instance input layout (index-scaled vertex fetch shaders)
   bool operator==(const PipelineKey& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
 };
 struct PipelineKeyHash {
@@ -435,7 +444,26 @@ VSOut VSMain(uint id : SV_VertexID) {
   o.uv = uv;
   return o;
 }
-float4 PSMain(VSOut i) : SV_Target0 { return t0.SampleLevel(s0, i.uv, 0); }
+cbuffer BlitParams : register(b0) { uint g_mode; }
+// 7e3 float (Xenos k_2_10_10_10_FLOAT colour channels): 3-bit exponent, 7-bit
+// mantissa, no sign; max (1 + 127/128) * 2^4 = 31.875, denormal step 2^-10.
+float To7e3(float v) {
+  v = clamp(v, 0.0, 31.875);
+  if (v < 0.125) return round(v * 1024.0) / 1024.0;
+  float e = floor(log2(v));
+  float scale = exp2(e) / 128.0;
+  return round(v / scale) * scale;
+}
+float4 PSMain(VSOut i) : SV_Target0 {
+  float4 c = t0.SampleLevel(s0, i.uv, 0);
+  if (g_mode == 1) {
+    c.rgb = float3(To7e3(c.r), To7e3(c.g), To7e3(c.b));
+    // Alpha stays full precision: the console's 2-bit alpha is what gave the
+    // ROV emulator path its stair-stepped clouds (DP1 2026-09-07), and the
+    // smooth RTV look is the one that ships.
+  }
+  return c;
+}
 )";
 
 bool CompileBlit() {
@@ -451,19 +479,23 @@ bool CompileBlit() {
   D3D12_DESCRIPTOR_RANGE range = {};
   range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   range.NumDescriptors = 1;
-  D3D12_ROOT_PARAMETER param = {};
-  param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  param.DescriptorTable.NumDescriptorRanges = 1;
-  param.DescriptorTable.pDescriptorRanges = &range;
-  param.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  D3D12_ROOT_PARAMETER params[2] = {};
+  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[0].DescriptorTable.NumDescriptorRanges = 1;
+  params[0].DescriptorTable.pDescriptorRanges = &range;
+  params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;  // b0: blit mode (1 = 7e3 range)
+  params[1].Constants.ShaderRegister = 0;
+  params[1].Constants.Num32BitValues = 1;
+  params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   D3D12_STATIC_SAMPLER_DESC sampler = {};
   sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
   sampler.MaxLOD = D3D12_FLOAT32_MAX;
   sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   D3D12_ROOT_SIGNATURE_DESC desc = {};
-  desc.NumParameters = 1;
-  desc.pParameters = &param;
+  desc.NumParameters = 2;
+  desc.pParameters = params;
   desc.NumStaticSamplers = 1;
   desc.pStaticSamplers = &sampler;
   ComPtr<ID3DBlob> blob;
@@ -990,6 +1022,7 @@ bool EnsureTextureResource(GuestTexture& t) {
 struct TextureWatch {
   uint32_t phys = 0, len = 0;
   GuestTexture* texture = nullptr;
+  GuestBuffer* buffer = nullptr;  // buffer watch (2026-09-20): exactly one of texture/buffer is set
 };
 std::mutex g_watch_mutex;
 std::vector<TextureWatch> g_watches;
@@ -1014,7 +1047,8 @@ std::pair<uint32_t, uint32_t> WatchCallback(void*, uint32_t phys_start, uint32_t
   for (size_t i = 0; i < g_watches.size();) {
     TextureWatch& w = g_watches[i];
     if (w.phys < last && first < w.phys + w.len) {
-      w.texture->written.store(true, std::memory_order_release);
+      if (w.texture) w.texture->written.store(true, std::memory_order_release);
+      if (w.buffer) w.buffer->written.store(true, std::memory_order_release);
       g_watch_hits.fetch_add(1, std::memory_order_relaxed);
       w = g_watches.back();
       g_watches.pop_back();
@@ -1035,6 +1069,34 @@ void ForgetWatch(GuestTexture* t) {
       ++i;
     }
   }
+}
+
+void ForgetWatch(GuestBuffer* b) {
+  std::lock_guard<std::mutex> lock(g_watch_mutex);
+  for (size_t i = 0; i < g_watches.size();) {
+    if (g_watches[i].buffer == b) {
+      g_watches[i] = g_watches.back();
+      g_watches.pop_back();
+    } else {
+      ++i;
+    }
+  }
+}
+
+// Called right after a buffer upload: protect its pages so the next CPU write
+// (the streaming pools are written without Lock, mid-frame) marks it written.
+void WatchBuffer(GuestBuffer& b) {
+  b.watched = false;
+  if (!g_watch_handle || !b.size || !WatchableAddress(b.address)) return;
+  const uint32_t phys = GuestPhysical(b.address);
+  ForgetWatch(&b);
+  b.written.store(false, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(g_watch_mutex);
+    g_watches.push_back({phys, b.size, nullptr, &b});
+  }
+  Mem()->EnablePhysicalMemoryAccessCallbacks(phys, b.size, true, false);
+  b.watched = true;
 }
 
 // Called right after the upload: the guest memory now matches the resource.
@@ -1219,6 +1281,10 @@ void RefreshBufferHeader(GuestBuffer& b) {
     b.endian = dw1 & 3;
   }
   if (address != b.address || size != b.size) {
+    if (b.watched) {
+      ForgetWatch(&b);
+      b.watched = false;
+    }
     b.address = address;
     if (size != b.size) {
       RetireResource(std::move(b.resource));
@@ -1271,6 +1337,7 @@ bool UploadBuffer(GuestBuffer& b) {
   Barrier(b.resource.Get(), b.state,
           b.index ? D3D12_RESOURCE_STATE_INDEX_BUFFER : D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
   b.dirty = false;
+  WatchBuffer(b);
   if (b.index) g.stats.uploads_ib++; else g.stats.uploads_vb++;
   return true;
 }
@@ -1437,6 +1504,14 @@ ID3D12PipelineState* GetPipeline(const PipelineKey& key, const GuestShader& vs, 
       break;
     }
   }
+  if (key.instanced) {
+    // One record per instance: the microcode fetches record[index / 4] and
+    // builds the corner from index % 4 (see g_IndexCount in the recompiler).
+    for (auto& ie : layout) {
+      ie.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
+      ie.InstanceDataStepRate = 1;
+    }
+  }
   d.InputLayout = {layout.data(), UINT(layout.size())};
   d.IBStripCutValue = key.strip_cut == 1 ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF
                     : key.strip_cut == 2 ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
@@ -1481,10 +1556,26 @@ bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds) {
   const uint32_t w = rt ? rt->width : ds->width, h = rt ? rt->height : ds->height;
   if (!st.viewport_valid || vp.Width <= 0 || vp.Height <= 0) vp = {0, 0, float(w), float(h), 0, 1};
   if (vp.MinDepth > vp.MaxDepth) std::swap(vp.MinDepth, vp.MaxDepth);  // z flipped in the VS (g_NdcZ)
+  // Pre-transformed vertices (PA_CL_VTE_CNTL scale/offset bits clear: UI,
+  // sprites, post quads) are screen pixels of the whole target; the guest
+  // viewport rectangle does not apply to them on Xenos (only the scissor
+  // does). The minimap (2026-09-20): four 1000 px tiles drawn with the
+  // viewport set to the 232x200 map box were squeezed into the box.
+  if ((Dev(kDevPaClVteCntl) & 0x3F) == 0) {
+    vp.TopLeftX = 0;
+    vp.TopLeftY = 0;
+    vp.Width = float(w);
+    vp.Height = float(h);
+  }
   vp.Width = std::min(vp.Width, float(w) - vp.TopLeftX);
   vp.Height = std::min(vp.Height, float(h) - vp.TopLeftY);
   g.list->RSSetViewports(1, &vp);
-  D3D12_RECT scissor = {0, 0, LONG(w), LONG(h)};
+  // Guest window scissor, clamped to the target (the scene targets are
+  // 1024x576 under a 1280x720 scissor).
+  const uint32_t stl = Dev(kDevPaScWindowScissorTl), sbr = Dev(kDevPaScWindowScissorBr);
+  D3D12_RECT scissor = {LONG(std::min<uint32_t>(stl & 0x7FFF, w)), LONG(std::min<uint32_t>((stl >> 16) & 0x7FFF, h)),
+                        LONG(std::min<uint32_t>(sbr & 0x7FFF, w)), LONG(std::min<uint32_t>((sbr >> 16) & 0x7FFF, h))};
+  if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) scissor = {0, 0, LONG(w), LONG(h)};
   g.list->RSSetScissorRects(1, &scissor);
   *out_rt = rt;
   *out_ds = ds;
@@ -1602,13 +1693,14 @@ GuestTexture* TextureForObject(uint32_t object) {
 void DumpDrawLine(const DrawArgs& a, const GuestShader& vs, const GuestShader& ps, const GuestDecl& decl,
                   const GuestSurface* rt, const GuestSurface* ds) {
   std::string out = fmt::format(
-      "Native drawline #{} prim {} idx {} b{} s{} n{} up {} | vs {:016X} ps {:016X} | rt {:08X} ({}x{} fmt {}) ds {:08X} | dc {:08X} cull {:X} vte {:03X} cc {:08X} bl {:08X}/{:08X} m {:X} vp {},{} {}x{} z {}..{} | decl {:016X} str {}/{} |",
-      g_dump_seq++, a.prim, a.indexed, a.base_vertex, a.start_index, a.count, a.up_data != nullptr, vs.hash, ps.hash,
+      "Native drawline #{} prim {} idx {} b{} s{} n{} up {} | vs {:016X} ps {:016X} | rt {:08X} ({}x{} fmt {}) ds {:08X} | dc {:08X} cull {:X} vte {:03X} cc {:08X} bl {:08X}/{:08X} m {:X} vp {},{} {}x{} z {}..{} | decl {:016X} str {}/{} off {}/{} vb {:08X}/{:08X} |",
+      g_dump_seq, a.prim, a.indexed, a.base_vertex, a.start_index, a.count, a.up_data != nullptr, vs.hash, ps.hash,
       st.rt0, rt ? rt->width : 0, rt ? rt->height : 0, rt ? uint32_t(rt->format) : 0, st.ds, Dev(kDevRbDepthControl),
       Dev(kDevPaSuScModeCntl) & 7, Dev(kDevPaClVteCntl) & 0xFFF, Dev(kDevRbColorControl), Dev(kDevRbBlendControl0),
       Dev(kDevBlendEnable), Dev(kDevRbColorMask) & 0xF, st.viewport.TopLeftX, st.viewport.TopLeftY, st.viewport.Width,
       st.viewport.Height, st.viewport.MinDepth, st.viewport.MaxDepth, decl.hash, st.streams[0].stride,
-      st.streams[1].stride);
+      st.streams[1].stride, st.streams[0].offset, st.streams[1].offset, st.streams[0].vb, st.streams[1].vb);
+
   for (uint32_t slot = 0; slot < 32; ++slot) {
     if (!st.textures[slot] || (Dev(kDevFetchConstants + slot * 24) & 3) != 2) continue;
     uint32_t fd[6];
@@ -1697,11 +1789,17 @@ void DumpDrawState(const DrawArgs& a, const GuestShader& vs, const GuestShader& 
     static uint32_t buffer_budget = 0, budget_frame = UINT32_MAX;
     const bool new_frame = budget_frame != g.frame_number;
     if (new_frame) { budget_frame = g.frame_number; buffer_budget = 256u << 20; }
-    static std::unordered_map<uint32_t, uint32_t> dumped_buffers;  // guest -> draw seq that wrote it (per frame)
+    // Keyed by the buffer's current data address, not the object: a dynamic
+    // pool buffer keeps its object while Lock hands out a new address (and new
+    // contents) for every write, so an object-keyed .ref pointed at stale
+    // bytes for every UI draw (minimap study, 2026-09-20).
+    static std::unordered_map<uint64_t, uint32_t> dumped_buffers;  // (address, size) -> draw seq that wrote it (per frame)
     if (new_frame) dumped_buffers.clear();
     auto dump_buffer = [&](const GuestBuffer* b, const char* suffix) {
       if (!b || !b->size) return;
-      if (auto it = dumped_buffers.find(b->guest); it != dumped_buffers.end()) {
+      // Content-keyed: the same pool address holds different bytes for later draws.
+      const uint64_t dkey = XXH3_64bits(HeaderPtr(b->address), b->size) ^ (uint64_t(b->size) << 40);
+      if (auto it = dumped_buffers.find(dkey); it != dumped_buffers.end()) {
         // Same buffer as an earlier draw: a hard link would need privileges; a tiny
         // redirect file names the draw whose file holds the bytes.
         std::ofstream out(dir / fmt::format("f{}_draw{:04}_{}.ref", g.frame_number, g_dump_seq, suffix));
@@ -1709,7 +1807,7 @@ void DumpDrawState(const DrawArgs& a, const GuestShader& vs, const GuestShader& 
         return;
       }
       if (b->size > buffer_budget) return;
-      dumped_buffers[b->guest] = g_dump_seq;
+      dumped_buffers[dkey] = g_dump_seq;
       buffer_budget -= b->size;
       std::ofstream out(dir / fmt::format("f{}_draw{:04}_{}.bin", g.frame_number, g_dump_seq, suffix), std::ios::binary);
       out.write(reinterpret_cast<const char*>(HeaderPtr(b->address)), b->size);
@@ -1774,6 +1872,9 @@ void ExecuteDraw(const DrawArgs& a) {
         DumpDrawState(a, *vs, *ps, *decl, rt, ds);
       }
     }
+    // Off-by-one fix (2026-09-20): the drawline and the draw's files (_dev/_s0/
+    // _ib/_vs, d{seq} target dumps) now carry the same number.
+    ++g_dump_seq;
   }
 
   // Topology.
@@ -1809,6 +1910,7 @@ void ExecuteDraw(const DrawArgs& a) {
       GuestBuffer* vb = Lookup(g_buffers, st.streams[s].vb);
       if (!vb) return SkipLog("vertex buffer not registered", st.streams[s].vb);
       RefreshBufferHeader(*vb);
+      if (vb->written.load(std::memory_order_acquire)) vb->dirty = true;
       if (vb->dirty && !UploadBuffer(*vb)) return SkipLog("vertex buffer upload failed", vb->guest);
       const uint32_t offset = std::min(st.streams[s].offset, vb->size);
       vbv[s] = {vb->resource->GetGPUVirtualAddress() + offset, vb->size - offset, st.streams[s].stride};
@@ -1824,7 +1926,26 @@ void ExecuteDraw(const DrawArgs& a) {
   uint32_t start_index = a.start_index;
   int32_t base_vertex = int32_t(a.base_vertex);
   bool strip_cut = false;
-  if (quads) {
+  // Index-scaled vertex fetch (cache flag bit 0): the VS fetches
+  // record[index / 4] and derives the corner from index % 4 (particles),
+  // which the input assembler cannot do. Draw one instance per record with a
+  // per-instance layout and one quad's indices; the VS gets r0.x =
+  // vertexId + g_IndexCount * instanceId (DP1 flamethrower, 2026-09-20).
+  const bool index_scaled = (vs->entry->reserved & 1u) != 0;
+  uint32_t instance_count = 1, start_instance = 0;
+  bool instanced = false;
+  if (quads && index_scaled && !a.indexed && !a.up_data) {
+    ibv.BufferLocation = GenerateQuadIndices(4, index_count);
+    if (!ibv.BufferLocation) return SkipLog("upload ring full (quads)");
+    ibv.Format = DXGI_FORMAT_R32_UINT;
+    ibv.SizeInBytes = index_count * 4;
+    indexed = true;
+    instanced = true;
+    start_index = 0;
+    base_vertex = 0;
+    instance_count = a.count / 4;
+    start_instance = a.start_vertex / 4;
+  } else if (quads) {
     if (a.indexed) return SkipLog("indexed quad list unsupported");
     ibv.BufferLocation = GenerateQuadIndices(a.count, index_count);
     if (!ibv.BufferLocation) return SkipLog("upload ring full (quads)");
@@ -1837,6 +1958,7 @@ void ExecuteDraw(const DrawArgs& a) {
     GuestBuffer* ib = Lookup(g_buffers, st.ib);
     if (!ib) return SkipLog("index buffer not registered", st.ib);
     RefreshBufferHeader(*ib);
+    if (ib->written.load(std::memory_order_acquire)) ib->dirty = true;
     if (ib->dirty && !UploadBuffer(*ib)) return SkipLog("index buffer upload failed", ib->guest);
     ibv = {ib->resource->GetGPUVirtualAddress(), ib->size, ib->index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
     strip_cut = a.prim == 6;
@@ -1957,6 +2079,7 @@ void ExecuteDraw(const DrawArgs& a) {
   shared[174] = 0;                            // c43.z swapped position
   shared[175] = 0;                            // c43.w swapped color
   shared[176] = decl->swapped_blend;         // c44.x g_SwappedBlend
+  shared[177] = instanced ? 4u : 0u;         // c44.y g_IndexCount (vertices per instance, 0 = plain draw)
   // c45: NDC scale/offset. With PA_CL_VTE_CNTL scale/offset bits clear the
   // VS outputs screen-space pixels (sprites, UI, post quads): map them to clip
   // space against the bound target's size. Otherwise identity.
@@ -2044,6 +2167,7 @@ void ExecuteDraw(const DrawArgs& a) {
   key.strip_cut = strip_cut ? (ibv.Format == DXGI_FORMAT_R32_UINT ? 2 : 1) : 0;
   key.strides[0] = strides[0];
   key.strides[1] = strides[1];
+  key.instanced = instanced ? 1u : 0u;
   ID3D12PipelineState* pso = GetPipeline(key, *vs, *ps, *decl);
   if (!pso) return SkipLog("pipeline unavailable");
 
@@ -2061,7 +2185,7 @@ void ExecuteDraw(const DrawArgs& a) {
   g.list->IASetVertexBuffers(0, vbv_count, vbv);
   if (indexed) {
     g.list->IASetIndexBuffer(&ibv);
-    g.list->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);
+    g.list->DrawIndexedInstanced(index_count, instance_count, start_index, base_vertex, start_instance);
   } else {
     g.list->DrawInstanced(a.count, 1, a.start_vertex, 0);
   }
@@ -2073,14 +2197,15 @@ void ExecuteDraw(const DrawArgs& a) {
     if (budget_frame != g.frame_number) { budget_frame = g.frame_number; budget = 48; }
     if (watch_ps && ps->hash == watch_ps && budget) {
       --budget;
-      RecordDump(fmt::format("d{:04}", g_dump_seq).c_str(), st.rt0, rt->resource.Get(), rt->state, rt->width, rt->height, rt->format);
+      // the draw just issued (g_dump_seq already advanced past it)
+      RecordDump(fmt::format("d{:04}", g_dump_seq ? g_dump_seq - 1 : 0).c_str(), st.rt0, rt->resource.Get(), rt->state, rt->width, rt->height, rt->format);
     }
   }
 }
 
 // Full-screen copy of `src_srv` into `dst_rtv` (dst must be in RENDER_TARGET state).
 void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst_format, uint32_t width,
-          uint32_t height) {
+          uint32_t height, uint32_t mode = 0) {
   ID3D12PipelineState* pso = BlitPso(dst_format);
   if (!pso) return;
   g.list->OMSetRenderTargets(1, &dst_rtv, FALSE, nullptr);
@@ -2091,6 +2216,7 @@ void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst
   g.list->SetPipelineState(pso);
   g.list->SetGraphicsRootSignature(g.blit_root_signature.Get());
   g.list->SetGraphicsRootDescriptorTable(0, g.views.Gpu(src_srv));
+  g.list->SetGraphicsRoot32BitConstant(1, mode, 0);
   g.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   g.list->DrawInstanced(3, 1, 0, 0);
   // Invalidate the game-side mirror: the next draw rebinds targets/PSO.
@@ -2533,6 +2659,7 @@ void OnRelease(uint32_t object, uint32_t refcount_before) {
     return;
   }
   if (auto it = g_buffers.find(object); it != g_buffers.end()) {
+    ForgetWatch(it->second.get());
     RetireResource(std::move(it->second->resource));
     g_buffers.erase(it);
     return;
@@ -2744,7 +2871,12 @@ void OnResolve(uint32_t flags, uint32_t /*rect_ptr*/, uint32_t dest_texture, uin
   Barrier(src->resource.Get(), src->state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   Barrier(t->resource.Get(), t->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-  Blit(src->srv_index, g.rtvs.Cpu(rtv), t->format, t->width, t->height);
+  // 7e3 colour targets: the console stored 7e3 per channel; bring the RGBA16F
+  // host copy back into that range so the bloom chain and the tonemap see
+  // what they saw on the console (dp_native_7e3_resolve).
+  const bool src_7e3 = !src->depth && (src->guest_format & 0x3F) == 63;
+  Blit(src->srv_index, g.rtvs.Cpu(rtv), t->format, t->width, t->height,
+       (src_7e3 && REXCVAR_GET(dp_native_7e3_resolve)) ? 1u : 0u);
   Barrier(t->resource.Get(), t->state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   if (g_dump_active && !t->is_cube && (t->depth <= 1 || t->is_3d)) {
@@ -2820,11 +2952,14 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
   st.bound_rt0 = st.bound_ds = UINT32_MAX;
   st.bound_pso = nullptr;
   // The game's vertex streaming pools (4 x 1.3 MB, FixBufferCopy threads) are
-  // written without Lock: re-upload every buffer that is used next frame.
-  // (Page watches replace this once the picture is right.)
+  // written without Lock, several times per frame. Watched buffers re-upload
+  // at the next draw after a CPU write (WatchBuffer); a buffer whose pages
+  // cannot be watched keeps the old once-per-frame re-upload.
   {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
-    for (auto& [guest, b] : g_buffers) b->dirty = true;
+    for (auto& [guest, b] : g_buffers) {
+      if (!b->watched) b->dirty = true;
+    }
   }
   return stats;
 }

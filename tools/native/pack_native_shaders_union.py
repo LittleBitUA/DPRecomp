@@ -10,9 +10,9 @@ best = {}  # hash -> (is_pixel, dxil bytes)
 for run in sys.argv[1:]:
     cpp = open(os.path.join(run, "dp_shader_cache.cpp"), encoding="utf-8").read()
     dxil = open(os.path.join(run, "dp_shader_cache.cpp.bin"), "rb").read()
-    rows = re.findall(r"\{\s*0x([0-9A-Fa-f]+),\s*0x([0-9A-Fa-f]+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}", cpp)
+    rows = re.findall(r"\{\s*0x([0-9A-Fa-f]+),\s*0x([0-9A-Fa-f]+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*(\d+))?\s*\}", cpp)
     added = 0
-    for h, uh, off, size, so, ss, spec, ispix, veo, vec in rows:
+    for h, uh, off, size, so, ss, spec, ispix, veo, vec, hostflags in rows:
         size = int(size); off = int(off)
         if size == 0:
             continue
@@ -20,21 +20,21 @@ for run in sys.argv[1:]:
         if hv in best:
             continue
         assert dxil[off:off + 4] == b"DXBC", (run, h)
-        best[hv] = (int(ispix), dxil[off:off + size])
+        best[hv] = (int(ispix), dxil[off:off + size], int(hostflags or 0))
         added += 1
     print(run, "rows", len(rows), "added", added)
 entries = sorted(best.items())
 blob_dxil = bytearray()
 table = []
-for hv, (ispix, data) in entries:
+for hv, (ispix, data, hostflags) in entries:
     off = len(blob_dxil)
     blob_dxil += data
     while len(blob_dxil) % 16:
         blob_dxil += b"\0"
-    table.append((hv, off, len(data), ispix))
+    table.append((hv, off, len(data), ispix, hostflags))
 blob = bytearray(b"DPNS0001" + struct.pack("<II", len(table), len(blob_dxil)))
-for hv, off, size, ispix in table:
-    blob += struct.pack("<QIIII", hv, off, size, ispix, 0)
+for hv, off, size, ispix, hostflags in table:
+    blob += struct.pack("<QIIII", hv, off, size, ispix, hostflags)
 blob += blob_dxil
 for dest in DEST:
     os.makedirs(os.path.dirname(dest), exist_ok=True)

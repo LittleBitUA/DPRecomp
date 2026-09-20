@@ -683,7 +683,7 @@ index 7a711a8..a19bdcb 100644
    // Drain the semaphore of its count.
    auto client_semaphore = client_semaphores_[index].get();
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
-index 20a2cd8..434f4e3 100644
+index 20a2cd8..cdfd32a 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
 +++ b/src/audio/sdl/sdl_audio_driver.cpp
 @@ -9,6 +9,7 @@
@@ -694,7 +694,59 @@ index 20a2cd8..434f4e3 100644
  #include <algorithm>
  #include <array>
  #include <cstring>
-@@ -178,6 +179,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -17,6 +18,7 @@
+ #include <rex/audio/conversion.h>
+ #include <rex/audio/downmix.h>
+ #include <rex/audio/flags.h>
++#include <rex/audio/output_layout.h>
+ #include <rex/audio/sdl/sdl_audio_driver.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+@@ -25,6 +27,12 @@
+ #include <SDL3/SDL.h>
+ 
+ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
++// DPRecomp #19 (2026-09-20): the endpoint's channel count is not always the
++// truth (Windows set to 5.1, stereo speakers behind it: the dialogue's center
++// channel plays nowhere). Let the user pick the layout.
++REXCVAR_DEFINE_STRING(audio_channels, "auto", "Audio",
++                      "Output layout: auto (follow the Windows endpoint), stereo (always fold "
++                      "5.1 to 2.0 in the runtime), surround (always submit 6 channels)");
+ 
+ namespace rex::audio::sdl {
+ 
+@@ -75,11 +83,14 @@ bool SDLAudioDriver::Initialize() {
+ 
+   // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
+   // Handing it a 6ch stream instead would use SDL's own downmix.
+-  if (obtained_spec.channels <= 2) {
++  // audio_channels overrules the endpoint (see output_layout.h).
++  const OutputLayout layout = ParseOutputLayout(REXCVAR_GET(audio_channels));
++  const uint8_t submit_channels = ResolveOutputChannels(layout, obtained_spec.channels);
++  if (submit_channels != sdl_device_channels_) {
+     SDL_DestroyAudioStream(sdl_stream_);
+     sdl_stream_ = nullptr;
+-    desired_spec.channels = 2;
+-    sdl_device_channels_ = 2;
++    desired_spec.channels = submit_channels;
++    sdl_device_channels_ = submit_channels;
+     sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
+                                             SDLCallback, this);
+     if (!sdl_stream_) {
+@@ -97,9 +108,10 @@ bool SDLAudioDriver::Initialize() {
+   // first thing worth knowing when a report says the balance is wrong on one
+   // speaker setup and right on another.
+   const char* device_name = SDL_GetAudioDeviceName(sdl_device);
+-  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch",
++  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch (audio_channels {})",
+               device_name ? device_name : "?", obtained_spec.channels, obtained_spec.freq,
+-              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
++              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_),
++              REXCVAR_GET(audio_channels));
+ 
+   if (!SDL_ResumeAudioDevice(sdl_device)) {
+     REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
+@@ -178,6 +190,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
    const StereoFold fold = GetStereoFold();
    const SurroundMix mix = GetSurroundMix();
    const float gain = GetOutputGain();
@@ -29696,10 +29748,10 @@ index 2251429..cee7285 100644
        break;
      case SDL_EVENT_WINDOW_EXPOSED:
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bda2ad..e399b79 100644
+index 7bda2ad..3506992 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
-@@ -11,12 +11,17 @@ add_executable(unit_tests
+@@ -11,12 +11,18 @@ add_executable(unit_tests
      core/hash_test.cpp
      core/stream_test.cpp
      core/chrono_test.cpp
@@ -29714,10 +29766,11 @@ index 7bda2ad..e399b79 100644
      input/input_assignment_test.cpp
 +    input/state_filter_test.cpp
 +    input/stick_mapping_test.cpp
++    audio/output_layout_test.cpp
      codegen/codegen_writer_test.cpp
      codegen/output_partition_test.cpp
      codegen/output_stamp_test.cpp
-@@ -36,6 +41,7 @@ target_include_directories(unit_tests PRIVATE
+@@ -36,6 +42,7 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime
