@@ -1,6 +1,12 @@
 # Changelog
 
-Release notes for each version: [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.4.5 (September 2026)
+
+- **Settings labels cut off (launcher, #32).** A label wider than its column ("Aim: per-axis mouse floor (fixes diagonal staircase)", "Native Renderer (work in progress: …)") wrapped to a second line that the fixed row height clipped. Labels are single-line now and end in an ellipsis when they don't fit (the Ukrainian strings run longer than the English ones), the two offenders were shortened, and the explanation moved to a tooltip shown when the label is hovered (`CvarRow::description`, one tooltip control per settings window).
+- The game window title was hardcoded to "1.3"; it now carries the release version.
+- Release notes ask for native renderer preview testers: how to enable it (launcher → Experimental → Native Renderer (preview)), what to expect, what to report.
 
 ## 1.4.4 (September 2026)
 
