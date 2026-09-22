@@ -7,15 +7,17 @@
 **A native Windows port of *Deadly Premonition* (Xbox 360, 2010) by static recompilation. No emulator.**<br>
 60 FPS on the console's own time base · real mouse look · keyboard and PlayStation button prompts · FSR 3 and 2× supersampling · a launcher that updates itself · PAL and USA discs
 
-[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip)
 [![Issues](https://img.shields.io/github/issues/LittleBitUA/DPRecomp?style=for-the-badge&color=orange)](https://github.com/LittleBitUA/DPRecomp/issues)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.6 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.4.6 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip)
+
+`DPRecomp-1.4.6-win64.zip` · 42 MB · Windows 10 / 11 64-bit
 
 [Release notes](docs/RELEASE-NOTES-1.4.6.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
@@ -34,7 +36,7 @@
 |---|---|
 | ⏱️ **60 FPS the right way.** The logic tick is unlocked from the 30 FPS vblank gate and fed whole ticks with an error accumulator, exactly like the console counts vblanks. Cutscenes stay in sync with the voices. Switchable. | 🖱️ **Real mouse look.** Mouse motion drives the game's own camera code: walking, aiming, driving and cutscene cameras. No stick emulation, no dead zone, no acceleration curve. Sensitivity and Y-invert in the launcher. |
 | ⌨️ **The prompts speak keyboard.** The A / B / X / Y / LB / RB icons become pictures of *your* keys, generated from your bindings. Or PlayStation glyphs for DualShock / DualSense players. | 🎮 **Every controller.** Xbox, DualShock 4, DualSense (adaptive triggers: weapon click, resistance), any XInput or SDL pad, plus a keyboard layout that mirrors the PC Director's Cut. |
-| 🖼️ **2× supersampling on the fast ROV path**, AMD FSR 3 + FXAA presenter (or CAS, FSR 1, bilinear), anisotropic filtering, window / monitor / VRR settings. | 🚀 **A launcher.** `PlayDeadlyPremonition.exe`: every setting in five tabs, English and Ukrainian, first-run `.iso` installer, one-click updates from GitHub, config self-healing. |
+| 🖼️ **2× supersampling on the fast ROV path**, AMD FSR 3 + FXAA presenter (or CAS, FSR 1, bilinear), anisotropic filtering, window / monitor / VRR settings. A **native Direct3D 12 renderer** is in preview next to the emulated path, with its own internal resolution up to 4×. | 🚀 **A launcher.** `PlayDeadlyPremonition.exe`: every setting in five tabs, English and Ukrainian, first-run `.iso` installer, one-click updates from GitHub, config self-healing. |
 | 🌍 **Both regions.** The zip holds a recompiled build for the European (PAL) and the USA (NTSC) disc; the launcher picks the right one from your `default.xex`. | 🧩 **Modding built in.** Every texture is addressable by a stable hash: dump it, edit the PNG, drop it back. That is how the key prompts and the *Recompilation* title logo are done. |
 | 💾 **Portable.** Unzip anywhere; saves, config and the shader cache live in the game folder. Runs on SSE4.1-era CPUs, no AVX required. | 🏆 **Achievements** are tracked locally with unlock toasts (**F7**). There is no Xbox Live. |
 
@@ -44,7 +46,7 @@
 
 **You need:** Windows 10 / 11 64-bit · a Direct3D 12 GPU with rasterizer-ordered views (NVIDIA GTX 900+, AMD RX 400+, Intel Arc; recent integrated graphics at 1×) · ~6 GB free for the game data · your *Deadly Premonition* Xbox 360 disc image or extracted files.
 
-1. **Download** the [latest release](https://github.com/LittleBitUA/DPRecomp/releases/latest) and unzip it anywhere outside *Program Files*.
+1. **Download** [`DPRecomp-1.4.6-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip) and unzip it anywhere outside *Program Files*.
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
@@ -52,59 +54,42 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 
 ---
 
-## What's new in 1.3
+## What's new
 
-**1.4.6:** native renderer preview (Experimental → Native): mipmaps, console-range colour, fixed shadow-map depth format, a recompiler fix that restored every conditional shader branch, and an internal resolution setting up to 4x. [Notes](docs/RELEASE-NOTES-1.4.6.md).
+**1.4.6 — the native renderer preview grows up.** Off by default; the emulated path is unchanged.
 
-**1.4.5:** launcher fix: settings labels no longer wrap into a clipped second line; long explanations are tooltips now (#32). Also a call for testers of the native renderer preview (Experimental tab): tell us how it runs on your GPU. [Notes](docs/RELEASE-NOTES-1.4.5.md).
+- **Internal resolution up to 4×** for the native renderer (launcher → **Native**). The scene, the reflections, the shadow maps and the final image are rendered larger and scaled down to your window. On an RTX 5070 at 2× the GPU spends 1.1 ms per frame and the game holds its 60 fps.
+- **Mipmaps are back**: only the base level of each texture was uploaded, so distant surfaces shimmered.
+- **Shadow maps use the console's 24-bit depth format**, which is what the polygon offset was always computed for. That was the source of the shadow acne.
+- **Colour is clamped to the console's range per draw** (7e3, max 31.875), not only at resolve, so lamps and the flamethrower stop blowing out.
+- **A recompiler fix restored conditional branches in 297 of 1131 shaders**: `cond_exec` ignored its bool constant, so those blocks always ran.
+- **Numbers in the log** for native runs: draws, uploads, pipelines, and frame / CPU / GPU milliseconds as p50 / p90 / p99.
 
-**1.4.4:** Audio Output option (launcher → Advanced): Auto / Stereo / Surround. Stereo fixes quiet or missing dialogue when Windows is set to 5.1 but the speakers are stereo (#19). [Notes](docs/RELEASE-NOTES-1.4.4.md).
+[Full notes](docs/RELEASE-NOTES-1.4.6.md).
 
-**1.4.3:** launcher hotfix: "Share Shader Cache" never actually delivered anything (Windows PowerShell mangled the upload's JSON and the error was silent); it works now and re-sends once. [Notes](docs/RELEASE-NOTES-1.4.3.md).
+**1.4.5:** settings labels no longer wrap into a clipped second line; long explanations are tooltips (#32). [Notes](docs/RELEASE-NOTES-1.4.5.md).
 
-**1.4.2:** the rare endless "Saving" screen is fixed (#21: the runtime could not clear the old save folder while another program held a file in it, and the game waits forever on that error; it now retries, overwrites in place, and if it still must fail tells the game something it can show), diagonal mouse aim no longer staircases (#30), and the work-in-progress native renderer ships as an off-by-default preview under a new Experimental tab. [Notes](docs/RELEASE-NOTES-1.4.2.md).
+**1.4.4:** Audio Output (Auto / Stereo / Surround). Stereo fixes quiet or missing dialogue when Windows is set to 5.1 but the speakers are not (#19). [Notes](docs/RELEASE-NOTES-1.4.4.md).
 
-**1.4.1:** the Director's Cut controller layout now stands down in the car (#28: 1.4.0 remapped the triggers while driving), the launcher's Game Language works on the European disc (#27: the game wanted a retail console region and got a dev-kit one), and PlayStation prompt sets swap L2/R2 with that layout. [Notes](docs/RELEASE-NOTES-1.4.1.md).
+**1.4.3:** the launcher's *Share Shader Cache* never actually delivered anything; it does now. [Notes](docs/RELEASE-NOTES-1.4.3.md).
 
-**1.4.0:** two things from the wishlist (#19). *Skip Intro* (launcher → Advanced) jumps past the publisher logos to the title screen, or straight into the main menu. *Controller Layout* (launcher → Controls) gives pads the Director's Cut layout: left trigger aims, right trigger fires. Both off by default. [Notes](docs/RELEASE-NOTES-1.4.0.md).
+**1.4.2:** the endless "Saving" screen (#21), diagonal mouse aim (#30), and the first native renderer preview. [Notes](docs/RELEASE-NOTES-1.4.2.md).
 
-**1.3.7:** the art-gallery device removal (#22) is fixed at the root. The texture the 1.3.6 log named is a 3D texture sampled through a 2D wrapper, and that wrapper was created at the guest size while its contents are uploaded at the render resolution scale, so a 64×64 upload landed in a 32×32 resource. Both resource paths now share one size rule. [Notes](docs/RELEASE-NOTES-1.3.7.md).
+Everything since 1.0, version by version: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
-**1.3.6 (hotfix, replaces 1.3.5):** the 1.3.5 copy guard treated the last mips of DXT textures as oversized (a 4×4 block into a 2×2 level is legal in Direct3D 12) and killed the GPU device itself about a minute into any session, including the title screen. The guard now works in whole blocks. Do not run 1.3.5. [Notes](docs/RELEASE-NOTES-1.3.6.md).
-
-**1.3.5 (hotfix):** the GPU device removal while tailing Nick (#22) turned out to be a texture upload copying a 64×64 mip into a 32×32 level, which Direct3D 12 answers by removing the device. The copy is now clamped to the level and the texture is named in the log; the game survives the frame. [Notes](docs/RELEASE-NOTES-1.3.5.md).
-
-**1.3.4 (diagnostics, please test):** a `[stats]` line in the log every minute (memory, VRAM, guest heaps, kernel objects, GPU caches) written from its own thread so it survives a hang (#21) and shows the VRAM picture before a device loss (#22); the PhysX error stream and the game's own asserts (with addresses) in the log; the green / rainbow frame on the ROV path (#23) is detected and logged, with two switches to try. The experimental animation-event switches from 1.3.0 are gone. [Notes](docs/RELEASE-NOTES-1.3.4.md).
-
-**1.3.3:** the launcher's Update button works on the Steam Deck (no more PowerShell, #20), mouse aiming works in the clock-tower boss fight (#24), and a GPU device removal now leaves the debug layer's last message in the log (#22). [Notes](docs/RELEASE-NOTES-1.3.3.md).
-
-**1.3.2 (diagnostics):** no gameplay changes, but the log now explains crashes, hangs and GPU device losses by itself: a crash report with the game's thread and call stack plus a minidump in `logs\`, thread names and frame numbers on every line, DRED breadcrumbs on device removal, save-container steps, optional file-open and debug-layer logging. [Notes](docs/RELEASE-NOTES-1.3.2.md).
-
-**1.3.1 (hotfix):** sound that stopped a few seconds into some cutscenes and never came back (the morgue, the tree profiling, the lumbermill nightmare, #16) is fixed. The XMA decoder was a pre-May-2026 snapshot of Xenia-canary's; five upstream fixes to the decoder / audio-engine handshake are ported. Verified on the reporter's save. [Notes](docs/RELEASE-NOTES-1.3.1.md).
-
-![Sky, tree crowns and car glass after the fix (ROV path, 2×)](docs/screenshots/sky_fix.jpg)
-
-- **The sky is fixed.** The console's HDR scene format keeps only 2 bits of alpha, and the game draws its sky and fog masks into them, so the console-faithful ROV path showed a stair-stepped sky and hard contours on tree crowns and glass. 1.3 keeps a 16-bit shadow alpha next to the EDRAM buffer, validated by a tag so it can never go stale. ROV is the recommended render path now.
-- **FSR 3 no longer flickers.** The upscaler was auto-exposing every frame; whole-image tint changes between frames and brightness flashes on cuts are gone.
-- **60 FPS runs on whole ticks** like the console (the real fix for #12, and for scripted scenes that ran fast on fractional ticks).
-- **Doubled sounds and prop swaps at 60 FPS (#17, #18):** the game's animation event dispatcher is mapped; an experimental switch is in, off by default. We need your logs, see below.
-- Pipeline cache versioning, audio underrun diagnostics, the [Steam artwork pack](#steam).
-
-Full notes: [docs/RELEASE-NOTES-1.3.0.md](docs/RELEASE-NOTES-1.3.0.md). Earlier versions: [docs/CHANGELOG.md](docs/CHANGELOG.md).
+![Sky, tree crowns and car glass on the ROV path at 2×](docs/screenshots/sky_fix.jpg)
 
 ---
 
 ## 🧪 Help us test
 
-Most of 1.3 is verified on one machine and a handful of saves. A 30-hour game with hundreds of scenes needs more eyes than that, and every report so far has led to a real fix. What helps most:
+Every fix in the list above started as somebody's report. What is most useful right now:
 
-- **Play at 60 FPS and tell us about anything that runs at the wrong speed, doubles a sound, or swaps a prop** (the coffee cup, the cigarette jar lid). Attach `logs\deadlyprem_XXX.log`; since 1.3.2 it carries thread names, frame numbers and a periodic `[stats]` line, which is what we need.
-- **Cutscene sync:** the scene where York meets Emily and George is the reference. In sync or not, with 60 FPS on?
-- **The sky, tree edges, glass, fog:** any scene where the ROV path still shows hard contours or blue polygonal patches on characters. Screenshot plus the scene name.
-- **FSR 3:** frame-to-frame flicker or brightness flashes with `fsr3`, and whether `fsr` in the launcher makes it go away.
-- **Audio loss** (#16) is fixed in 1.3.1. If any scene still goes silent, the log from that session (`logs\deadlyprem_XXX.log`) plus the scene name.
-- **Steam Deck / AMD integrated graphics:** frame rates with ROV vs RTV, 1× vs 2×.
-- **Crashes:** GPU and driver, render path, internal resolution, a screenshot, the newest `logs\deadlyprem_XXX.log` and the `logs\*.dmp` written next to it (since 1.3.2 the log ends with a crash report: the game thread, the call stack, and for GPU losses the DRED breadcrumbs), and whether `Internal Resolution 1×` or `RTV` changed anything.
+- **The native renderer preview** (launcher → **Native**). It is incomplete on purpose, and hardware other than ours is the part we cannot see. Tell us your GPU and CPU, the frame rate in the same spot with the renderer off and on, and whether **Internal Resolution** 2× is playable. The log line that starts `Native renderer: frame #` carries the frame, CPU and GPU milliseconds we need; attach `logs\deadlyprem_XXX.log`.
+- **60 FPS oddities:** anything that runs at the wrong speed or desyncs from the voices. The scene where York meets Emily and George is our reference.
+- **The ROV path's leftovers:** hard contours on tree crowns and glass, light-blue polygonal patches on characters in dialogue scenes, flat cloud blotches (#10). A screenshot plus the scene name.
+- **Steam Deck and AMD integrated graphics:** frame rates with ROV vs RTV, 1× vs 2×.
+- **Crashes:** GPU and driver, render path, internal resolution, a screenshot, the newest `logs\deadlyprem_XXX.log` and any `logs\*.dmp` next to it. The log ends with a crash report: the game thread, the call stack, and for GPU losses the DRED breadcrumbs.
 
 Open an [issue](https://github.com/LittleBitUA/DPRecomp/issues/new) with a save file if the problem is scene-specific (`userdata\` → the folder for your XUID). "It works" reports with your GPU and settings are welcome too. And if you say yes when the launcher asks to **share your shader cache**, whoever plays after you gets fewer first-time stutters ([what exactly is sent](#faq)).
 
@@ -112,7 +97,7 @@ Open an [issue](https://github.com/LittleBitUA/DPRecomp/issues/new) with a save 
 
 ## The launcher and in-game keys
 
-`PlayDeadlyPremonition.exe` shows every setting in five tabs: **Graphics** (render path, internal resolution, upscaler and sharpness, FXAA, 60 FPS, window, monitor list), **Advanced** (game language, skip intro, GPU adapter, texture cache, audio, Steam overlay switch, shader cache sharing, texture dump), **Mouse** (direct camera control, sensitivity, invert, key stick ramp, auto-shake), **Controls** (button prompts style, controller layout, DualSense triggers, every key binding), **Debug** (log level, PSO policy). It writes `deadlyprem.toml` next to the game and repairs keys the in-game overlay may drop.
+`PlayDeadlyPremonition.exe` shows every setting on its own page: **Graphics** (render path, internal resolution, upscaler and sharpness, FXAA, 60 FPS, window, monitor list), **Advanced** (game language, skip intro, GPU adapter, texture cache, audio output, Steam overlay switch, shader cache sharing, texture dump), **Mouse** (direct camera control, sensitivity, invert, key stick ramp, auto-shake), **Controls** (button prompts style, controller layout, DualSense triggers, every key binding), **Debug** (log level, PSO policy), **Experimental** and **Native** (the native renderer preview and its internal resolution). It writes `deadlyprem.toml` next to the game and repairs keys the in-game overlay may drop.
 
 In the game: **F4** runtime settings overlay (live changes, *Save to config* writes them back) · **F3** performance overlay · **F7** achievements.
 
@@ -186,7 +171,7 @@ Yes. The USA disc ships a different executable, so the zip contains two recompil
 <details>
 <summary><b>Is 60 FPS safe?</b></summary>
 
-It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.3 the game gets whole logic ticks with an error accumulator, exactly like the console's vblank count: 1, 1, 1, ... and a 2 every few hundred frames, so long cutscenes stay in sync with the audio and scripted scenes never see fractional ticks. Known leftovers: some animation-keyed sounds play twice and a few prop attach events misfire (#17, #18), which we are working on. If something time-related misbehaves, switch it off (Graphics → *60 FPS*) and open an issue with the location.
+It changes the game's time base rather than just doubling the frame rate, so animation, physics and the clock run at normal speed. Since 1.3 the game gets whole logic ticks with an error accumulator, exactly like the console's vblank count: 1, 1, 1, ... and a 2 every few hundred frames, so long cutscenes stay in sync with the audio and scripted scenes never see fractional ticks. The doubled sounds and prop swaps reported at 60 FPS (#17, #18) went away with that change and are closed. If something time-related still misbehaves, switch it off (Graphics → *60 FPS*) and open an issue with the location.
 </details>
 
 <details>
@@ -233,12 +218,21 @@ Yes. Turn on *Texture Dump* in the launcher (Advanced), play, pick the PNG from 
 
 ## Known issues
 
-- **60 FPS:** some animation-keyed sounds play twice and a few prop attach events misfire (#17, #18). Under investigation; an experimental switch is in 1.3.
+**The emulated path (default):**
+
 - **Terrain layer blending** shows hard triangle edges while walking and blends correctly when standing still (long-standing, under investigation).
-- Some dialogue scenes show **light-blue polygonal patches on characters** with the ROV path (the scene's fog colour through the composite mask). Under investigation with RenderDoc.
-- **2× internal resolution:** the game's glow, depth of field and the sun's halo are computed in buffers sized for 1×, so bright edges can show a fine grid and the blur is softer than the original. 1× does not have it.
+- Some dialogue scenes show **light-blue polygonal patches on characters** with the ROV path (the scene's fog colour through the composite mask).
 - Clouds in some outdoor scenes render as flat blotches with hard edges (#10).
+- **2× internal resolution:** the game's glow, depth of field and the sun's halo are computed in buffers sized for 1×, so bright edges can show a fine grid and the blur is softer than the original. 1× does not have it.
+- Shadows only appear on nearby casters (#25); this is how the game builds its cascades and is probably the console's behaviour, but it is not verified against hardware yet.
 - Linux is not supported yet.
+
+**The native renderer preview (off by default):**
+
+- The mirror floor in the sheriff's station comes out white, and outdoors the picture has a milky veil over it. Same root cause, still open.
+- Shadows slide with the character instead of staying put.
+- A few triangle-fan draws are skipped, so small pieces of geometry are missing.
+- Depth of field and glow are softer than on the emulated path.
 
 ---
 
