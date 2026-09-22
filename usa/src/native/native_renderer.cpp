@@ -37,6 +37,7 @@
 #include <wrl/client.h>
 
 #include "native_graphics_system.h"
+#include "native_scale.h"  // [NEW FABLE VERSION] internal resolution rules (tested in tests/native_scale_test.cpp)
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "d3d12.lib")
@@ -49,6 +50,15 @@ REXCVAR_DEFINE_BOOL(dp_native_7e3_resolve, true, "DP1",
 REXCVAR_DEFINE_BOOL(dp_native_dump_all, false, "DP1", "Dump frame: detailed state for every draw (not just the first per shader/target key)");
 REXCVAR_DEFINE_STRING(dp_native_dump_ps, "", "DP1",
                       "Dump frame: also record the bound render target after every draw whose pixel shader hash (hex) matches");
+// [NEW FABLE VERSION] 2026-09-22: internal resolution multiplier (DPfix's
+// renderWidth/shadowMapScale/reflectionScale in one knob). The game's own
+// surfaces and the textures it resolves them into are allocated N times larger;
+// every shader addresses them through normalized UVs, and the screen-space
+// constants the game uploads (1/width texel steps) keep their screen-space
+// meaning, so the picture is the same one at a higher sampling rate.
+REXCVAR_DEFINE_INT32(dp_native_scale, 1, "DP1",
+                     "Native renderer: internal resolution multiplier (1-4). 2 renders the scene, the reflections, the "
+                     "shadow maps and the final image at twice the console's resolution");
 REXCVAR_DEFINE_INT32(dp_native_dump_frame, 0, "DP1",
                      "Native renderer diagnostics: at this frame number write the front buffer and every resolve "
                      "destination texture as .ppm into logs/native_dump (0 = off)");
@@ -208,6 +218,13 @@ struct GuestTexture {
   bool is_cube = false;
   bool is_3d = false;         // k3D (volume or stacked): Texture3D on the host, slice RTVs
   bool is_stacked_3d = false;  // stacked: 2D-tiled slices in guest memory (volume: 3D tiling)
+  // [NEW FABLE VERSION] host mip chain (guest levels 0..mip_max_level; 3D/stacked stay single-level).
+  uint32_t mip_levels = 1;
+  // [NEW FABLE VERSION] host resolution multiplier; only resolve destinations
+  // scale (a CPU-uploaded texture must keep the guest's size and layout).
+  uint32_t scale = 1;
+  uint32_t hw() const { return width * scale; }
+  uint32_t hh() const { return height * scale; }
   ComPtr<ID3D12Resource> resource;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   uint32_t srv_index = UINT32_MAX;
@@ -219,6 +236,10 @@ struct GuestSurface {
   uint32_t guest = 0;
   uint32_t width = 0, height = 0, guest_format = 0;
   uint32_t edram_base = 0;
+  // [NEW FABLE VERSION] host resolution multiplier (1 = the console's size).
+  uint32_t scale = 1;
+  uint32_t hw() const { return width * scale; }
+  uint32_t hh() const { return height * scale; }
   bool depth = false;
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   ComPtr<ID3D12Resource> resource;
@@ -303,7 +324,8 @@ constexpr uint32_t kViewHeapSize = 8192;
 constexpr uint32_t kSamplerHeapSize = 256;
 constexpr uint32_t kRtvHeapSize = 512;
 constexpr uint32_t kDsvHeapSize = 128;
-constexpr uint32_t kSharedConstantsBytes = 768;  // c0..c47 (c47 = user clip plane 0)
+// [NEW FABLE VERSION] c48 = x: RT0 is 7e3 (PS clamps colour to 0..31.875), yz: sub-pixel jitter (clip units), w: reserved.
+constexpr uint32_t kSharedConstantsBytes = 784;  // c0..c48 (c47 = user clip plane 0, c48 = dp1 misc)
 
 struct UploadRing {
   ComPtr<ID3D12Resource> buffer;
@@ -412,7 +434,14 @@ struct Context {
   ComPtr<ID3DBlob> blit_vs, blit_ps;
   std::unordered_map<uint32_t, ComPtr<ID3D12PipelineState>> blit_psos;  // by dest DXGI format
   std::unordered_map<PipelineKey, ComPtr<ID3D12PipelineState>, PipelineKeyHash> psos;
-  std::unordered_map<uint32_t, uint32_t> sampler_indices;  // key -> heap index
+  std::unordered_map<uint64_t, uint32_t> sampler_indices;  // key -> heap index ([NEW FABLE VERSION] 64-bit: mip range + lod bias)
+  // [NEW FABLE VERSION] GPU frame timing: two timestamps per frame slot, read back
+  // after the fence wait for that slot (two frames later).
+  ComPtr<ID3D12QueryHeap> ts_heap;
+  ComPtr<ID3D12Resource> ts_readback;
+  uint64_t* ts_mapped = nullptr;
+  uint64_t ts_frequency = 0;
+  bool ts_pending[kFramesInFlight] = {};
   ComPtr<ID3D12Resource> white_texture;
   uint32_t white_srv = UINT32_MAX;
   // Null descriptors (read as zeros): what an unbound / invalid fetch constant
@@ -429,6 +458,42 @@ struct Context {
   uint32_t log_budget = 200;
 };
 Context g;
+
+// [NEW FABLE VERSION] Resolution multiplier for a render target of this guest
+// size (dp_native_scale, read once in InitContext). The small fixed-function
+// chains (the 1x1 luminance ladder with its 256x64 / 32x32 steps, the tiny
+// masks) stay at the console's size: they carry averages rather than an image,
+// so leaving them alone keeps their arithmetic identical to the 1x path.
+uint32_t g_scale = 1;
+inline uint32_t ScaleFor(uint32_t w, uint32_t h) { return ScaleForTarget(w, h, g_scale); }
+
+// [NEW FABLE VERSION] Frame timing window (QueryPerformanceCounter): the frame
+// interval between Swaps, the CPU time inside the native path, the fence wait
+// and the GPU time per frame. Summarised (p50/p90/p99) by PerfSummaryAndReset.
+inline int64_t Qpc() {
+  LARGE_INTEGER li;
+  QueryPerformanceCounter(&li);
+  return li.QuadPart;
+}
+inline double QpcToMs(int64_t ticks) {
+  static const double k = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return 1000.0 / double(f.QuadPart);
+  }();
+  return double(ticks) * k;
+}
+struct PerfWindow {
+  std::vector<float> frame_ms, cpu_ms, wait_ms, gpu_ms;
+  int64_t last_swap = 0;
+  int64_t cpu_ticks = 0;   // native path CPU time this frame
+  int64_t wait_ticks = 0;  // fence waits this frame
+};
+PerfWindow g_perf;
+struct ScopedCpuTimer {
+  int64_t t0 = Qpc();
+  ~ScopedCpuTimer() { g_perf.cpu_ticks += Qpc() - t0; }
+};
 
 // ---------------------------------------------------------------------------
 // Blit shader: full-screen triangle sampling t0 into the bound RTV.
@@ -635,8 +700,16 @@ bool BeginFrame() {
   // Wait for the frame that used this allocator two frames ago.
   const UINT64 needed = g.fence_values[g.frame_index];
   if (needed && g.fence->GetCompletedValue() < needed) {
+    const int64_t w0 = Qpc();  // [NEW FABLE VERSION] fence wait accounting
     g.fence->SetEventOnCompletion(needed, g.fence_event);
     WaitForSingleObject(g.fence_event, INFINITE);
+    g_perf.wait_ticks += Qpc() - w0;
+  }
+  // [NEW FABLE VERSION] the GPU timestamps of the frame that used this slot are complete now.
+  if (g.ts_mapped && g.ts_pending[g.frame_index]) {
+    g.ts_pending[g.frame_index] = false;
+    const uint64_t t0 = g.ts_mapped[g.frame_index * 2], t1 = g.ts_mapped[g.frame_index * 2 + 1];
+    if (t1 > t0 && g.ts_frequency) g_perf.gpu_ms.push_back(float(double(t1 - t0) * 1000.0 / double(g.ts_frequency)));
   }
   g.retired[g.frame_index].clear();
   g.allocators[g.frame_index]->Reset();
@@ -644,6 +717,7 @@ bool BeginFrame() {
   g.upload[g.frame_index].head = 0;
   ID3D12DescriptorHeap* heaps[] = {g.views.heap.Get(), g.samplers.heap.Get()};
   g.list->SetDescriptorHeaps(2, heaps);
+  if (g.ts_heap) g.list->EndQuery(g.ts_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, g.frame_index * 2);
   g.recording = true;
   g.stats = RendererStats{};
   // Upload the white texture once.
@@ -669,6 +743,12 @@ bool BeginFrame() {
 
 void SubmitFrame() {
   if (!g.recording) return;
+  if (g.ts_heap) {  // [NEW FABLE VERSION] GPU frame timing
+    g.list->EndQuery(g.ts_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, g.frame_index * 2 + 1);
+    g.list->ResolveQueryData(g.ts_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, g.frame_index * 2, 2, g.ts_readback.Get(),
+                             UINT64(g.frame_index) * 2 * sizeof(uint64_t));
+    g.ts_pending[g.frame_index] = true;
+  }
   g.list->Close();
   ID3D12CommandList* lists[] = {g.list.Get()};
   g.queue->ExecuteCommandLists(1, lists);
@@ -706,12 +786,43 @@ bool InitContext() {
   ok = ok && g.rtvs.Init(g.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRtvHeapSize, false);
   ok = ok && g.dsvs.Init(g.device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kDsvHeapSize, false);
   ok = ok && CreateRootSignature() && CompileBlit() && CreateWhiteTexture();
+  if (ok) {
+    // [NEW FABLE VERSION] timestamp queries for the GPU time per frame (optional: the renderer works without them).
+    D3D12_QUERY_HEAP_DESC qd = {};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = 2 * kFramesInFlight;
+    if (SUCCEEDED(g.device->CreateQueryHeap(&qd, IID_PPV_ARGS(&g.ts_heap)))) {
+      D3D12_RESOURCE_DESC rd = {};
+      rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      rd.Width = 2 * kFramesInFlight * sizeof(uint64_t);
+      rd.Height = 1;
+      rd.DepthOrArraySize = 1;
+      rd.MipLevels = 1;
+      rd.SampleDesc.Count = 1;
+      rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      if (SUCCEEDED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE,
+                                                      &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&g.ts_readback))) &&
+          SUCCEEDED(g.ts_readback->Map(0, nullptr, reinterpret_cast<void**>(&g.ts_mapped))) &&
+          SUCCEEDED(g.queue->GetTimestampFrequency(&g.ts_frequency))) {
+        // ready
+      } else {
+        g.ts_mapped = nullptr;
+        g.ts_readback.Reset();
+        g.ts_heap.Reset();
+      }
+    }
+  }
   g_shader_cache.Load();
   if (!ok) {
     REXLOG_ERROR("Native renderer: D3D12 context creation failed; draws are skipped");
     g.failed = true;
     return false;
   }
+  // [NEW FABLE VERSION] internal resolution multiplier, read once (a change mid-frame
+  // would leave half the targets at the old size).
+  g_scale = ClampScale(REXCVAR_GET(dp_native_scale));
+  if (g_scale != 1) REXLOG_INFO("Native renderer: internal resolution scale {}x (dp_native_scale)", g_scale);
   g_watch_handle = Mem()->RegisterPhysicalMemoryInvalidationCallback(WatchCallback, nullptr);
   REXLOG_INFO("Native renderer: page watch {}", g_watch_handle ? "registered" : "UNAVAILABLE (textures re-upload on Unlock only)");
   g.ready = true;
@@ -736,6 +847,10 @@ SurfaceFormat MapSurfaceFormat(uint32_t guest_format) {
   const uint32_t texture_format = guest_format & 0x3F;
   switch (texture_format) {
     case 22:  // k_24_8 (D24S8)
+      // [NEW FABLE VERSION] the console's 24-bit UNORM depth: the polygon offset
+      // (shadow casters) is converted in 1/2^24 units, which only holds on a
+      // UNORM24 host format (on D32_FLOAT the bias scales with the depth value).
+      return {DXGI_FORMAT_D24_UNORM_S8_UINT, true};
     case 23:  // k_24_8_FLOAT (D24FS8)
       return {DXGI_FORMAT_D32_FLOAT, true};
     case 6:  // k_8_8_8_8
@@ -875,35 +990,49 @@ namespace {
 
 bool EnsureSurfaceResource(GuestSurface& s) {
   if (s.resource) return true;
+  s.scale = ScaleFor(s.width, s.height);  // [NEW FABLE VERSION]
   D3D12_RESOURCE_DESC desc = {};
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  desc.Width = s.width;
-  desc.Height = s.height;
+  desc.Width = s.hw();
+  desc.Height = s.hh();
   desc.DepthOrArraySize = 1;
   desc.MipLevels = 1;
-  desc.Format = s.depth ? DXGI_FORMAT_R32_TYPELESS : s.format;
+  // [NEW FABLE VERSION] depth surfaces: s.format is the DSV format (D24_UNORM_S8 for the
+  // console's D24S8, D32_FLOAT for D24FS8); the resource is the matching typeless format.
+  const bool d24 = s.depth && s.format == DXGI_FORMAT_D24_UNORM_S8_UINT;
+  desc.Format = s.depth ? (d24 ? DXGI_FORMAT_R24G8_TYPELESS : DXGI_FORMAT_R32_TYPELESS) : s.format;
   desc.SampleDesc.Count = 1;
   desc.Flags = s.depth ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   D3D12_CLEAR_VALUE clear = {};
-  clear.Format = s.depth ? DXGI_FORMAT_D32_FLOAT : s.format;
+  clear.Format = s.format;
   if (s.depth) clear.DepthStencil.Depth = 1.0f;
   const D3D12_RESOURCE_STATES initial = s.depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
   if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &desc,
                                                initial, &clear, IID_PPV_ARGS(&s.resource)))) {
-    REXLOG_ERROR("Native renderer: surface {:08X} {}x{} format {:08X} host creation failed", s.guest, s.width, s.height,
-                 s.guest_format);
-    return false;
+    REXLOG_ERROR("Native renderer: surface {:08X} {}x{} (host {}x{}) format {:08X} host creation failed", s.guest, s.width,
+                 s.height, s.hw(), s.hh(), s.guest_format);
+    // [NEW FABLE VERSION] out of video memory at this scale: fall back to 1x
+    // rather than losing the target (a missing surface is a black frame).
+    if (s.scale == 1) return false;
+    REXLOG_WARN("Native renderer: retrying surface {:08X} at 1x (dp_native_scale {} did not fit)", s.guest, s.scale);
+    s.scale = 1;
+    desc.Width = s.width;
+    desc.Height = s.height;
+    if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
+                                                 &desc, initial, &clear, IID_PPV_ARGS(&s.resource)))) {
+      return false;
+    }
   }
   s.state = initial;
   if (s.depth) {
     s.view_index = g.dsvs.Allocate();
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
-    dsv.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv.Format = s.format;
     dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     g.device->CreateDepthStencilView(s.resource.Get(), &dsv, g.dsvs.Cpu(s.view_index));
     s.srv_index = g.views.Allocate();
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
-    srv.Format = DXGI_FORMAT_R32_FLOAT;
+    srv.Format = d24 ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : DXGI_FORMAT_R32_FLOAT;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
@@ -966,12 +1095,21 @@ uint32_t SrvMapping(const GuestTexture& t) {
 bool EnsureTextureResource(GuestTexture& t) {
   if (t.resource) return true;
   if (!t.info_valid || t.format == DXGI_FORMAT_UNKNOWN || !t.width || !t.height) return false;
+  // [NEW FABLE VERSION] only resolve destinations follow the resolution scale
+  // (a CPU-uploaded texture has to keep the guest's size and tiling), and they
+  // hold exactly what the blit writes: one level, no mip chain.
+  if (t.is_resolve_target) {
+    t.scale = ScaleFor(t.width, t.height);
+    t.mip_levels = 1;
+  } else {
+    t.scale = 1;
+  }
   D3D12_RESOURCE_DESC desc = {};
   desc.Dimension = t.is_3d ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  desc.Width = t.width;
-  desc.Height = t.height;
+  desc.Width = t.hw();
+  desc.Height = t.hh();
   desc.DepthOrArraySize = uint16_t(t.is_cube ? 6 : std::max(1u, t.depth));
-  desc.MipLevels = 1;
+  desc.MipLevels = uint16_t(std::max(1u, t.mip_levels));  // [NEW FABLE VERSION] full mip chain for 2D/cube
   desc.Format = t.format;
   desc.SampleDesc.Count = 1;
   // Resolve destinations are rendered into by the blit pass.
@@ -980,9 +1118,19 @@ bool EnsureTextureResource(GuestTexture& t) {
   if (renderable) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
   if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &desc,
                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&t.resource)))) {
-    REXLOG_ERROR("Native renderer: texture {:08X} {}x{} format {} host creation failed", t.guest, t.width, t.height,
-                 uint32_t(t.format));
-    return false;
+    REXLOG_ERROR("Native renderer: texture {:08X} {}x{} (host {}x{}) format {} host creation failed", t.guest, t.width,
+                 t.height, t.hw(), t.hh(), uint32_t(t.format));
+    // [NEW FABLE VERSION] same 1x fallback as the surfaces.
+    if (t.scale == 1) return false;
+    REXLOG_WARN("Native renderer: retrying texture {:08X} at 1x (dp_native_scale {} did not fit)", t.guest, t.scale);
+    t.scale = 1;
+    desc.Width = t.width;
+    desc.Height = t.height;
+    if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
+                                                 &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&t.resource)))) {
+      return false;
+    }
   }
   t.state = D3D12_RESOURCE_STATE_COPY_DEST;
   t.srv_index = g.views.Allocate();
@@ -991,7 +1139,7 @@ bool EnsureTextureResource(GuestTexture& t) {
   srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   if (t.is_cube) {
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-    srv.TextureCube.MipLevels = 1;
+    srv.TextureCube.MipLevels = std::max(1u, t.mip_levels);
   } else if (t.is_3d) {
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
     srv.Texture3D.MipLevels = 1;
@@ -1001,7 +1149,7 @@ bool EnsureTextureResource(GuestTexture& t) {
     srv.Texture2DArray.ArraySize = t.depth;
   } else {
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Texture2D.MipLevels = 1;
+    srv.Texture2D.MipLevels = std::max(1u, t.mip_levels);
   }
   srv.Shader4ComponentMapping = SrvMapping(t);
   g.device->CreateShaderResourceView(t.resource.Get(), &srv, g.views.Cpu(t.srv_index));
@@ -1254,6 +1402,76 @@ bool UploadTexture(GuestTexture& t) {
     sl.PlacedFootprint.Footprint.RowPitch = host_pitch;
     g.list->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
   }
+  g.stats.upload_bytes += face_bytes * faces;
+  // [NEW FABLE VERSION] mip levels 1..N. The guest location of each level comes
+  // from TextureInfo (the packed tail levels share one 32x32 tile and carry a
+  // block offset), the host layout from GetCopyableFootprints. Until now every
+  // texture was sampled from its base level only: shimmer and moire at a
+  // distance, and a sharper look than the console's trilinear filtering.
+  if (t.mip_levels > 1) {
+    const D3D12_RESOURCE_DESC rdesc = t.resource->GetDesc();
+    bool ring_full = false;
+    for (uint32_t mip = 1; mip < t.mip_levels && !ring_full; ++mip) {
+      uint32_t ox = 0, oy = 0;
+      const uint32_t mip_addr = info.GetMipLocation(mip, &ox, &oy, true);
+      if (!mip_addr) break;
+      const rex::graphics::TextureExtent ge = info.GetMipExtent(mip, true);
+      const rex::graphics::TextureExtent he = info.GetMipExtent(mip, false);
+      const uint32_t src_pitch = ge.block_pitch_h * bytes_per_block;
+      const uint32_t guest_mip_face_bytes = ge.block_pitch_h * ge.block_pitch_v * bytes_per_block;
+      const uint8_t* mip_base = HeaderPtr(mip_addr);
+      for (uint32_t face = 0; face < faces; ++face) {
+        const uint32_t sub = mip + face * t.mip_levels;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+        UINT rows = 0;
+        UINT64 row_bytes = 0, total = 0;
+        g.device->GetCopyableFootprints(&rdesc, sub, 1, 0, &fp, &rows, &row_bytes, &total);
+        if (!total || !rows) continue;
+        const size_t moff = ring.Allocate(size_t(total), 512);
+        if (moff == SIZE_MAX) {
+          REXLOG_WARN("Native renderer: upload ring full while uploading mip {} of texture {:08X}", mip, t.guest);
+          ring_full = true;
+          break;
+        }
+        uint8_t* dst = ring.mapped + moff;
+        const uint8_t* src = mip_base + size_t(face) * guest_mip_face_bytes;
+        const uint32_t w_blocks = std::min(ge.block_width, he.block_width);
+        const uint32_t h_blocks = std::min<uint32_t>(std::min(ge.block_height, he.block_height), rows);
+        if (info.is_tiled) {
+          rex::graphics::texture_conversion::UntileInfo ui = {};
+          ui.offset_x = ox;
+          ui.offset_y = oy;
+          ui.width = w_blocks;
+          ui.height = h_blocks;
+          ui.input_pitch = ge.block_pitch_h;
+          ui.output_pitch = fp.Footprint.RowPitch / bytes_per_block;
+          ui.input_format_info = fi;
+          ui.output_format_info = fi;
+          const xenos::Endian endian = info.endianness;
+          ui.copy_callback = [endian](void* o, const void* i, size_t len) {
+            rex::graphics::texture_conversion::CopySwapBlock(endian, o, i, len);
+          };
+          rex::graphics::texture_conversion::Untile(dst, src, &ui);
+        } else {
+          src += size_t(oy) * src_pitch + size_t(ox) * bytes_per_block;
+          for (uint32_t y = 0; y < h_blocks; ++y) {
+            rex::graphics::texture_conversion::CopySwapBlock(info.endianness, dst + size_t(y) * fp.Footprint.RowPitch,
+                                                              src + size_t(y) * src_pitch, size_t(w_blocks) * bytes_per_block);
+          }
+        }
+        fp.Offset = moff;
+        D3D12_TEXTURE_COPY_LOCATION dl = {}, sl = {};
+        dl.pResource = t.resource.Get();
+        dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dl.SubresourceIndex = sub;
+        sl.pResource = ring.buffer.Get();
+        sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        sl.PlacedFootprint = fp;
+        g.list->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+        g.stats.upload_bytes += total;
+      }
+    }
+  }
   Barrier(t.resource.Get(), t.state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   t.dirty = false;
@@ -1337,16 +1555,20 @@ bool UploadBuffer(GuestBuffer& b) {
   Barrier(b.resource.Get(), b.state,
           b.index ? D3D12_RESOURCE_STATE_INDEX_BUFFER : D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
   b.dirty = false;
+  g.stats.upload_bytes += bytes;
   WatchBuffer(b);
   if (b.index) g.stats.uploads_ib++; else g.stats.uploads_vb++;
   return true;
 }
 
 uint32_t SamplerIndex(const xenos::xe_gpu_texture_fetch_t& fetch) {
-  const uint32_t key = (uint32_t(fetch.mag_filter) << 0) | (uint32_t(fetch.min_filter) << 2) |
-                       (uint32_t(fetch.mip_filter) << 4) | (uint32_t(fetch.clamp_x) << 6) |
-                       (uint32_t(fetch.clamp_y) << 9) | (uint32_t(fetch.clamp_z) << 12) |
-                       (uint32_t(fetch.border_color) << 15) | (uint32_t(fetch.aniso_filter) << 17);
+  // [NEW FABLE VERSION] the key also carries the mip range and the LOD bias (dword 4).
+  const uint64_t key = (uint64_t(fetch.mag_filter) << 0) | (uint64_t(fetch.min_filter) << 2) |
+                       (uint64_t(fetch.mip_filter) << 4) | (uint64_t(fetch.clamp_x) << 6) |
+                       (uint64_t(fetch.clamp_y) << 9) | (uint64_t(fetch.clamp_z) << 12) |
+                       (uint64_t(fetch.border_color) << 15) | (uint64_t(fetch.aniso_filter) << 17) |
+                       (uint64_t(fetch.mip_min_level & 0xF) << 20) | (uint64_t(fetch.mip_max_level & 0xF) << 24) |
+                       (uint64_t(uint32_t(fetch.lod_bias) & 0x3FF) << 28);
   auto it = g.sampler_indices.find(key);
   if (it != g.sampler_indices.end()) return it->second;
   const uint32_t index = g.samplers.Allocate();
@@ -1377,7 +1599,12 @@ uint32_t SamplerIndex(const xenos::xe_gpu_texture_fetch_t& fetch) {
   d.AddressW = address(fetch.clamp_z);
   const bool white_border = fetch.border_color != xenos::BorderColor::k_ABGR_Black;
   d.BorderColor[0] = d.BorderColor[1] = d.BorderColor[2] = d.BorderColor[3] = white_border ? 1.0f : 0.0f;
-  d.MaxLOD = D3D12_FLOAT32_MAX;
+  // [NEW FABLE VERSION] mip range and LOD bias from the fetch constant (lod_bias
+  // has 5 fractional bits); kBaseMap samples the base level only (no mipmapping).
+  const bool base_only = fetch.mip_filter == xenos::TextureFilter::kBaseMap;
+  d.MipLODBias = float(int32_t(fetch.lod_bias)) / 32.0f;
+  d.MinLOD = float(fetch.mip_min_level);
+  d.MaxLOD = base_only ? float(fetch.mip_min_level) : float(fetch.mip_max_level);
   d.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
   g.device->CreateSampler(&d, g.samplers.Cpu(index));
   g.sampler_indices[key] = index;
@@ -1554,6 +1781,11 @@ bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds) {
   }
   D3D12_VIEWPORT vp = st.viewport;
   const uint32_t w = rt ? rt->width : ds->width, h = rt ? rt->height : ds->height;
+  // [NEW FABLE VERSION] internal resolution: the guest's viewport and scissor are
+  // in console pixels; the host target is `scale` times larger. When a colour and
+  // a depth target ended up at different scales (the 1x fallback above), the
+  // smaller one decides, so neither is ever rasterized outside its extent.
+  const uint32_t scale = BindScale(rt != nullptr, rt ? rt->scale : 1u, ds != nullptr, ds ? ds->scale : 1u);
   if (!st.viewport_valid || vp.Width <= 0 || vp.Height <= 0) vp = {0, 0, float(w), float(h), 0, 1};
   if (vp.MinDepth > vp.MaxDepth) std::swap(vp.MinDepth, vp.MaxDepth);  // z flipped in the VS (g_NdcZ)
   // Pre-transformed vertices (PA_CL_VTE_CNTL scale/offset bits clear: UI,
@@ -1569,6 +1801,13 @@ bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds) {
   }
   vp.Width = std::min(vp.Width, float(w) - vp.TopLeftX);
   vp.Height = std::min(vp.Height, float(h) - vp.TopLeftY);
+  {  // [NEW FABLE VERSION] guest pixels -> host pixels.
+    const ViewportRect scaled = ScaleViewport({vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height}, scale);
+    vp.TopLeftX = scaled.left;
+    vp.TopLeftY = scaled.top;
+    vp.Width = scaled.width;
+    vp.Height = scaled.height;
+  }
   g.list->RSSetViewports(1, &vp);
   // Guest window scissor, clamped to the target (the scene targets are
   // 1024x576 under a 1280x720 scissor).
@@ -1576,6 +1815,11 @@ bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds) {
   D3D12_RECT scissor = {LONG(std::min<uint32_t>(stl & 0x7FFF, w)), LONG(std::min<uint32_t>((stl >> 16) & 0x7FFF, h)),
                         LONG(std::min<uint32_t>(sbr & 0x7FFF, w)), LONG(std::min<uint32_t>((sbr >> 16) & 0x7FFF, h))};
   if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) scissor = {0, 0, LONG(w), LONG(h)};
+  {  // [NEW FABLE VERSION]
+    const ScissorRect scaled = ScaleScissor({int32_t(scissor.left), int32_t(scissor.top), int32_t(scissor.right),
+                                             int32_t(scissor.bottom)}, scale);
+    scissor = {LONG(scaled.left), LONG(scaled.top), LONG(scaled.right), LONG(scaled.bottom)};
+  }
   g.list->RSSetScissorRects(1, &scissor);
   *out_rt = rt;
   *out_ds = ds;
@@ -1607,6 +1851,7 @@ D3D12_GPU_VIRTUAL_ADDRESS GenerateQuadIndices(uint32_t vertex_count, uint32_t& i
   UploadRing& ring = g.upload[g.frame_index];
   const size_t off = ring.Allocate(size_t(index_count) * 4, 16);
   if (off == SIZE_MAX) return 0;
+  g.stats.upload_bytes += size_t(index_count) * 4;
   uint32_t* p = reinterpret_cast<uint32_t*>(ring.mapped + off);
   for (uint32_t q = 0; q < quads; ++q) {
     const uint32_t v = q * 4;
@@ -1640,6 +1885,13 @@ void InitTextureFromFetch(GuestTexture& t, uint32_t object) {
     t.is_3d = volume || t.is_stacked_3d;
     t.depth = t.is_3d ? t.info.depth + 1 : 1;
     t.is_cube = t.info.dimension == xenos::DataDimension::kCube;
+    // [NEW FABLE VERSION] host mip chain: guest levels 0..mip_max_level (Prepare
+    // zeroes mip_max_level when the fetch constant has no mip memory).
+    t.mip_levels = 1;
+    if (!t.is_3d) {
+      const uint32_t max_levels = std::max(1u, t.info.GetMaxMipLevels());
+      t.mip_levels = std::max(1u, std::min(t.info.mip_max_level + 1, max_levels));
+    }
     t.format = MapTextureFormat(t.info.format);
     if (t.format == DXGI_FORMAT_UNKNOWN && g.log_budget) {
       --g.log_budget;
@@ -1848,6 +2100,7 @@ void DumpDrawState(const DrawArgs& a, const GuestShader& vs, const GuestShader& 
 void RecordDump(const char* what, uint32_t guest, ID3D12Resource* res, D3D12_RESOURCE_STATES& state, uint32_t w,
                 uint32_t h, DXGI_FORMAT format, uint32_t slice = 0, uint32_t slices = 1);
 void ExecuteDraw(const DrawArgs& a) {
+  ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
   if (!InitContext() || !BeginFrame()) {
     g.stats.draws_skipped++;
     return;
@@ -1901,6 +2154,7 @@ void ExecuteDraw(const DrawArgs& a) {
     const size_t off = ring.Allocate((bytes + 3) & ~3u, 16);
     if (off == SIZE_MAX) return SkipLog("upload ring full (UP)");
     rex::memory::copy_and_swap_32_unaligned(ring.mapped + off, a.up_data, (bytes + 3) / 4);
+    g.stats.upload_bytes += bytes;
     vbv[0] = {ring.buffer->GetGPUVirtualAddress() + off, UINT(bytes), a.up_stride};
     vbv_count = 1;
     strides[0] = a.up_stride;
@@ -2112,6 +2366,11 @@ void ExecuteDraw(const DrawArgs& a) {
     }
     std::memcpy(&shared[184], zso, sizeof(zso));
   }
+  // [NEW FABLE VERSION] c48.x: the bound colour target is 7e3 (k_2_10_10_10_FLOAT);
+  // the recompiled PS clamps its colour output to the console's 0..31.875 range
+  // per draw (before this only the resolve clamped, so additive passes and the
+  // lamp/flamethrower glows accumulated far beyond what the console could store).
+  shared[192] = (rt && (rt->guest_format & 0x3F) == 63) ? 1u : 0u;
 
   // Constants: whole banks, byte-swapped, into the ring.
   UploadRing& ring = g.upload[g.frame_index];
@@ -2122,6 +2381,7 @@ void ExecuteDraw(const DrawArgs& a) {
   rex::memory::copy_and_swap_32_unaligned(ring.mapped + vs_off, Mem()->TranslateVirtual(g_device + kDevVsConstants), 1024);
   rex::memory::copy_and_swap_32_unaligned(ring.mapped + ps_off, Mem()->TranslateVirtual(g_device + kDevPsConstants), 1024);
   std::memcpy(ring.mapped + sh_off, shared, kSharedConstantsBytes);
+  g.stats.upload_bytes += 8192 + kSharedConstantsBytes;
 
   // Pipeline.
   PipelineKey key = {};
@@ -2129,7 +2389,7 @@ void ExecuteDraw(const DrawArgs& a) {
   key.ps = ps->hash;
   key.decl = decl->hash;
   key.rt_format = rt ? uint32_t(rt->format) : 0;
-  key.ds_format = ds ? uint32_t(DXGI_FORMAT_D32_FLOAT) : 0;
+  key.ds_format = ds ? uint32_t(ds->format) : 0;  // [NEW FABLE VERSION] DSV format of the surface (D24S8 or D32)
   key.blend = Dev(kDevRbBlendControl0);
   key.blend_enable = 0;
   key.color_mask = rt ? (Dev(kDevRbColorMask) & 0xF) : 0;
@@ -2198,7 +2458,7 @@ void ExecuteDraw(const DrawArgs& a) {
     if (watch_ps && ps->hash == watch_ps && budget) {
       --budget;
       // the draw just issued (g_dump_seq already advanced past it)
-      RecordDump(fmt::format("d{:04}", g_dump_seq ? g_dump_seq - 1 : 0).c_str(), st.rt0, rt->resource.Get(), rt->state, rt->width, rt->height, rt->format);
+      RecordDump(fmt::format("d{:04}", g_dump_seq ? g_dump_seq - 1 : 0).c_str(), st.rt0, rt->resource.Get(), rt->state, rt->hw(), rt->hh(), rt->format);
     }
   }
 }
@@ -2746,6 +3006,7 @@ void OnDrawVerticesUP(uint32_t prim, uint32_t count, uint32_t data, uint32_t str
 }
 
 void OnClear(uint32_t flags, uint32_t color_ptr, float z, uint32_t stencil) {
+  ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
   if (!InitContext() || !BeginFrame()) return;
   GuestSurface* rt = nullptr;
   GuestSurface* ds = nullptr;
@@ -2799,13 +3060,38 @@ static uint32_t SliceRtv(GuestTexture& t, uint32_t slice) {
 // Flags: 0-3 = RT index, 4 = DEPTHSTENCIL, 0x10 = CLEARRENDERTARGET,
 // 0x20 = CLEARDEPTHSTENCIL (the game relies on these: nearly every resolve
 // in DP1 clears the EDRAM target for the next pass).
-void OnResolve(uint32_t flags, uint32_t /*rect_ptr*/, uint32_t dest_texture, uint32_t /*dest_point_ptr*/,
+void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_t dest_point_ptr,
                uint32_t dest_level, uint32_t dest_slice, uint32_t clear_color_ptr, float clear_z) {
+  ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
   if (!InitContext() || !BeginFrame()) return;
   GuestTexture* t = TextureForObject(dest_texture);
   const bool depth = (flags & 4) != 0;
   GuestSurface* src = Lookup(g_surfaces, depth ? st.ds : st.rt0);
-  (void)dest_level;  // mip 0 only (host textures have one level)
+  // [NEW FABLE VERSION] the blit copies the whole surface into mip 0; count (and
+  // log the first few) resolves that ask for a sub-rectangle, a destination
+  // point or a mip level, so the gap is measurable instead of assumed.
+  {
+    bool partial = dest_level != 0;
+    int32_t rc[4] = {0, 0, 0, 0}, pt[2] = {0, 0};
+    if (rect_ptr) {
+      for (int i = 0; i < 4; ++i) rc[i] = int32_t(LoadU32(rect_ptr + i * 4));
+      if (rc[0] != 0 || rc[1] != 0 || (src && (uint32_t(rc[2]) != src->width || uint32_t(rc[3]) != src->height))) partial = true;
+    }
+    if (dest_point_ptr) {
+      pt[0] = int32_t(LoadU32(dest_point_ptr));
+      pt[1] = int32_t(LoadU32(dest_point_ptr + 4));
+      if (pt[0] != 0 || pt[1] != 0) partial = true;
+    }
+    if (partial) {
+      g.stats.resolve_partial++;
+      static uint32_t partial_log = 8;
+      if (partial_log) {
+        --partial_log;
+        REXLOG_WARN("Native renderer: partial resolve ignored: rect ({},{})-({},{}) point ({},{}) level {} dest {:08X} from {}x{}",
+                    rc[0], rc[1], rc[2], rc[3], pt[0], pt[1], dest_level, dest_texture, src ? src->width : 0, src ? src->height : 0);
+      }
+    }
+  }
   // The clears happen even when the copy cannot (e.g. no destination texture).
   auto do_clears = [&]() {
     if (flags & 0x10) {
@@ -2856,6 +3142,23 @@ void OnResolve(uint32_t flags, uint32_t /*rect_ptr*/, uint32_t dest_texture, uin
   }
   t->is_resolve_target = true;
   t->dirty = false;
+  // [NEW FABLE VERSION] a texture that was uploaded from guest memory before (its
+  // resource carries the guest size and a mip chain) and is now a resolve
+  // destination is recreated: the blit writes one level at the host scale, and
+  // the mips below it would otherwise keep stale CPU content forever.
+  if (t->resource && (t->mip_levels > 1 || t->scale != ScaleFor(t->width, t->height))) {
+    ForgetWatch(t);
+    if (t->srv_index != UINT32_MAX) g.views.Free(t->srv_index);
+    if (t->rtv_index != UINT32_MAX) g.rtvs.Free(t->rtv_index);
+    for (uint32_t r : t->slice_rtvs) g.rtvs.Free(r);
+    t->slice_rtvs.clear();
+    t->srv_index = UINT32_MAX;
+    t->rtv_index = UINT32_MAX;
+    RetireResource(std::move(t->resource));
+    t->resource.Reset();
+    t->state = D3D12_RESOURCE_STATE_COMMON;
+    t->watched = false;
+  }
   const bool block_compressed = t->format == DXGI_FORMAT_BC1_UNORM || t->format == DXGI_FORMAT_BC2_UNORM ||
                                 t->format == DXGI_FORMAT_BC3_UNORM;
   if (!EnsureTextureResource(*t) || block_compressed || (t->rtv_index == UINT32_MAX && !t->is_cube && t->depth <= 1)) {
@@ -2875,18 +3178,22 @@ void OnResolve(uint32_t flags, uint32_t /*rect_ptr*/, uint32_t dest_texture, uin
   // host copy back into that range so the bloom chain and the tonemap see
   // what they saw on the console (dp_native_7e3_resolve).
   const bool src_7e3 = !src->depth && (src->guest_format & 0x3F) == 63;
-  Blit(src->srv_index, g.rtvs.Cpu(rtv), t->format, t->width, t->height,
+  // [NEW FABLE VERSION] host sizes: when the source surface is scaled and the
+  // destination is not (a small target below the scale threshold), the blit's
+  // bilinear filter downsamples, which is what the console's resolve did.
+  Blit(src->srv_index, g.rtvs.Cpu(rtv), t->format, t->hw(), t->hh(),
        (src_7e3 && REXCVAR_GET(dp_native_7e3_resolve)) ? 1u : 0u);
   Barrier(t->resource.Get(), t->state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   if (g_dump_active && !t->is_cube && (t->depth <= 1 || t->is_3d)) {
     // Intermediate result of the pass chain (the end-of-frame dump only shows the last content).
-    RecordDump(fmt::format("r{:03}", seq).c_str(), dest_texture, t->resource.Get(), t->state, t->width, t->height, t->format,
+    RecordDump(fmt::format("r{:03}", seq).c_str(), dest_texture, t->resource.Get(), t->state, t->hw(), t->hh(), t->format,
                t->is_3d ? dest_slice : 0, t->is_3d ? std::max(1u, t->depth) : 1);
   }
 }
 
 RendererStats OnSwap(uint32_t front_buffer_texture) {
+  const int64_t swap_t0 = Qpc();  // [NEW FABLE VERSION]
   RendererStats stats = g.stats;
   stats.watch_hits = g_watch_hits.exchange(0, std::memory_order_relaxed);
   if (!InitContext()) return stats;
@@ -2922,23 +3229,23 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
           if (t->is_3d) {
             // Texture3D: a whole-subresource copy into a 2D footprint removes the device; per slice.
             for (uint32_t z = 0; z < std::max(1u, t->depth); ++z) {
-              RecordDump("resolve", guest, t->resource.Get(), t->state, t->width, t->height, t->format, z, std::max(1u, t->depth));
+              RecordDump("resolve", guest, t->resource.Get(), t->state, t->hw(), t->hh(), t->format, z, std::max(1u, t->depth));
             }
           } else if (!t->is_cube && t->depth <= 1) {
-            RecordDump(t.get() == front ? "front" : "resolve", guest, t->resource.Get(), t->state, t->width,
-                       t->height, t->format);
+            RecordDump(t.get() == front ? "front" : "resolve", guest, t->resource.Get(), t->state, t->hw(),
+                       t->hh(), t->format);
           }
         }
       }
       for (auto& [guest, sf] : g_surfaces) {
-        if (sf->resource && !sf->depth) RecordDump("surface", guest, sf->resource.Get(), sf->state, sf->width, sf->height, sf->format);
+        if (sf->resource && !sf->depth) RecordDump("surface", guest, sf->resource.Get(), sf->state, sf->hw(), sf->hh(), sf->format);
       }
     }
     if (front && front->resource && system && system->presenter()) {
       // Present: the presenter callback records the blit and submits the frame.
       Barrier(front->resource.Get(), front->state,
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-      system->PresentFromRenderer(front->srv_index, front->width, front->height);
+      system->PresentFromRenderer(front->srv_index, front->hw(), front->hh());  // [NEW FABLE VERSION] host size
     }
     if (g.recording) SubmitFrame();
     if (dump) WriteDumps(g.frame_number);
@@ -2961,7 +3268,42 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
       if (!b->watched) b->dirty = true;
     }
   }
+  // [NEW FABLE VERSION] per-frame timing samples: frame interval between Swaps,
+  // native CPU time (draws + clears + resolves + this Swap), fence waits.
+  {
+    const int64_t now = Qpc();
+    g_perf.cpu_ticks += now - swap_t0;
+    if (g_perf.last_swap) g_perf.frame_ms.push_back(float(QpcToMs(now - g_perf.last_swap)));
+    g_perf.last_swap = now;
+    g_perf.cpu_ms.push_back(float(QpcToMs(g_perf.cpu_ticks)));
+    g_perf.wait_ms.push_back(float(QpcToMs(g_perf.wait_ticks)));
+    stats.draw_cpu_us = uint64_t(QpcToMs(g_perf.cpu_ticks) * 1000.0);
+    g_perf.cpu_ticks = 0;
+    g_perf.wait_ticks = 0;
+  }
+  stats.psos_total = uint32_t(g.psos.size());
   return stats;
+}
+
+// [NEW FABLE VERSION]
+std::string PerfSummaryAndReset() {
+  auto pct = [](std::vector<float>& v) -> std::array<float, 3> {
+    if (v.empty()) return {0.0f, 0.0f, 0.0f};
+    std::sort(v.begin(), v.end());
+    auto at = [&](double q) { return v[std::min(v.size() - 1, size_t(q * double(v.size())))]; };
+    return {at(0.5), at(0.9), at(0.99)};
+  };
+  const size_t frames = g_perf.frame_ms.size(), gpu_frames = g_perf.gpu_ms.size();
+  const auto f = pct(g_perf.frame_ms), c = pct(g_perf.cpu_ms), w = pct(g_perf.wait_ms), gpu = pct(g_perf.gpu_ms);
+  std::string s = fmt::format(
+      "frame ms p50/p90/p99 {:.1f}/{:.1f}/{:.1f} ({} frames), native cpu ms {:.2f}/{:.2f}/{:.2f}, fence wait ms "
+      "{:.2f}/{:.2f}/{:.2f}, gpu ms {:.2f}/{:.2f}/{:.2f} ({} frames)",
+      f[0], f[1], f[2], frames, c[0], c[1], c[2], w[0], w[1], w[2], gpu[0], gpu[1], gpu[2], gpu_frames);
+  g_perf.frame_ms.clear();
+  g_perf.cpu_ms.clear();
+  g_perf.wait_ms.clear();
+  g_perf.gpu_ms.clear();
+  return s;
 }
 
 void RendererSubmitCurrentFrame() { SubmitFrame(); }

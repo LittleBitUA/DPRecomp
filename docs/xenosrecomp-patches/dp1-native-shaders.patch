@@ -426,10 +426,21 @@ index c9592ad..958a478 100644
  #include <xxhash.h>
  #include <zstd.h>
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index b279ee4..919d6c0 100644
+index b279ee4..394c5f5 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
-@@ -48,6 +48,10 @@ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
+@@ -33,6 +33,10 @@ struct PushConstants
+ #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 684)
+ #define g_AlphaTest                vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 688)
+ #define g_R11G11B10Normal          vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 692)
++// dp1 [NEW FABLE VERSION]: c48 (bytes 768..783) - 7e3 colour target flag and the
++// sub-pixel jitter; see the cbuffer emission in shader_recompiler.cpp.
++#define g_Rt7e3                    vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 768)
++#define g_Jitter                   vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 772)
+ 
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+ 
+@@ -48,6 +52,10 @@ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
  Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
  SamplerState g_SamplerDescriptorHeap[] : register(s0, space3);
@@ -440,7 +451,7 @@ index b279ee4..919d6c0 100644
  
  // dpxr-fork: vertex shaders cannot use gradient sampling.
  #ifdef DPXR_STAGE_VS
-@@ -152,6 +156,11 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
+@@ -152,6 +160,11 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
      return DPXR_SAMPLE(g_Texture3DDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
  }
  
@@ -452,7 +463,7 @@ index b279ee4..919d6c0 100644
  struct CubeMapData
  {
      float3 cubeMapDirections[2];
-@@ -163,10 +172,18 @@ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, flo
+@@ -163,10 +176,18 @@ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, flo
      return DPXR_SAMPLE(g_TextureCubeDescriptorHeap[resourceDescriptorIndex], g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
  }
  
@@ -474,7 +485,7 @@ index b279ee4..919d6c0 100644
      {
          return float4(
              (value.x & 0x00000400 ? -1.0 : 0.0) + ((value.x & 0x3FF) / 1024.0),
-@@ -174,10 +191,32 @@ float4 tfetchR11G11B10(uint enable, uint4 value)
+@@ -174,10 +195,32 @@ float4 tfetchR11G11B10(uint enable, uint4 value)
              (value.x & 0x80000000 ? -1.0 : 0.0) + (((value.x >> 22) & 0x1FF) / 512.0),
              0.0);
      }
@@ -509,7 +520,7 @@ index b279ee4..919d6c0 100644
  }
  
  float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
-@@ -185,6 +224,55 @@ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
+@@ -185,6 +228,55 @@ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
      return (swappedTexcoords & (1ull << semanticIndex)) != 0 ? value.yxwz : value;
  }
  
@@ -566,7 +577,7 @@ index b279ee4..919d6c0 100644
  {
      uint index = cubeMapData.cubeMapIndex;
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 81ef3c5..fb5ac06 100644
+index 81ef3c5..a74bcdd 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -16,8 +16,8 @@ static constexpr char SWIZZLES[] =
@@ -756,7 +767,7 @@ index 81ef3c5..fb5ac06 100644
  
      // dpxr-fork: fixed full-range shared-constants layout (704 bytes).
      // DP shaders reference fetch slots (s16+), bool registers by raw bank
-@@ -1262,6 +1339,21 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1262,6 +1339,25 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      out += "\tfloat g_AlphaThreshold : packoffset(c42.w);\n";
      out += "\tuint g_AlphaTest : packoffset(c43.x);\n";
      out += "\tuint g_R11G11B10Normal : packoffset(c43.y);\n";
@@ -775,10 +786,14 @@ index 81ef3c5..fb5ac06 100644
 +    out += "\tfloat4 g_NdcZ : packoffset(c46);\n";
 +    // dp1: user clip plane 0 in clip space (PA_CL_UCP_0), enabled by g_NdcZ.z != 0 (c47 = bytes 752..767).
 +    out += "\tfloat4 g_ClipPlane : packoffset(c47);\n";
++    // dp1 [NEW FABLE VERSION]: c48 = bytes 768..783: x = RT0 is 7e3 (PS clamps colour to the
++    // console range), yz = sub-pixel jitter in clip units (temporal upscaling), w = reserved.
++    out += "\tuint g_Rt7e3 : packoffset(c48.x);\n";
++    out += "\tfloat2 g_Jitter : packoffset(c48.y);\n";
      out += "};\n\n";
      out += "#define LOOP_CONST(N) (g_Loops[(N) >> 2][(N) & 3])\n\n";
  
-@@ -1272,6 +1364,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1272,6 +1368,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      {
          if (samplers.find(n) != samplers.end())
              continue;
@@ -788,7 +803,7 @@ index 81ef3c5..fb5ac06 100644
          println("#define s{0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", n, n >> 2, n & 3);
          println("#define s{0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", n, n >> 2, n & 3);
          println("#define s{0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", n, n >> 2, n & 3);
-@@ -1281,6 +1376,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1281,6 +1380,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      {
          if (reg >= 32)
              continue;
@@ -796,7 +811,7 @@ index 81ef3c5..fb5ac06 100644
          println("#define {0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
          println("#define {0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
          println("#define {0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", name, reg >> 2, reg & 3);
-@@ -1335,7 +1431,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1335,7 +1435,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      }
      else
      {
@@ -813,7 +828,7 @@ index 81ef3c5..fb5ac06 100644
          for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
          {
              union
-@@ -1348,43 +1453,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1348,43 +1457,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
              const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
  
@@ -824,10 +839,7 @@ index 81ef3c5..fb5ac06 100644
 +            if (declaredInputs.insert(inputKey).second)
              {
 -                usageType = "uint4";
-+                out += '\t';
-+                println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
-+                    uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
-             }
+-            }
 -        #endif
 -
 -            out += '\t';
@@ -839,11 +851,14 @@ index 81ef3c5..fb5ac06 100644
 -                    print("[[vk::location({})]] ", usageLocation.location);
 -                    break;
 -                }
--            }
--
++                out += '\t';
++                println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
++                    uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+             }
+ 
 -            println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
 -                uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
- 
+-
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
  
@@ -871,7 +886,7 @@ index 81ef3c5..fb5ac06 100644
      }
  
      out += ")\n";
-@@ -1416,8 +1508,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1416,8 +1512,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
              for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
              {
@@ -883,7 +898,7 @@ index 81ef3c5..fb5ac06 100644
  
                  value += 4;
              }
-@@ -1502,12 +1596,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1502,12 +1600,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              {
                  out += "float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n";
              }
@@ -906,7 +921,7 @@ index 81ef3c5..fb5ac06 100644
              else
              {
                  out += "0.0;\n";
-@@ -1517,6 +1617,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1517,6 +1621,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
      out += "\tint a0 = 0;\n";
      out += "\tint aL = 0;\n";
@@ -914,7 +929,7 @@ index 81ef3c5..fb5ac06 100644
      out += "\tbool p0 = false;\n";
      out += "\tfloat ps = 0.0;\n";
  
-@@ -1613,7 +1714,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1613,7 +1718,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      else
      {
          out += "\n\tuint pc = 0;\n";
@@ -927,7 +942,63 @@ index 81ef3c5..fb5ac06 100644
          out += "\t{\n";
          out += "\t\tswitch (pc)\n";
          out += "\t\t{\n";
-@@ -1694,14 +1799,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1658,6 +1767,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             uint32_t sequence = 0;
+             bool shouldReturn = false;
+             bool shouldCloseCurlyBracket = false;
++            bool condBlockOpen = false;  // dp1 [NEW FABLE VERSION]: cond_exec / cond_exec_pred wrapper
+ 
+             switch (cfInstr.opcode)
+             {
+@@ -1669,22 +1779,43 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 shouldReturn = (cfInstr.opcode == ControlFlowOpcode::ExecEnd);
+                 break;
+ 
++            // dp1 [NEW FABLE VERSION]: cond_exec runs its instructions only when the bool
++            // constant matches the condition. They used to run unconditionally, so every
++            // XDK bool->float materialisation (a cond_exec pair) came out as "true"
++            // (297 of 1131 DP1 shaders; the sun-lit branch of walls and floors was always
++            // on). The block is closed before the end-of-shader epilogue below.
+             case ControlFlowOpcode::CondExec:
+             case ControlFlowOpcode::CondExecEnd:
+-            case ControlFlowOpcode::CondExecPredClean:
+-            case ControlFlowOpcode::CondExecPredCleanEnd:
+                 address = cfInstr.condExec.address;
+                 count = cfInstr.condExec.count;
+                 sequence = cfInstr.condExec.sequence;
+-                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
++                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
++                indent();
++                println("if (b{} {}= 0)", uint32_t(cfInstr.condExec.boolAddress), cfInstr.condExec.condition ? "!" : "=");
++                indent();
++                out += "{\n";
++                ++indentation;
++                condBlockOpen = true;
+                 break;
+ 
++            // dp1 [NEW FABLE VERSION]: the predicated variants (including the "clean" pair,
++            // which reads the predicate, not a bool) gate on p0. CondExecPredCleanEnd also
++            // ends the shader - the old code compared CondExecEnd twice, so it never did.
+             case ControlFlowOpcode::CondExecPred:
+             case ControlFlowOpcode::CondExecPredEnd:
++            case ControlFlowOpcode::CondExecPredClean:
++            case ControlFlowOpcode::CondExecPredCleanEnd:
+                 address = cfInstr.condExecPred.address;
+                 count = cfInstr.condExecPred.count;
+                 sequence = cfInstr.condExecPred.sequence;
+-                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd);
++                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd ||
++                                cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
++                indent();
++                println("if ({}p0)", cfInstr.condExecPred.condition ? "" : "!");
++                indent();
++                out += "{\n";
++                ++indentation;
++                condBlockOpen = true;
+                 break;
+ 
+             case ControlFlowOpcode::LoopStart:
+@@ -1694,14 +1825,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  #ifdef UNLEASHED_RECOMP
                      print("[unroll] ");
                  #endif
@@ -954,7 +1025,7 @@ index 81ef3c5..fb5ac06 100644
                  }
                  break;
  
-@@ -1714,8 +1829,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1714,8 +1855,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  }
                  else
                  {
@@ -966,18 +1037,51 @@ index 81ef3c5..fb5ac06 100644
                      out += "\t\t\t{\n";
                      println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopEnd.address));
                      out += "\t\t\t\tcontinue;\n";
-@@ -1876,6 +1992,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1835,6 +1977,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 instructionCode += 3;
+             }
+ 
++            // dp1 [NEW FABLE VERSION]: close the conditional block before any end-of-shader
++            // epilogue, which must run whether or not the block executed.
++            if (condBlockOpen)
++            {
++                --indentation;
++                indent();
++                out += "}\n";
++                condBlockOpen = false;
++            }
++
+             if (shouldReturn)
+             {
+                 if (isPixelShader)
+@@ -1853,6 +2005,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     indent();
+                     out += "}";
+ 
++                    // dp1 [NEW FABLE VERSION]: 7e3 colour targets (k_2_10_10_10_FLOAT) hold
++                    // 0..31.875 per channel on the console; clamp the output per draw so
++                    // additive passes saturate where the hardware did (fed by c48.x).
++                    indent();
++                    out += "if (g_Rt7e3 != 0) oC0.xyz = min(max(oC0.xyz, 0.0), 31.875);\n";
++
+                 #ifdef UNLEASHED_RECOMP
+                     specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
+ 
+@@ -1876,7 +2034,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      if (!hasMtxProjection)
                  #endif
                      {
+-                        out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
 +                        // dp1: user clip plane against the untouched clip-space position (D3D9 semantics).
 +                        out += "\toClipDist = g_NdcZ.z != 0.0 ? dot(g_ClipPlane, oPos) : 1.0;\n";
 +                        out += "\toPos.xy = oPos.xy * g_NdcScaleOffset.xy + g_NdcScaleOffset.zw * oPos.w;\n";
 +                        out += "\toPos.z = oPos.z * g_NdcZ.x + g_NdcZ.y * oPos.w;\n";
-                         out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
++                        // dp1 [NEW FABLE VERSION]: + sub-pixel jitter (c48.yz, zero unless a temporal upscaler runs).
++                        out += "\toPos.xy += (g_HalfPixelOffset + g_Jitter) * oPos.w;\n";
                      }
                  }
-@@ -1925,7 +2045,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+@@ -1925,7 +2088,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\t}\n";
  
      if (!isPixelShader && hasMtxProjection)

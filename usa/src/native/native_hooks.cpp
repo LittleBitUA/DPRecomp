@@ -121,6 +121,11 @@ REXCVAR_DEFINE_BOOL(dp_native_trace, false, "DP1",
                     "Native renderer diagnostics: log enter/exit of the observed XDK entries with the calling thread "
                     "(first 4000 lines)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// [NEW FABLE VERSION] 2026-09-22: the frame statistics line (draws, uploads, PSOs,
+// frame/CPU/GPU time percentiles) every N frames; 600 = every 10 s at 60 fps.
+REXCVAR_DEFINE_INT32(dp_native_stats_frames, 600, "DP1",
+                     "Native renderer: print the frame statistics line every N frames (0 = never)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
 std::atomic<uint32_t> g_trace_budget{40};
@@ -169,11 +174,14 @@ REX_HOOK_RAW(DPX_824DA330) {
   const dp::native::RendererStats stats = dp::native::OnSwap(ctx.r4.u32);
   if (system) {
     const uint32_t frame = system->frame_count();
-    if (frame == 0 || (frame + 1) % 600 == 0) {
-      REXLOG_INFO("Native renderer: frame #{}: {} draws ({} skipped), {} resolves, {} clears, uploads vb {} ib {} tex {} (watch hits {} changed {} vtf rehash {}), "
-                  "PSOs created {}; {}",
-                  frame + 1, stats.draws, stats.draws_skipped, stats.resolves, stats.clears, stats.uploads_vb,
-                  stats.uploads_ib, stats.uploads_tex, stats.watch_hits, stats.tex_changes, stats.tex_rehash, stats.pso_created, system->RingStats());
+    const int32_t every = REXCVAR_GET(dp_native_stats_frames);  // [NEW FABLE VERSION]
+    if (frame == 0 || (every > 0 && (frame + 1) % uint32_t(every) == 0)) {
+      REXLOG_INFO("Native renderer: frame #{}: {} draws ({} skipped), {} resolves ({} partial), {} clears, uploads vb {} ib {} tex {} "
+                  "({:.2f} MB) (watch hits {} changed {} vtf rehash {}), PSOs created {} (alive {}); {}; {}",
+                  frame + 1, stats.draws, stats.draws_skipped, stats.resolves, stats.resolve_partial, stats.clears,
+                  stats.uploads_vb, stats.uploads_ib, stats.uploads_tex, double(stats.upload_bytes) / (1024.0 * 1024.0),
+                  stats.watch_hits, stats.tex_changes, stats.tex_rehash, stats.pso_created, stats.psos_total,
+                  dp::native::PerfSummaryAndReset(), system->RingStats());
     }
     system->OnSwapDone(ctx.r4.u32);
   }

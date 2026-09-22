@@ -69,3 +69,6 @@ add_executable(dp_pad_layout_test tests/pad_layout_test.cpp)
 set_target_properties(dp_pad_layout_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 add_executable(dp_title_skip_test tests/title_skip_test.cpp)
 set_target_properties(dp_title_skip_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [NEW FABLE VERSION] native renderer internal resolution rules
+add_executable(dp_native_scale_test tests/native_scale_test.cpp)
+set_target_properties(dp_native_scale_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

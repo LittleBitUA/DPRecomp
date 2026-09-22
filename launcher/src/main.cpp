@@ -139,6 +139,7 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Controls",          L"Керування"},
       {"Debug",             L"Діагностика"},
       {"Experimental",      L"Експериментальне"},
+      {"Native",            L"Нативний"},
       // Graphics cvars.
       {"Render Target Path",        L"Шлях рендеру"},
       {"ROV (recommended)",         L"ROV (рекомендовано)"},
@@ -224,6 +225,13 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Texture Cache Hard Limit (MB)",
                                     L"Кеш текстур: жорсткий (МБ)"},
       {"Mute Game Audio",           L"Вимкнути звук гри"},
+      {"Audio Output",              L"Аудіовихід"},
+      {"Auto (follow the Windows output device)",
+                                    L"Авто (як налаштовано пристрій у Windows)"},
+      {"Stereo (fold 5.1 to 2.0; use if dialogue is quiet or missing)",
+                                    L"Стерео (згортати 5.1 у 2.0; якщо діалоги тихі або їх нема)"},
+      {"Surround (always send 5.1)",
+                                    L"Об'ємний (завжди подавати 5.1)"},
       // Mouse.
       {"Mouse & Keyboard Mode",     L"Миша + клавіатура"},
       {"Mouse Camera Hook (direct)",
@@ -301,10 +309,19 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Steam Overlay",             L"Оверлей Steam"},
       {"Button Prompts",            L"Підказки кнопок"},
       {"Texture Dump (textures\\dump)", L"Дамп текстур (textures\\dump)"},
-      {"Native Renderer (work in progress: broken picture, no floor; off = stock emulated path)",
-                                    L"Нативний рендер (у розробці: зламана картинка, без підлоги; вимк. = штатний емульований шлях)"},
-      {"Aim: per-axis mouse floor (fixes diagonal staircase)",
-                                    L"Приціл: поріг миші по кожній осі (лікує «сходинки» по діагоналі)"},
+      {"Native Renderer (preview)",  L"Нативний рендер (прев'ю)"},
+      {"Work in progress: the picture is incomplete (white floor, shadows that slide, bright walls). Off = the stock emulated path, exactly as before.",
+                                    L"У розробці: картинка неповна (біла підлога, тіні «їздять», яскраві стіни). Вимкнено = штатний емульований шлях, як і раніше."},
+      {"Internal Resolution", L"Внутрішня роздільна здатність"},
+      {"1x - 1280x720, as the console", L"1x - 1280x720, як на консолі"},
+      {"2x - 2560x1440 (recommended)", L"2x - 2560x1440 (рекомендовано)"},
+      {"3x - 3840x2160",            L"3x - 3840x2160"},
+      {"4x - 5120x2880",            L"4x - 5120x2880"},
+      {"Renders the whole frame at this multiple of the console's resolution and scales it down to your window: sharper image, no jagged edges. Needs the native renderer above; the cost is video memory and GPU time.",
+                                    L"Малює весь кадр у стільки разів більшій роздільній здатності, ніж консольна, і зменшує його до вашого вікна: чіткіша картинка без сходинок. Потрібен нативний рендер вище; ціна - відеопам'ять і час GPU."},
+      {"Aim: per-axis mouse floor",  L"Приціл: поріг миші по осях"},
+      {"While aiming, lifts each mouse axis over the game's deadzone separately, so diagonal aim no longer staircases (#30). Off = 1.4.1 behaviour.",
+                                    L"Під час прицілювання піднімає кожну вісь миші над мертвою зоною окремо, тож діагональ більше не йде «сходинками» (#30). Вимкнено = як у 1.4.1."},
       {"Keyboard (keys from your bindings)", L"Клавіатура (ваші клавіші)"},
       {"Xbox (original icons)",     L"Xbox (рідні іконки)"},
       {"PlayStation - solid (DualShock / DualSense)", L"PlayStation - суцільні (DualShock / DualSense)"},
@@ -374,7 +391,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.4.3";
+constexpr const wchar_t* kLauncherVersion = L"v1.4.6";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -1007,9 +1024,13 @@ enum CvarCategory {
   // lives here can break the picture or the game; the stock path is one
   // toggle away.
   kCatExperimental = 5,
+  // [NEW FABLE VERSION] 2026-09-22: the native renderer and everything that
+  // only applies to it (switch, internal resolution) on a page of its own.
+  // It is still experimental: everything here is off / console-default.
+  kCatNative = 6,
   // Auto-managed cvars not surfaced in the Settings UI. Saved/loaded
   // alongside the rest, but never get a label or control built for them.
-  kCatHidden = 6,
+  kCatHidden = 7,
 };
 
 struct CvarRow {
@@ -1211,9 +1232,19 @@ void DefineCvars() {
   // 2026-09-18: experimental native renderer (DPRecomp/src/native). Off = the
   // Xenos emulator exactly as before. 2026-09-19: moved to the Experimental
   // tab, off by default, released as a preview only (picture incomplete).
-  AddCvar("dp_native_render",
-          "Native Renderer (work in progress: broken picture, no floor; off = stock emulated path)",
-          kCatExperimental, K::kBool, "false");
+  AddCvar("dp_native_render", "Native Renderer (preview)", kCatNative, K::kBool, "false", {}, 0, 0,
+          "Work in progress: the picture is incomplete (white floor, shadows that slide, bright walls). Off = the stock emulated path, exactly as before.");
+  // [NEW FABLE VERSION] 2026-09-22: internal resolution of the native renderer
+  // (the scene, the reflections, the shadow maps and the final image), the way
+  // DPfix raised renderWidth on the PC port. Ignored while the native renderer
+  // is off. 2x on an RTX 5070 cost 1.1 ms of GPU time per frame.
+  AddCvar("dp_native_scale", "Internal Resolution", kCatNative, K::kEnum, "1",
+          {{"1", "1x - 1280x720, as the console"},
+           {"2", "2x - 2560x1440 (recommended)"},
+           {"3", "3x - 3840x2160"},
+           {"4", "4x - 5120x2880"}},
+          0, 0,
+          "Renders the whole frame at this multiple of the console's resolution and scales it down to your window: sharper image, no jagged edges. Needs the native renderer above; the cost is video memory and GPU time.");
   AddCvar("texture_replacement", "", kCatHidden, K::kBool, "true");
   AddCvar("texture_path", "", kCatHidden, K::kString, "");
   AddCvar("hid_mappings_file", "Controller Mappings (SDL)", kCatAdvanced,
@@ -1244,6 +1275,14 @@ void DefineCvars() {
   AddCvar("texture_cache_memory_limit_hard", "Texture Cache Hard Limit (MB)",
           kCatAdvanced, K::kInt, "768", {}, 128, 8192);
   AddCvar("audio_mute", "Mute Game Audio", kCatAdvanced, K::kBool, "false");
+  // DP1 2026-09-20 (DPRecomp #19): the game renders 5.1; a Windows endpoint
+  // set to 5.1 with stereo speakers behind it loses the dialogue (center
+  // channel). Stereo forces the runtime's own fold whatever Windows reports.
+  AddCvar("audio_channels", "Audio Output", kCatAdvanced,
+          K::kEnum, "auto",
+          {{"auto",     "Auto (follow the Windows output device)"},
+           {"stereo",   "Stereo (fold 5.1 to 2.0; use if dialogue is quiet or missing)"},
+           {"surround", "Surround (always send 5.1)"}});
   // DP1 2026-09-14 (DPRecomp #19): intro skip through the title-mode hook
   // (dp_skip_intro in deadlyprem_hooks.cpp). Off = the game as shipped.
   AddCvar("dp_skip_intro", "Skip Intro", kCatAdvanced,
@@ -1295,8 +1334,8 @@ void DefineCvars() {
   AddCvar("mnk_invert_y", "Invert Mouse Y", kCatMouse, K::kBool, "false");
   // DPRecomp #30 (2026-09-19): the aim routine reads the stick per axis; the
   // vector floor made diagonal aim staircase. On = floor added per axis while aiming.
-  AddCvar("mnk_aim_axis_floor", "Aim: per-axis mouse floor (fixes diagonal staircase)",
-          kCatMouse, K::kBool, "true");
+  AddCvar("mnk_aim_axis_floor", "Aim: per-axis mouse floor", kCatMouse, K::kBool, "true", {}, 0, 0,
+          "While aiming, lifts each mouse axis over the game's deadzone separately, so diagonal aim no longer staircases (#30). Off = 1.4.1 behaviour.");
   // v1.1: stick-shake QTEs on a keyboard - hold A + D to oscillate the stick.
   AddCvar("mnk_key_stick_ramp_ms", "Key Stick Ramp (ms)", kCatMouse, K::kFloat, "60.0", {}, 0.0, 300.0);
   AddCvar("mnk_auto_shake", "Auto-shake (hold A + D)", kCatMouse, K::kBool, "false");
@@ -2760,7 +2799,7 @@ constexpr int kSliderIdStart = 10000;
 // skip the round-trip and not loop.
 static bool g_slider_syncing = false;
 
-constexpr int kCatCount = 6;
+constexpr int kCatCount = 7;  // [NEW FABLE VERSION] + Native Renderer
 
 struct CtrlEntry {
   HWND label = nullptr;
@@ -2819,6 +2858,30 @@ LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   return CallWindowProcW(g_orig_tab_proc, hwnd, msg, wp, lp);
 }
 
+// One tooltip control per settings window (created on first use, destroyed
+// with its owner). TTF_SUBCLASS lets the tooltip watch the label itself, so no
+// relay of mouse messages is needed.
+void AddLabelTooltip(HWND owner, HWND label, const std::wstring& text) {
+  static const wchar_t* kProp = L"dp_tooltip";
+  HWND tip = (HWND)GetPropW(owner, kProp);
+  if (!tip) {
+    tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                          WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                          CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                          owner, nullptr, nullptr, nullptr);
+    if (!tip) return;
+    SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 420);  // wrap long explanations
+    SetPropW(owner, kProp, tip);
+  }
+  TOOLINFOW ti = {};
+  ti.cbSize = sizeof(ti);
+  ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+  ti.hwnd = owner;
+  ti.uId = (UINT_PTR)label;
+  ti.lpszText = const_cast<wchar_t*>(text.c_str());  // copied by the control
+  SendMessageW(tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+}
+
 int BuildPageControls(HWND hwnd, HFONT font, int dlg_w, int category) {
   // Count items in this category — switch to a 2-column grid when there are
   // many (keybinds tab has ~20 items, single-column would scroll).
@@ -2849,12 +2912,18 @@ int BuildPageControls(HWND hwnd, HFONT font, int dlg_w, int category) {
     int col_x = margin_x + col * (col_w + col_gap);
     if (y + row_h > max_y) max_y = y + row_h;
     std::wstring name = TrW(c.display_name);
+    // DPRecomp #32: one line per row. A label wider than its column used to
+    // wrap and the row height clipped the second line; now it ends in an
+    // ellipsis and the long explanation lives in the tooltip below.
     HWND label = CreateWindowW(L"STATIC", name.c_str(),
-                               WS_CHILD | SS_LEFT | SS_NOPREFIX,
+                               WS_CHILD | SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS,
                                col_x, y + 6, label_w, row_h - 4,
                                hwnd, (HMENU)(intptr_t)(2000 + i),
                                nullptr, nullptr);
     SendMessageW(label, WM_SETFONT, (WPARAM)font, TRUE);
+    if (!c.description.empty()) {
+      AddLabelTooltip(hwnd, label, TrW(c.description));
+    }
 
     int x = col_x + label_w + 8;
     HWND ctrl = nullptr;
@@ -2998,7 +3067,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           (WNDPROC)SetWindowLongPtrW(tab, GWLP_WNDPROC, (LONG_PTR)TabSubclassProc);
       TCITEMW ti = {};
       ti.mask = TCIF_TEXT;
-      const char* tab_names[] = {"Graphics", "Advanced", "Mouse", "Controls", "Debug", "Experimental"};
+      const char* tab_names[] = {"Graphics", "Advanced", "Mouse", "Controls", "Debug", "Experimental",
+                                 "Native"};
       std::wstring tab_titles[kCatCount];
       for (int i = 0; i < kCatCount; ++i) {
         tab_titles[i] = TrW(tab_names[i]);

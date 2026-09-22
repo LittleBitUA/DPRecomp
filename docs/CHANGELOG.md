@@ -1,6 +1,18 @@
 # Changelog
 
-Release notes for each version: [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.4.6 (September 2026)
+
+Native renderer preview only; the emulated path that runs by default is untouched.
+
+- **Internal resolution (launcher → Native → Internal Resolution).** The native renderer can render the scene, the reflections, the shadow maps and the final image at 2x, 3x or 4x the console's resolution and scale the result down to the window. On an RTX 5070 at 2x the GPU spends 1.1 ms per frame.
+- **Textures have their mip chains again.** Only the base level was ever uploaded, so distant surfaces shimmered and crawled. All levels are uploaded now, and the sampler honours the game's LOD bias and mip range.
+- **Shadow maps use the console's depth format.** They were hosted as 32-bit float depth while the polygon offset was computed for 24-bit unorm, which is what the shadow acne came from.
+- **Colour is clamped to the console's range per draw.** The scene targets hold 7e3 floats (max 31.875); only the resolve clamped before, so additive passes such as lamps and the flamethrower blew out.
+- **Recompiler: conditional shader blocks are back.** `cond_exec` ignored its bool constant, so in 297 of 1131 shaders every conditional block ran as if the condition were true - the sun-lit branch of walls and floors among them.
+- **Frame statistics in the log** (draws, uploads, pipelines, frame/CPU/GPU milliseconds as p50/p90/p99) for the native renderer, every 600 frames.
+- Launcher: the native renderer and its settings moved to a page of their own ("Native"), out of Experimental.
 
 ## 1.4.5 (September 2026)
 

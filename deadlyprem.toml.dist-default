@@ -55,6 +55,8 @@ audio_channels = "auto"
 dp_skip_intro = "off"
 # Experimental native renderer test build (launcher: Native Renderer). false = Xenos emulator.
 dp_native_render = false
+# Internal resolution of the native renderer: 1 = 1280x720 (console), 2 = 2560x1440, up to 4. Ignored when dp_native_render is false.
+dp_native_scale = 1
 dp_mouse_camera = true
 dp_mouse_camera_invert_y = false
 dp_mouse_camera_direct = true

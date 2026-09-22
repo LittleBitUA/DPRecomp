@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "deadlyprem_pch.h"
 
@@ -21,7 +22,16 @@ namespace dp::native {
 struct RendererStats {
   uint32_t draws = 0, draws_skipped = 0, resolves = 0, clears = 0, uploads_vb = 0, uploads_ib = 0,
            uploads_tex = 0, pso_created = 0, tex_rehash = 0, tex_changes = 0, watch_hits = 0;
+  // [NEW FABLE VERSION] 2026-09-22: performance counters for the frame line.
+  uint32_t resolve_partial = 0;  // resolves with a source rect / dest point / dest level the blit ignores
+  uint32_t psos_total = 0;       // pipelines alive (cumulative)
+  uint64_t upload_bytes = 0;     // bytes written into the upload ring this frame
+  uint64_t draw_cpu_us = 0;      // CPU time inside the native draw/clear/resolve/swap path this frame
 };
+
+// [NEW FABLE VERSION] p50/p90/p99 of the frame time, the native CPU time per
+// frame, the fence wait and the GPU time per frame since the previous call.
+std::string PerfSummaryAndReset();
 
 // All entry points take the raw PPC context of the hooked call (arguments in
 // r3.. as the XDK receives them) and are called only when the native renderer

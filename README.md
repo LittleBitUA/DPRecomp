@@ -15,9 +15,9 @@
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.5 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
+## [⬇ &nbsp;Download 1.4.6 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/latest)
 
-[Release notes](docs/RELEASE-NOTES-1.4.5.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.4.6.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -53,6 +53,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new in 1.3
+
+**1.4.6:** native renderer preview (Experimental → Native): mipmaps, console-range colour, fixed shadow-map depth format, a recompiler fix that restored every conditional shader branch, and an internal resolution setting up to 4x. [Notes](docs/RELEASE-NOTES-1.4.6.md).
 
 **1.4.5:** launcher fix: settings labels no longer wrap into a clipped second line; long explanations are tooltips now (#32). Also a call for testers of the native renderer preview (Experimental tab): tell us how it runs on your GPU. [Notes](docs/RELEASE-NOTES-1.4.5.md).
 
