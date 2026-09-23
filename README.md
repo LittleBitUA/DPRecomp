@@ -66,6 +66,12 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 
 [Full notes](docs/RELEASE-NOTES-1.4.7.md).
 
+| Red Room | The map table |
+|---|---|
+| ![Native renderer at 2x in the Red Room: York and the twins sharp, the background out of focus](docs/screenshots/native_147_redroom.jpg) | ![Native renderer at 2x: the map table with the figurines in focus](docs/screenshots/native_147_map.jpg) |
+
+*The native renderer in 1.4.7 at 2× internal resolution: depth of field as on the console.*
+
 **1.4.6:** native renderer preview: internal resolution up to 4×, mipmaps, the console's shadow depth format and colour range, a recompiler fix for conditional shader branches. [Notes](docs/RELEASE-NOTES-1.4.6.md).
 
 **1.4.5:** settings labels no longer wrap into a clipped second line; long explanations are tooltips (#32). [Notes](docs/RELEASE-NOTES-1.4.5.md).

@@ -7,6 +7,12 @@ Install from the launcher's Update button, or unzip over any earlier version. Sa
 ### 🔍 Depth of field works: the picture is sharp again
 With the native renderer every frame came out evenly blurred, York included, as if the depth of field put everything out of focus. The renderer cleared a render target on every resolve that carried the flag `0x10`, because we had read that flag as "clear". It is `D3DRESOLVE_FRAGMENT0`, the MSAA sample select, and the XDK even fills it in by itself. Deadly Premonition never asks a resolve to clear, and its light pass depends on that: it resolves a buffer, draws into one colour channel, and resolves again, and the depth kept in another channel of that buffer is what the final pass uses to decide how blurred each pixel is. The clear wiped that depth, so every pixel got the same answer. Now the background is soft and York and everything near him are sharp, as on the console.
 
+![Native renderer at 2x in the Red Room: York and the twins sharp, the background out of focus](https://raw.githubusercontent.com/LittleBitUA/DPRecomp/master/docs/screenshots/native_147_redroom.jpg)
+
+![Native renderer at 2x: the map table with the figurines in focus](https://raw.githubusercontent.com/LittleBitUA/DPRecomp/master/docs/screenshots/native_147_map.jpg)
+
+*Native renderer, 2x internal resolution, captured by us in 1.4.7.*
+
 ### 🖥 2x and higher no longer wrecks the image
 Six pixel shaders (depth of field, edge detection, the post chain and the shadow mask of local lights) read the pixel position and turn it into texture coordinates with constants made for the console's resolution. At 2x they got the position in the larger internal resolution, so the effects sampled the wrong places. The position is scaled back to console pixels now.
 
