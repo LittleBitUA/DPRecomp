@@ -89,4 +89,15 @@ inline uint64_t EstimateScaledBytes(uint32_t scale) {
   return (scene + output + depth + reflection + shadows) * s2;
 }
 
+// [NEW FABLE VERSION] 2026-09-23: XDK D3DDevice_Resolve flag bits. 0x70 is
+// the fragment (MSAA sample) select the XDK fills in itself (0x10 / 0x50 /
+// 0x70 for 1x / 2x / 4x), the clears are 0x100 / 0x200. DP1 passes only 0x00,
+// 0x10 and 0x14, i.e. it never clears on resolve.
+constexpr uint32_t kResolveDepthStencil = 0x4;
+constexpr uint32_t kResolveClearTarget = 0x100;
+constexpr uint32_t kResolveClearDepthStencil = 0x200;
+constexpr bool ResolveIsDepth(uint32_t flags) { return (flags & kResolveDepthStencil) != 0; }
+constexpr bool ResolveClearsTarget(uint32_t flags) { return (flags & kResolveClearTarget) != 0; }
+constexpr bool ResolveClearsDepth(uint32_t flags) { return (flags & kResolveClearDepthStencil) != 0; }
+
 }  // namespace dp::native

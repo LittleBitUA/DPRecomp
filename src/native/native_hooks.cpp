@@ -177,9 +177,10 @@ REX_HOOK_RAW(DPX_824DA330) {
     const int32_t every = REXCVAR_GET(dp_native_stats_frames);  // [NEW FABLE VERSION]
     if (frame == 0 || (every > 0 && (frame + 1) % uint32_t(every) == 0)) {
       REXLOG_INFO("Native renderer: frame #{}: {} draws ({} skipped), {} resolves ({} partial), {} clears, uploads vb {} ib {} tex {} "
-                  "({:.2f} MB) (watch hits {} changed {} vtf rehash {}), PSOs created {} (alive {}); {}; {}",
+                  "({:.2f} MB, const banks {} up / {} reused) (watch hits {} changed {} vtf rehash {}), PSOs created {} (alive {}); {}; {}",
                   frame + 1, stats.draws, stats.draws_skipped, stats.resolves, stats.resolve_partial, stats.clears,
                   stats.uploads_vb, stats.uploads_ib, stats.uploads_tex, double(stats.upload_bytes) / (1024.0 * 1024.0),
+                  stats.const_uploads, stats.const_reuses,
                   stats.watch_hits, stats.tex_changes, stats.tex_rehash, stats.pso_created, stats.psos_total,
                   dp::native::PerfSummaryAndReset(), system->RingStats());
     }

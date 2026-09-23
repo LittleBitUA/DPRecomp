@@ -455,6 +455,14 @@ struct Context {
   std::vector<ComPtr<ID3D12Resource>> retired[kFramesInFlight];
   RendererStats stats;
   uint32_t frame_number = 0;
+  // [NEW FABLE VERSION] constant banks: guest bytes of the last upload (big-endian,
+  // compared with memcmp) and where that upload lives in this frame's ring.
+  alignas(16) uint8_t vs_bank_cache[4096] = {};
+  alignas(16) uint8_t ps_bank_cache[4096] = {};
+  D3D12_GPU_VIRTUAL_ADDRESS vs_bank_gpu = 0, ps_bank_gpu = 0;
+  uint32_t bank_cache_frame = UINT32_MAX;  // frame_number the cached addresses belong to
+  bool bank_cache_valid = false;
+  uint32_t const_uploads = 0, const_reuses = 0;  // per-frame counters
   uint32_t log_budget = 200;
 };
 Context g;
@@ -1391,7 +1399,7 @@ bool UploadTexture(GuestTexture& t) {
     D3D12_TEXTURE_COPY_LOCATION dl = {}, sl = {};
     dl.pResource = t.resource.Get();
     dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dl.SubresourceIndex = face;
+    dl.SubresourceIndex = face * std::max(1u, t.mip_levels);  // [NEW FABLE VERSION] mip 0 of this face (review fix)
     sl.pResource = ring.buffer.Get();
     sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     sl.PlacedFootprint.Offset = off + face * face_bytes;
@@ -1631,6 +1639,7 @@ struct BindState {
   // Host-side "what is bound on the command list" mirror.
   uint32_t bound_rt0 = UINT32_MAX, bound_ds = UINT32_MAX;
   ID3D12PipelineState* bound_pso = nullptr;
+  bool root_bound = false;  // [NEW FABLE VERSION] game root signature + bindless tables set on the list
 };
 BindState st;
 
@@ -1845,6 +1854,34 @@ void SkipLog(const char* why, uint32_t a = 0, uint32_t b = 0) {
 }
 
 // Generates a triangle-list index buffer for quad lists in the upload ring.
+// [NEW FABLE VERSION] Triangle fan -> triangle list indices in the upload ring.
+// `guest_indices` (16/32-bit, big-endian, already offset to the fan's first
+// index) turns an indexed fan into an indexed list; nullptr = plain vertices,
+// so the indices are 0..n-1 relative and the caller passes the start vertex as
+// the base vertex.
+D3D12_GPU_VIRTUAL_ADDRESS GenerateFanIndices(uint32_t vertex_count, const uint8_t* guest_indices, bool index32,
+                                             uint32_t& index_count) {
+  if (vertex_count < 3) return 0;
+  index_count = (vertex_count - 2) * 3;
+  UploadRing& ring = g.upload[g.frame_index];
+  const size_t off = ring.Allocate(size_t(index_count) * 4, 16);
+  if (off == SIZE_MAX) return 0;
+  g.stats.upload_bytes += size_t(index_count) * 4;
+  auto src = [&](uint32_t i) -> uint32_t {
+    if (!guest_indices) return i;
+    return index32 ? rex::memory::load_and_swap<uint32_t>(guest_indices + size_t(i) * 4)
+                   : rex::memory::load_and_swap<uint16_t>(guest_indices + size_t(i) * 2);
+  };
+  uint32_t* p = reinterpret_cast<uint32_t*>(ring.mapped + off);
+  const uint32_t hub = src(0);
+  for (uint32_t i = 1; i + 1 < vertex_count; ++i) {
+    *p++ = hub;
+    *p++ = src(i);
+    *p++ = src(i + 1);
+  }
+  return ring.buffer->GetGPUVirtualAddress() + off;
+}
+
 D3D12_GPU_VIRTUAL_ADDRESS GenerateQuadIndices(uint32_t vertex_count, uint32_t& index_count) {
   const uint32_t quads = vertex_count / 4;
   index_count = quads * 6;
@@ -2134,6 +2171,7 @@ void ExecuteDraw(const DrawArgs& a) {
   D3D12_PRIMITIVE_TOPOLOGY topo;
   uint32_t topo_type;
   bool quads = false;
+  bool fan = false;  // [NEW FABLE VERSION] Xenos triangle fan (5)
   switch (a.prim) {
     case 1: topo = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; topo_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT; break;
     case 2: topo = D3D_PRIMITIVE_TOPOLOGY_LINELIST; topo_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE; break;
@@ -2141,6 +2179,7 @@ void ExecuteDraw(const DrawArgs& a) {
     case 4: topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; topo_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; break;
     case 6: topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; topo_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; break;
     case 13: topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; topo_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; quads = true; break;
+    case 5: topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; topo_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; fan = true; break;  // [NEW FABLE VERSION]
     default: return SkipLog("primitive type unsupported", a.prim);
   }
 
@@ -2199,6 +2238,28 @@ void ExecuteDraw(const DrawArgs& a) {
     base_vertex = 0;
     instance_count = a.count / 4;
     start_instance = a.start_vertex / 4;
+  } else if (fan) {
+    // [NEW FABLE VERSION] triangle fan: generated list indices; an indexed fan
+    // reads its guest indices at record time (they are a handful of vertices).
+    const uint8_t* guest_indices = nullptr;
+    bool index32 = false;
+    if (a.indexed) {
+      GuestBuffer* ib = Lookup(g_buffers, st.ib);
+      if (!ib) return SkipLog("index buffer not registered (fan)", st.ib);
+      RefreshBufferHeader(*ib);
+      if (!ib->size) return SkipLog("index buffer empty (fan)", ib->guest);
+      index32 = ib->index32;
+      const uint32_t index_bytes = index32 ? 4u : 2u;
+      if (size_t(a.start_index + a.count) * index_bytes > ib->size) return SkipLog("fan indices out of range", ib->guest, a.count);
+      guest_indices = HeaderPtr(ib->address) + size_t(a.start_index) * index_bytes;
+    }
+    ibv.BufferLocation = GenerateFanIndices(a.count, guest_indices, index32, index_count);
+    if (!ibv.BufferLocation) return SkipLog("upload ring full (fan)", a.count);
+    ibv.Format = DXGI_FORMAT_R32_UINT;
+    ibv.SizeInBytes = index_count * 4;
+    indexed = true;
+    start_index = 0;
+    base_vertex = a.indexed ? int32_t(a.base_vertex) : int32_t(a.start_vertex);
   } else if (quads) {
     if (a.indexed) return SkipLog("indexed quad list unsupported");
     ibv.BufferLocation = GenerateQuadIndices(a.count, index_count);
@@ -2371,17 +2432,55 @@ void ExecuteDraw(const DrawArgs& a) {
   // per draw (before this only the resolve clamped, so additive passes and the
   // lamp/flamethrower glows accumulated far beyond what the console could store).
   shared[192] = (rt && (rt->guest_format & 0x3F) == 63) ? 1u : 0u;
+  {
+    // [NEW FABLE VERSION] c48.w: 1 / internal resolution scale of the bound target,
+    // so a pixel shader's VPOS stays in console pixels (the game's screen-space
+    // constants are for 1024x576 / 1280x720). The VS half-pixel term is applied
+    // in clip space and needs nothing.
+    const float vpos_scale = 1.0f / float(BindScale(rt != nullptr, rt ? rt->scale : 1u, ds != nullptr, ds ? ds->scale : 1u));
+    std::memcpy(&shared[195], &vpos_scale, 4);
+  }
 
-  // Constants: whole banks, byte-swapped, into the ring.
+  // Constants: whole banks, byte-swapped, into the ring. [NEW FABLE VERSION] only
+  // when the guest bank changed since the previous draw of this frame (a 4 KB
+  // memcmp against the cached guest bytes is far cheaper than the byte-swapped
+  // copy into write-combined memory it replaces).
   UploadRing& ring = g.upload[g.frame_index];
-  const size_t vs_off = ring.Allocate(4096, 256);
-  const size_t ps_off = ring.Allocate(4096, 256);
+  if (g.bank_cache_frame != g.frame_number) {
+    g.bank_cache_frame = g.frame_number;
+    g.bank_cache_valid = false;  // the previous frame's ring is being reused
+  }
+  const uint8_t* vs_guest = Mem()->TranslateVirtual(g_device + kDevVsConstants);
+  const uint8_t* ps_guest = Mem()->TranslateVirtual(g_device + kDevPsConstants);
+  const bool vs_changed = !g.bank_cache_valid || std::memcmp(vs_guest, g.vs_bank_cache, 4096) != 0;
+  const bool ps_changed = !g.bank_cache_valid || std::memcmp(ps_guest, g.ps_bank_cache, 4096) != 0;
+  if (vs_changed) {
+    const size_t vs_off = ring.Allocate(4096, 256);
+    if (vs_off == SIZE_MAX) return SkipLog("upload ring full (constants)");
+    rex::memory::copy_and_swap_32_unaligned(ring.mapped + vs_off, vs_guest, 1024);
+    std::memcpy(g.vs_bank_cache, vs_guest, 4096);
+    g.vs_bank_gpu = ring.buffer->GetGPUVirtualAddress() + vs_off;
+    g.stats.upload_bytes += 4096;
+    ++g.const_uploads;
+  } else {
+    ++g.const_reuses;
+  }
+  if (ps_changed) {
+    const size_t ps_off = ring.Allocate(4096, 256);
+    if (ps_off == SIZE_MAX) return SkipLog("upload ring full (constants)");
+    rex::memory::copy_and_swap_32_unaligned(ring.mapped + ps_off, ps_guest, 1024);
+    std::memcpy(g.ps_bank_cache, ps_guest, 4096);
+    g.ps_bank_gpu = ring.buffer->GetGPUVirtualAddress() + ps_off;
+    g.stats.upload_bytes += 4096;
+    ++g.const_uploads;
+  } else {
+    ++g.const_reuses;
+  }
+  g.bank_cache_valid = true;
   const size_t sh_off = ring.Allocate(kSharedConstantsBytes, 256);
-  if (vs_off == SIZE_MAX || ps_off == SIZE_MAX || sh_off == SIZE_MAX) return SkipLog("upload ring full (constants)");
-  rex::memory::copy_and_swap_32_unaligned(ring.mapped + vs_off, Mem()->TranslateVirtual(g_device + kDevVsConstants), 1024);
-  rex::memory::copy_and_swap_32_unaligned(ring.mapped + ps_off, Mem()->TranslateVirtual(g_device + kDevPsConstants), 1024);
+  if (sh_off == SIZE_MAX) return SkipLog("upload ring full (constants)");
   std::memcpy(ring.mapped + sh_off, shared, kSharedConstantsBytes);
-  g.stats.upload_bytes += 8192 + kSharedConstantsBytes;
+  g.stats.upload_bytes += kSharedConstantsBytes;
 
   // Pipeline.
   PipelineKey key = {};
@@ -2435,12 +2534,15 @@ void ExecuteDraw(const DrawArgs& a) {
     g.list->SetPipelineState(pso);
     st.bound_pso = pso;
   }
-  g.list->SetGraphicsRootSignature(g.root_signature.Get());
-  g.list->SetGraphicsRootConstantBufferView(0, ring.buffer->GetGPUVirtualAddress() + vs_off);
-  g.list->SetGraphicsRootConstantBufferView(1, ring.buffer->GetGPUVirtualAddress() + ps_off);
+  if (!st.root_bound) {  // [NEW FABLE VERSION] once per list / after a blit
+    g.list->SetGraphicsRootSignature(g.root_signature.Get());
+    g.list->SetGraphicsRootDescriptorTable(3, g.views.Gpu(0));
+    g.list->SetGraphicsRootDescriptorTable(4, g.samplers.Gpu(0));
+    st.root_bound = true;
+  }
+  g.list->SetGraphicsRootConstantBufferView(0, g.vs_bank_gpu);
+  g.list->SetGraphicsRootConstantBufferView(1, g.ps_bank_gpu);
   g.list->SetGraphicsRootConstantBufferView(2, ring.buffer->GetGPUVirtualAddress() + sh_off);
-  g.list->SetGraphicsRootDescriptorTable(3, g.views.Gpu(0));
-  g.list->SetGraphicsRootDescriptorTable(4, g.samplers.Gpu(0));
   g.list->IASetPrimitiveTopology(topo);
   g.list->IASetVertexBuffers(0, vbv_count, vbv);
   if (indexed) {
@@ -2482,6 +2584,7 @@ void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst
   // Invalidate the game-side mirror: the next draw rebinds targets/PSO.
   st.bound_rt0 = st.bound_ds = UINT32_MAX;
   st.bound_pso = nullptr;
+  st.root_bound = false;  // [NEW FABLE VERSION] the blit used its own root signature
 }
 
 }  // namespace
@@ -3057,9 +3160,16 @@ static uint32_t SliceRtv(GuestTexture& t, uint32_t slice) {
 
 // D3DDevice_Resolve(dev, Flags, pSourceRect, pDestTexture, pDestPoint, DestLevel,
 // DestSliceOrFace, pClearColor, ClearZ (f1), ClearStencil, pParameters).
-// Flags: 0-3 = RT index, 4 = DEPTHSTENCIL, 0x10 = CLEARRENDERTARGET,
-// 0x20 = CLEARDEPTHSTENCIL (the game relies on these: nearly every resolve
-// in DP1 clears the EDRAM target for the next pass).
+// Flags: 0-3 = RT index, 4 = DEPTHSTENCIL, 0x70 = fragment (MSAA sample)
+// select, 0x100 = CLEARRENDERTARGET, 0x200 = CLEARDEPTHSTENCIL.
+// [NEW FABLE VERSION] 2026-09-23: 0x10 is D3DRESOLVE_FRAGMENT0, NOT a clear.
+// Proof: the XDK body (sub_824E5DB8) ORs 0x10 / 0x50 / 0x70 into the flags when
+// (flags & 0x70) == 0, picked from the surface's MSAA mode (1x / 2x / 4x), and
+// Downpour's UE3 source resolves depth with DEPTHSTENCIL | FRAGMENT0 (= 0x14,
+// the exact value DP1 passes). DP1 only ever passes 0x00, 0x10 and 0x14, so it
+// never asks a resolve to clear: EDRAM keeps its contents, and the light pass
+// depends on that (resolve -> R-only draw -> resolve must keep G = prepass
+// depth, which the tonemap reads as the DoF input). Clearing on 0x10 wiped it.
 void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_t dest_point_ptr,
                uint32_t dest_level, uint32_t dest_slice, uint32_t clear_color_ptr, float clear_z) {
   ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
@@ -3094,7 +3204,7 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   }
   // The clears happen even when the copy cannot (e.g. no destination texture).
   auto do_clears = [&]() {
-    if (flags & 0x10) {
+    if (ResolveClearsTarget(flags)) {  // [NEW FABLE VERSION] was flags & 0x10 (FRAGMENT0)
       if (GuestSurface* rt = Lookup(g_surfaces, st.rt0); rt && EnsureSurfaceResource(*rt)) {
         float color[4] = {0, 0, 0, 0};
         if (clear_color_ptr) for (int i = 0; i < 4; ++i) color[i] = LoadF32(clear_color_ptr + i * 4);
@@ -3103,7 +3213,7 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
         g.stats.clears++;
       }
     }
-    if (flags & 0x20) {
+    if (ResolveClearsDepth(flags)) {  // [NEW FABLE VERSION] was flags & 0x20 (FRAGMENT1)
       if (GuestSurface* ds = Lookup(g_surfaces, st.ds); ds && EnsureSurfaceResource(*ds)) {
         Barrier(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         g.list->ClearDepthStencilView(g.dsvs.Cpu(ds->view_index), D3D12_CLEAR_FLAG_DEPTH, clear_z, 0, 0, nullptr);
@@ -3258,6 +3368,7 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
   g.frame_number++;
   st.bound_rt0 = st.bound_ds = UINT32_MAX;
   st.bound_pso = nullptr;
+  st.root_bound = false;  // [NEW FABLE VERSION] new command list next frame
   // The game's vertex streaming pools (4 x 1.3 MB, FixBufferCopy threads) are
   // written without Lock, several times per frame. Watched buffers re-upload
   // at the next draw after a CPU write (WatchBuffer); a buffer whose pages
@@ -3282,6 +3393,9 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
     g_perf.wait_ticks = 0;
   }
   stats.psos_total = uint32_t(g.psos.size());
+  stats.const_uploads = g.const_uploads;  // [NEW FABLE VERSION]
+  stats.const_reuses = g.const_reuses;
+  g.const_uploads = g.const_reuses = 0;
   return stats;
 }
 

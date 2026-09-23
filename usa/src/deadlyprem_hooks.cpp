@@ -443,6 +443,11 @@ REXCVAR_DEFINE_STRING(dp_pad_layout, "original", "DP1",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 bool DPInVehicle();  // deadlyprem_camera_hook.cpp
+// [NEW FABLE VERSION] #19: log the pad state before and after the remap.
+REXCVAR_DEFINE_BOOL(dp_pad_layout_log, false, "DP1",
+                    "Log every change of A / LT / RT on a physical pad as raw -> remapped (first 400 lines); "
+                    "for DPRecomp #19 reports")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
 dp::PadLayout DPPadLayoutValue() {
@@ -466,6 +471,19 @@ dp::PadLayoutState g_pad_layout_state[4];
 
 void DPInstallPadLayoutFilter() {
   rex::input::SetStateFilter([](uint32_t user_index, bool synthetic, rex::input::X_INPUT_GAMEPAD& pad) {
+    const bool in_vehicle = DPInVehicle();
+    {
+      // One line per change so a player's log shows when the layout stood
+      // down for the car (#28). [NEW FABLE VERSION] logged for every device,
+      // the keyboard/mouse one included, so a keyboard-only session (our own
+      // scripted runs) shows the transitions too.
+      static std::atomic<bool> logged_vehicle{false};
+      bool was = logged_vehicle.load(std::memory_order_relaxed);
+      if (in_vehicle != was && logged_vehicle.compare_exchange_strong(was, in_vehicle)) {
+        REXLOG_INFO("Controller layout: York {} driving, Director's Cut remap {}", in_vehicle ? "is" : "stopped",
+                    in_vehicle ? "paused (car on RT/LT)" : "active");
+      }
+    }
     // Keyboard/mouse emulation already binds keys to the game's own buttons
     // (Space = RT etc.); only physical pads get the alternative layout.
     if (synthetic || user_index >= 4) return;
@@ -473,18 +491,26 @@ void DPInstallPadLayoutFilter() {
     uint16_t buttons = static_cast<uint16_t>(pad.buttons);
     uint8_t lt = pad.left_trigger;
     uint8_t rt = pad.right_trigger;
-    const bool in_vehicle = DPInVehicle();
+    const uint16_t raw_buttons = buttons;
+    const uint8_t raw_lt = lt, raw_rt = rt;
     {
       std::lock_guard<std::mutex> lock(g_pad_layout_mutex);
-      // One line per change so a player's log shows when the layout stood
-      // down for the car (#28).
-      static bool logged_vehicle = false;
-      if (in_vehicle != logged_vehicle) {
-        logged_vehicle = in_vehicle;
-        REXLOG_INFO("Controller layout: York {} driving, Director's Cut remap {}", in_vehicle ? "is" : "stopped",
-                    in_vehicle ? "paused (car on RT/LT)" : "active");
-      }
       dp::ApplyPadLayout(layout, buttons, lt, rt, in_vehicle, g_pad_layout_state[user_index]);
+      // [NEW FABLE VERSION] #19 diagnostics: what the pad sent and what the game
+      // gets, one line per change of the parts the remap touches (A, LT, RT).
+      if (REXCVAR_GET(dp_pad_layout_log)) {
+        static uint32_t last_key[4] = {};
+        static uint32_t budget = 400;
+        const uint32_t key = (uint32_t(raw_buttons & dp::kPadButtonA) << 16) | (uint32_t(raw_lt > dp::kPadTriggerThreshold) << 1) |
+                             uint32_t(raw_rt > dp::kPadTriggerThreshold) | (uint32_t(in_vehicle) << 2);
+        if (key != last_key[user_index] && budget) {
+          last_key[user_index] = key;
+          --budget;
+          REXLOG_INFO("Pad layout ({}): user {} raw A={} LT={} RT={} -> game A={} LT={} RT={} (vehicle {})",
+                      layout == dp::PadLayout::kDc ? "dc" : "original", user_index, (raw_buttons & dp::kPadButtonA) ? 1 : 0,
+                      raw_lt, raw_rt, (buttons & dp::kPadButtonA) ? 1 : 0, lt, rt, in_vehicle ? 1 : 0);
+        }
+      }
     }
     pad.buttons = buttons;
     pad.left_trigger = lt;

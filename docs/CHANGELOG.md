@@ -1,6 +1,16 @@
 # Changelog
 
-Release notes for each version: [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 1.4.7 (September 2026)
+
+Native renderer preview, plus one diagnostic option; the emulated path that runs by default is untouched.
+
+- **Resolve no longer clears on `D3DRESOLVE_FRAGMENT0` (depth of field, blur over the whole frame).** The native `Resolve` treated flag `0x10` as "clear the render target" and `0x20` as "clear depth". Those bits are the MSAA sample select (`0x70`): the XDK's own `D3DDevice_Resolve` ORs in `0x10`, `0x50` or `0x70` when the caller leaves them empty, picked from the surface's MSAA mode, and the clears are `0x100` / `0x200`. The game passes only `0x00`, `0x10` and `0x14` (depth, fragment 0, the same value Downpour's UE3 renderer uses), so it never clears on resolve. The light pass resolves its buffer, draws into the red channel only and resolves again; the green channel (the pre-pass depth) has to survive, because the tonemap reads it through a lookup table as the depth-of-field factor. The spurious clear zeroed it, so every pixel got the same, fully blurred, factor. Every depth resolve also wiped the colour target bound next to it. Covered by `TestResolveFlags` in `tests/native_scale_test.cpp`.
+- **VPOS in console pixels at 2x and above.** Six pixel shaders read the pixel position (depth of field, edge detection, the post chain, the local-light shadow mask) and turn it into texture coordinates with constants made for 1024x576. At an internal resolution above 1x the position arrived in host pixels; it is now scaled back (`c48.w`, set per draw from the bound targets' scale).
+- **Triangle fans** (Xenos primitive 5) are drawn through generated index lists instead of being skipped.
+- **Constant banks are uploaded only when they change**, and the root signature and descriptor tables are bound once per command list; the frame line reports `const banks N up / M reused`.
+- `dp_pad_layout_log` (config only): logs raw A / LT / RT against what the game sees under the Director's Cut layout, and the enter / leave vehicle transitions for every pad (#19 diagnostics).
 
 ## 1.4.6 (September 2026)
 

@@ -27,6 +27,7 @@ struct RendererStats {
   uint32_t psos_total = 0;       // pipelines alive (cumulative)
   uint64_t upload_bytes = 0;     // bytes written into the upload ring this frame
   uint64_t draw_cpu_us = 0;      // CPU time inside the native draw/clear/resolve/swap path this frame
+  uint32_t const_uploads = 0, const_reuses = 0;  // constant banks uploaded vs reused this frame
 };
 
 // [NEW FABLE VERSION] p50/p90/p99 of the frame time, the native CPU time per

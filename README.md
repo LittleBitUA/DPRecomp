@@ -7,19 +7,19 @@
 **A native Windows port of *Deadly Premonition* (Xbox 360, 2010) by static recompilation. No emulator.**<br>
 60 FPS on the console's own time base · real mouse look · keyboard and PlayStation button prompts · FSR 3 and 2× supersampling · a launcher that updates itself · PAL and USA discs
 
-[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip)
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip)
 [![Issues](https://img.shields.io/github/issues/LittleBitUA/DPRecomp?style=for-the-badge&color=orange)](https://github.com/LittleBitUA/DPRecomp/issues)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.6 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip)
+## [⬇ &nbsp;Download 1.4.7 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip)
 
-`DPRecomp-1.4.6-win64.zip` · 42 MB · Windows 10 / 11 64-bit
+`DPRecomp-1.4.7-win64.zip` · 42 MB · Windows 10 / 11 64-bit
 
-[Release notes](docs/RELEASE-NOTES-1.4.6.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-1.4.7.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -46,7 +46,7 @@
 
 **You need:** Windows 10 / 11 64-bit · a Direct3D 12 GPU with rasterizer-ordered views (NVIDIA GTX 900+, AMD RX 400+, Intel Arc; recent integrated graphics at 1×) · ~6 GB free for the game data · your *Deadly Premonition* Xbox 360 disc image or extracted files.
 
-1. **Download** [`DPRecomp-1.4.6-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.6/DPRecomp-1.4.6-win64.zip) and unzip it anywhere outside *Program Files*.
+1. **Download** [`DPRecomp-1.4.7-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip) and unzip it anywhere outside *Program Files*.
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
@@ -56,16 +56,17 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 
 ## What's new
 
-**1.4.6 — the native renderer preview grows up.** Off by default; the emulated path is unchanged.
+**1.4.7 — the native renderer preview stops blurring everything.** Off by default; the emulated path is unchanged. **Please try it and tell us how it runs** (see *Help us test* below).
 
-- **Internal resolution up to 4×** for the native renderer (launcher → **Native**). The scene, the reflections, the shadow maps and the final image are rendered larger and scaled down to your window. On an RTX 5070 at 2× the GPU spends 1.1 ms per frame and the game holds its 60 fps.
-- **Mipmaps are back**: only the base level of each texture was uploaded, so distant surfaces shimmered.
-- **Shadow maps use the console's 24-bit depth format**, which is what the polygon offset was always computed for. That was the source of the shadow acne.
-- **Colour is clamped to the console's range per draw** (7e3, max 31.875), not only at resolve, so lamps and the flamethrower stop blowing out.
-- **A recompiler fix restored conditional branches in 297 of 1131 shaders**: `cond_exec` ignored its bool constant, so those blocks always ran.
-- **Numbers in the log** for native runs: draws, uploads, pipelines, and frame / CPU / GPU milliseconds as p50 / p90 / p99.
+- **Depth of field works.** The whole picture was evenly blurred, York included. The renderer cleared a render target on every resolve that carried the flag `0x10`, which we had read as "clear"; it is `D3DRESOLVE_FRAGMENT0`, the MSAA sample select the XDK fills in by itself. Deadly Premonition never clears on resolve, and its light pass relies on that: the depth that drives the blur survives two resolves in the same buffer. Now it does, and the background is soft while York and everything near him are sharp.
+- **2× and higher internal resolution no longer wrecks the picture.** Six pixel shaders (depth of field, edges, the post chain and the local-light shadow mask) read the pixel position, and at 2× it came in host pixels while the game's constants expect console pixels.
+- **Triangle fans are drawn** instead of skipped, so the small missing pieces of geometry are back.
+- **Less CPU per frame:** shader constants are uploaded only when the game changes them, and the root signature is bound once per frame.
+- Measured on an RTX 5070 at 2× in the Red Room: 60 fps held, the native renderer's CPU time 3.1–3.3 ms and GPU time 1.2–1.3 ms per frame.
 
-[Full notes](docs/RELEASE-NOTES-1.4.6.md).
+[Full notes](docs/RELEASE-NOTES-1.4.7.md).
+
+**1.4.6:** native renderer preview: internal resolution up to 4×, mipmaps, the console's shadow depth format and colour range, a recompiler fix for conditional shader branches. [Notes](docs/RELEASE-NOTES-1.4.6.md).
 
 **1.4.5:** settings labels no longer wrap into a clipped second line; long explanations are tooltips (#32). [Notes](docs/RELEASE-NOTES-1.4.5.md).
 
@@ -85,7 +86,7 @@ Everything since 1.0, version by version: [docs/CHANGELOG.md](docs/CHANGELOG.md)
 
 Every fix in the list above started as somebody's report. What is most useful right now:
 
-- **The native renderer preview** (launcher → **Native**). It is incomplete on purpose, and hardware other than ours is the part we cannot see. Tell us your GPU and CPU, the frame rate in the same spot with the renderer off and on, and whether **Internal Resolution** 2× is playable. The log line that starts `Native renderer: frame #` carries the frame, CPU and GPU milliseconds we need; attach `logs\deadlyprem_XXX.log`.
+- **The native renderer preview** (launcher → **Native**), now that 1.4.7 fixed the blur. It is incomplete on purpose, and hardware other than ours is the part we cannot see. Tell us your GPU and CPU, the frame rate in the same spot with the renderer off and on, and whether **Internal Resolution** 2× is playable. The log line that starts `Native renderer: frame #` carries the frame, CPU and GPU milliseconds we need; attach `logs\deadlyprem_XXX.log`.
 - **60 FPS oddities:** anything that runs at the wrong speed or desyncs from the voices. The scene where York meets Emily and George is our reference.
 - **The ROV path's leftovers:** hard contours on tree crowns and glass, light-blue polygonal patches on characters in dialogue scenes, flat cloud blotches (#10). A screenshot plus the scene name.
 - **Steam Deck and AMD integrated graphics:** frame rates with ROV vs RTV, 1× vs 2×.
@@ -230,9 +231,8 @@ Yes. Turn on *Texture Dump* in the launcher (Advanced), play, pick the PNG from 
 **The native renderer preview (off by default):**
 
 - The mirror floor in the sheriff's station comes out white, and outdoors the picture has a milky veil over it. Same root cause, still open.
-- Shadows slide with the character instead of staying put.
-- A few triangle-fan draws are skipped, so small pieces of geometry are missing.
-- Depth of field and glow are softer than on the emulated path.
+- Shadows slide with the character instead of staying put (not re-checked since the resolve fix in 1.4.7; reports welcome).
+- Tree crowns and bushes show thin dark contour lines.
 
 ---
 

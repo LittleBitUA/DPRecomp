@@ -4,6 +4,7 @@
 // pass. Build target dp_native_scale_test (see CMakeLists.txt).
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 
 #include "../src/native/native_scale.h"
 
@@ -91,6 +92,20 @@ void TestMemoryEstimate() {
   CHECK(EstimateScaledBytes(4) < 2ull * 1024 * 1024 * 1024);
 }
 
+// [NEW FABLE VERSION] 2026-09-23 regression: 0x10 (FRAGMENT0) used to be read
+// as CLEARRENDERTARGET, which wiped the light buffer's G (DoF depth) mid-pass.
+void TestResolveFlags() {
+  for (uint32_t f : {0x00u, 0x10u, 0x14u, 0x50u, 0x70u, 0x20u, 0x24u}) {
+    CHECK(!ResolveClearsTarget(f));
+    CHECK(!ResolveClearsDepth(f));
+  }
+  CHECK(ResolveIsDepth(0x14));
+  CHECK(!ResolveIsDepth(0x10));
+  CHECK(ResolveClearsTarget(0x110));
+  CHECK(ResolveClearsDepth(0x214));
+  CHECK(!ResolveClearsTarget(0x214));
+}
+
 }  // namespace
 
 int main() {
@@ -99,6 +114,7 @@ int main() {
   TestBindScale();
   TestViewportAndScissor();
   TestMemoryEstimate();
+  TestResolveFlags();
   if (g_failures == 0) std::printf("dp_native_scale_test: all checks passed\n");
   return g_failures == 0 ? 0 : 1;
 }
