@@ -577,7 +577,7 @@ index b279ee4..394c5f5 100644
  {
      uint index = cubeMapData.cubeMapIndex;
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 81ef3c5..f2d5d0f 100644
+index 81ef3c5..b9a821c 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -16,8 +16,8 @@ static constexpr char SWIZZLES[] =
@@ -676,12 +676,52 @@ index 81ef3c5..f2d5d0f 100644
      }
  
      out += '.';
-@@ -482,11 +528,20 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -457,6 +503,28 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             }
+             else
+             {
++                // dp1 [NEW FABLE VERSION] 2026-09-23: each constant operand has its
++                // own relative-addressing bit. Which one is min(number of constant
++                // operands before it, 1) (rexglue ucode.h src_const_is_addressed):
++                // src1 -> const0; src2 -> const0 if src1 is a temp, else const1;
++                // src3 (and the scalar constant operand) -> const0 if src1 and src2
++                // are temps, else const1. Using const0 for every operand turned
++                // c[19 + a0] * c[9] into c[19 + a0] * c[9 + a0] (DP1 fire / smoke
++                // particle UVs: 4.8 atlas widths across one quad = stripes).
++                bool constRelative;
++                switch (operand)
++                {
++                case VECTOR_0:
++                    constRelative = instr.const0Relative;
++                    break;
++                case VECTOR_1:
++                    constRelative = instr.src1Select ? instr.const0Relative : instr.const1Relative;
++                    break;
++                default:
++                    constRelative = (instr.src1Select && instr.src2Select) ? instr.const0Relative : instr.const1Relative;
++                    break;
++                }
++
+                 auto findResult = float4Constants.find(reg);
+                 if (findResult != float4Constants.end())
+                 {
+@@ -473,20 +541,29 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                     #endif
+                         {
+                             regFormatted = fmt::format("{}({}{})", constantName,
+-                                reg - findResult->second->registerIndex, instr.const0Relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
++                                reg - findResult->second->registerIndex, constRelative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
+                         }
+                     }
+                     else
+                     {
+-                        assert(!instr.const0Relative && !instr.const1Relative);
++                        assert(!constRelative);
                          regFormatted = constantName;
                      }
                  }
 -                else
-+                else if (definedFloat4s.count(reg) != 0 && !instr.const0Relative && !instr.const1Relative)
++                else if (definedFloat4s.count(reg) != 0 && !constRelative)
                  {
 -                    assert(!instr.const0Relative && !instr.const1Relative);
 +                    // Baked by the container's definition table.
@@ -694,12 +734,135 @@ index 81ef3c5..f2d5d0f 100644
 +                    // (c[a0 + N]), which the reflection-less path used to assert
 +                    // away and then emit an undeclared identifier for.
 +                    regFormatted = fmt::format("XE_CONST({}{})", reg,
-+                        instr.const0Relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
++                        constRelative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
 +                }
              }
  
              std::string result;
-@@ -1105,14 +1160,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -523,6 +600,17 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                     mask = 0b1111;
+                     break;
+ 
++                // dp1 [NEW FABLE VERSION] 2026-09-23: the push ops read .x and .w of
++                // both sources whatever the write mask (see the emission below); cube
++                // reads .z, .w and .x of its first operand.
++                case AluVectorOpcode::Cube:
++                case AluVectorOpcode::SetpEqPush:
++                case AluVectorOpcode::SetpNePush:
++                case AluVectorOpcode::SetpGtPush:
++                case AluVectorOpcode::SetpGePush:
++                    mask = 0b1111;
++                    break;
++
+                 default:
+                     mask = instr.vectorWriteMask != 0 ? instr.vectorWriteMask : 0b1;
+                     break;
+@@ -638,8 +726,10 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+ 
+     if (instr.vectorOpcode >= AluVectorOpcode::SetpEqPush && instr.vectorOpcode <= AluVectorOpcode::SetpGePush)
+     {
++        // dp1 [NEW FABLE VERSION] 2026-09-23: predicate from the .w components
++        // (rexglue interpreter.cpp kSetp*Push); the result uses the .x ones.
+         indent();
+-        print("p0 = {} == 0.0 && {} ", op(VECTOR_0), op(VECTOR_1));
++        print("p0 = ({}).w == 0.0 && ({}).w ", op(VECTOR_0), op(VECTOR_1));
+ 
+         switch (instr.vectorOpcode)
+         {
+@@ -669,6 +759,22 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+     if (instr.exportData)
+         vectorWriteMask &= ~instr.scalarWriteMask;
+ 
++    // dp1 [NEW FABLE VERSION] 2026-09-23: the co-issued scalar op reads its sources
++    // before either result is written (rexglue interpreter.cpp). When it reads the
++    // temp this vector op writes, the vector result goes to pv and is written back
++    // after the scalar op (DP1: `dp3 r7.w, ... + maxs r0.x, r7.ww` keeps the old
++    // r7.w, the vertex alpha, for oC0.w).
++    bool vectorStaged = false;
++    if (vectorWriteMask != 0 && exportRegister.empty() && instr.scalarOpcode != AluScalarOpcode::RetainPrev)
++    {
++        uint32_t scalarTemp = UINT32_MAX;
++        if (instr.scalarOpcode >= AluScalarOpcode::Mulsc0 && instr.scalarOpcode <= AluScalarOpcode::Subsc1)
++            scalarTemp = (uint32_t(instr.scalarOpcode) & 1) | (instr.src3Select << 1) | (instr.src3Swizzle & 0x3C);
++        else if (instr.src3Select)
++            scalarTemp = instr.src3Register & 0x3F;
++        vectorStaged = scalarTemp == instr.vectorDest;
++    }
++
+     if (vectorWriteMask != 0)
+     {
+         indent();
+@@ -677,6 +783,10 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             out += exportRegister;
+             out += '.';
+         }
++        else if (vectorStaged)
++        {
++            out += "pv.";
++        }
+         else
+         {
+             print("r{}.", instr.vectorDest);
+@@ -766,7 +876,9 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             break;
+ 
+         case AluVectorOpcode::Cube:
+-            print("cube(r{}, cubeMapData)", instr.src1Register);
++            // dp1 [NEW FABLE VERSION] 2026-09-23: direction = (src0.z, src0.w, src0.x)
++            // of the swizzled operand (rexglue interpreter.cpp kCube), not the raw register.
++            print("cube(float4(({}).zwx, 0.0), cubeMapData)", op(VECTOR_0));
+             break;
+ 
+         case AluVectorOpcode::Max4:
+@@ -777,8 +889,15 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+         case AluVectorOpcode::SetpNePush:
+         case AluVectorOpcode::SetpGtPush:
+         case AluVectorOpcode::SetpGePush:
+-            print("p0 ? 0.0 : {} + 1.0", op(VECTOR_0));
++        {
++            // dp1 [NEW FABLE VERSION] 2026-09-23: (src0.x == 0 && src1.x <op> 0) ?
++            // 0 : src0.x + 1, replicated to every written component.
++            const char* cmp = instr.vectorOpcode == AluVectorOpcode::SetpEqPush ? "=="
++                : instr.vectorOpcode == AluVectorOpcode::SetpNePush ? "!="
++                : instr.vectorOpcode == AluVectorOpcode::SetpGtPush ? ">" : ">=";
++            print("(({0}).x == 0.0 && ({1}).x {2} 0.0) ? 0.0 : ({0}).x + 1.0", op(VECTOR_0), op(VECTOR_1), cmp);
+             break;
++        }
+ 
+         case AluVectorOpcode::KillEq:
+             print("any({} == {})", op(VECTOR_0), op(VECTOR_1));
+@@ -951,7 +1070,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             break;
+ 
+         case AluScalarOpcode::SetpInv:
+-            print("{0} == 0.0 ? 1.0 : {0}", op(SCALAR_0));
++            // dp1 [NEW FABLE VERSION] 2026-09-23: 0 when the predicate was set (a == 1).
++            print("p0 ? 0.0 : ({0} == 0.0 ? 1.0 : {0})", op(SCALAR_0));
+             break;
+ 
+         case AluScalarOpcode::SetpPop:
+@@ -1032,6 +1152,20 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+         }
+     }
+ 
++    if (vectorStaged)  // dp1 [NEW FABLE VERSION] 2026-09-23: see pv above
++    {
++        indent();
++        print("r{}.", instr.vectorDest);
++        for (size_t i = 0; i < 4; i++)
++            if ((vectorWriteMask >> i) & 0x1)
++                out += SWIZZLES[i];
++        out += " = pv.";
++        for (size_t i = 0; i < 4; i++)
++            if ((vectorWriteMask >> i) & 0x1)
++                out += SWIZZLES[i];
++        out += ";\n";
++    }
++
+     uint32_t scalarWriteMask = instr.scalarWriteMask;
+     if (instr.exportData)
+         scalarWriteMask &= ~instr.vectorWriteMask;
+@@ -1105,14 +1239,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
  
      assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
@@ -724,7 +887,7 @@ index 81ef3c5..f2d5d0f 100644
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
  
      out += "#ifdef __spirv__\n\n";
-@@ -1165,8 +1228,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1165,8 +1307,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      constantName, shaderName, constantInfo->registerIndex * 16);
              }
              
@@ -736,7 +899,7 @@ index 81ef3c5..f2d5d0f 100644
  
              break;
          }
-@@ -1208,8 +1272,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1208,8 +1351,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
      out += "\n#else\n\n";
  
@@ -757,7 +920,7 @@ index 81ef3c5..f2d5d0f 100644
  
      for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
      {
-@@ -1235,7 +1311,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1235,7 +1390,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
      }
  
@@ -767,7 +930,7 @@ index 81ef3c5..f2d5d0f 100644
  
      // dpxr-fork: fixed full-range shared-constants layout (704 bytes).
      // DP shaders reference fetch slots (s16+), bool registers by raw bank
-@@ -1262,6 +1339,27 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1262,6 +1418,27 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      out += "\tfloat g_AlphaThreshold : packoffset(c42.w);\n";
      out += "\tuint g_AlphaTest : packoffset(c43.x);\n";
      out += "\tuint g_R11G11B10Normal : packoffset(c43.y);\n";
@@ -795,7 +958,7 @@ index 81ef3c5..f2d5d0f 100644
      out += "};\n\n";
      out += "#define LOOP_CONST(N) (g_Loops[(N) >> 2][(N) & 3])\n\n";
  
-@@ -1272,6 +1370,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1272,6 +1449,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      {
          if (samplers.find(n) != samplers.end())
              continue;
@@ -805,7 +968,7 @@ index 81ef3c5..f2d5d0f 100644
          println("#define s{0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", n, n >> 2, n & 3);
          println("#define s{0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", n, n >> 2, n & 3);
          println("#define s{0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", n, n >> 2, n & 3);
-@@ -1281,6 +1382,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1281,6 +1461,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      {
          if (reg >= 32)
              continue;
@@ -813,7 +976,7 @@ index 81ef3c5..f2d5d0f 100644
          println("#define {0}_Texture2DDescriptorIndex (g_Tex2DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
          println("#define {0}_Texture3DDescriptorIndex (g_Tex3DIdx[{1}][{2}])", name, reg >> 2, reg & 3);
          println("#define {0}_TextureCubeDescriptorIndex (g_TexCubeIdx[{1}][{2}])", name, reg >> 2, reg & 3);
-@@ -1335,7 +1437,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1335,7 +1516,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      }
      else
      {
@@ -830,7 +993,7 @@ index 81ef3c5..f2d5d0f 100644
          for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
          {
              union
-@@ -1348,43 +1459,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1348,43 +1538,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
              const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
  
@@ -841,7 +1004,10 @@ index 81ef3c5..f2d5d0f 100644
 +            if (declaredInputs.insert(inputKey).second)
              {
 -                usageType = "uint4";
--            }
++                out += '\t';
++                println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
++                    uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+             }
 -        #endif
 -
 -            out += '\t';
@@ -853,14 +1019,11 @@ index 81ef3c5..f2d5d0f 100644
 -                    print("[[vk::location({})]] ", usageLocation.location);
 -                    break;
 -                }
-+                out += '\t';
-+                println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
-+                    uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
-             }
- 
+-            }
+-
 -            println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
 -                uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
--
+ 
              vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
          }
  
@@ -888,7 +1051,7 @@ index 81ef3c5..f2d5d0f 100644
      }
  
      out += ")\n";
-@@ -1416,8 +1514,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1416,8 +1593,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
              for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
              {
@@ -900,7 +1063,7 @@ index 81ef3c5..f2d5d0f 100644
  
                  value += 4;
              }
-@@ -1500,14 +1600,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1500,14 +1679,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              print("\tfloat4 r{} = ", i);
              if (isPixelShader && i == ((shader->fieldC >> 8) & 0xFF))
              {
@@ -926,15 +1089,18 @@ index 81ef3c5..f2d5d0f 100644
              else
              {
                  out += "0.0;\n";
-@@ -1517,6 +1623,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1517,8 +1702,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
      out += "\tint a0 = 0;\n";
      out += "\tint aL = 0;\n";
 +    out += "\tint aLn = 0;\n";  // dp1: iteration counter; aL starts at the loop constant start and moves by its step
      out += "\tbool p0 = false;\n";
      out += "\tfloat ps = 0.0;\n";
++    out += "\tfloat4 pv = 0.0;\n";  // dp1 [NEW FABLE VERSION] staged vector result (co-issue)
  
-@@ -1613,7 +1720,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     // dpxr-fork: loop/integer constants from the live loop-constant bank
+     // (count, start, step packed per dword). Registers with baked int4
+@@ -1613,7 +1800,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      else
      {
          out += "\n\tuint pc = 0;\n";
@@ -947,7 +1113,7 @@ index 81ef3c5..f2d5d0f 100644
          out += "\t{\n";
          out += "\t\tswitch (pc)\n";
          out += "\t\t{\n";
-@@ -1658,6 +1769,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1658,6 +1849,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              uint32_t sequence = 0;
              bool shouldReturn = false;
              bool shouldCloseCurlyBracket = false;
@@ -955,7 +1121,7 @@ index 81ef3c5..f2d5d0f 100644
  
              switch (cfInstr.opcode)
              {
-@@ -1669,22 +1781,43 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1669,6 +1861,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  shouldReturn = (cfInstr.opcode == ControlFlowOpcode::ExecEnd);
                  break;
  
@@ -964,15 +1130,18 @@ index 81ef3c5..f2d5d0f 100644
 +            // XDK bool->float materialisation (a cond_exec pair) came out as "true"
 +            // (297 of 1131 DP1 shaders; the sun-lit branch of walls and floors was always
 +            // on). The block is closed before the end-of-shader epilogue below.
++            // dp1 [NEW FABLE VERSION] 2026-09-23: 13/14 ("pred clean") are this same
++            // bool cexec with PredicateClean = true (rexglue ucode.h kCondExecPredClean).
              case ControlFlowOpcode::CondExec:
              case ControlFlowOpcode::CondExecEnd:
--            case ControlFlowOpcode::CondExecPredClean:
--            case ControlFlowOpcode::CondExecPredCleanEnd:
+             case ControlFlowOpcode::CondExecPredClean:
+@@ -1676,15 +1875,32 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  address = cfInstr.condExec.address;
                  count = cfInstr.condExec.count;
                  sequence = cfInstr.condExec.sequence;
 -                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
-+                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
++                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd ||
++                                cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
 +                indent();
 +                println("if (b{} {}= 0)", uint32_t(cfInstr.condExec.boolAddress), cfInstr.condExec.condition ? "!" : "=");
 +                indent();
@@ -981,19 +1150,16 @@ index 81ef3c5..f2d5d0f 100644
 +                condBlockOpen = true;
                  break;
  
-+            // dp1 [NEW FABLE VERSION]: the predicated variants (including the "clean" pair,
-+            // which reads the predicate, not a bool) gate on p0. CondExecPredCleanEnd also
-+            // ends the shader - the old code compared CondExecEnd twice, so it never did.
++            // dp1 [NEW FABLE VERSION] 2026-09-23: only 5/6 gate on p0. (13/14 used to be
++            // here as "predicate clean"; they read a bool, see CondExec above: gated on
++            // p0, which is false at CF index 1 where DP1 uses them, the b130 sun-diffuse
++            // block of 297 material shaders never ran.)
              case ControlFlowOpcode::CondExecPred:
              case ControlFlowOpcode::CondExecPredEnd:
-+            case ControlFlowOpcode::CondExecPredClean:
-+            case ControlFlowOpcode::CondExecPredCleanEnd:
                  address = cfInstr.condExecPred.address;
                  count = cfInstr.condExecPred.count;
                  sequence = cfInstr.condExecPred.sequence;
--                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd);
-+                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd ||
-+                                cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
+                 shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd);
 +                indent();
 +                println("if ({}p0)", cfInstr.condExecPred.condition ? "" : "!");
 +                indent();
@@ -1003,7 +1169,7 @@ index 81ef3c5..f2d5d0f 100644
                  break;
  
              case ControlFlowOpcode::LoopStart:
-@@ -1694,14 +1827,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1694,14 +1910,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  #ifdef UNLEASHED_RECOMP
                      print("[unroll] ");
                  #endif
@@ -1030,7 +1196,7 @@ index 81ef3c5..f2d5d0f 100644
                  }
                  break;
  
-@@ -1714,8 +1857,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1714,8 +1940,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  }
                  else
                  {
@@ -1042,7 +1208,7 @@ index 81ef3c5..f2d5d0f 100644
                      out += "\t\t\t{\n";
                      println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopEnd.address));
                      out += "\t\t\t\tcontinue;\n";
-@@ -1835,6 +1979,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1835,6 +2062,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  instructionCode += 3;
              }
  
@@ -1059,7 +1225,7 @@ index 81ef3c5..f2d5d0f 100644
              if (shouldReturn)
              {
                  if (isPixelShader)
-@@ -1853,6 +2007,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1853,6 +2090,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      indent();
                      out += "}";
  
@@ -1072,7 +1238,7 @@ index 81ef3c5..f2d5d0f 100644
                  #ifdef UNLEASHED_RECOMP
                      specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
  
-@@ -1876,7 +2036,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1876,7 +2119,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      if (!hasMtxProjection)
                  #endif
                      {
@@ -1086,7 +1252,7 @@ index 81ef3c5..f2d5d0f 100644
                      }
                  }
  
-@@ -1925,7 +2090,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1925,7 +2173,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\t}\n";
  
      if (!isPixelShader && hasMtxProjection)

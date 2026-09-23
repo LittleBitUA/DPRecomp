@@ -1,6 +1,29 @@
 # Changelog
 
-Release notes for each version: [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [2.0](RELEASE-NOTES-2.0.md) · [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 2.0 (September 2026)
+
+The native renderer's first test version in a proper state. The emulated path that runs by default is untouched; the launcher offers the native renderer once.
+
+**Shader recompiler (XenosRecomp fork), checked against the Xenos reference semantics in the SDK (`interpreter.cpp`, `dxbc_translator_alu.cpp`, `ucode.h`):**
+
+- **Control-flow opcodes 13/14 are `cexec` on a bool constant** (`ucode.h`: "This is cexec with a bool constant ... not a kCondExecPred"), not predicated execs. The fork gated them on `p0`, which is false where the game uses them (CF index 1, before any `setp`), so the `b130` block that enables light 0 (`g_fLitDir[0]` / `g_fLitCol[0]`: each scene's main light, the sun outdoors; diffuse and specular) never ran in 297 of 462 pixel shaders.
+- **Co-issued vector + scalar instructions read their sources before either result is written.** The fork wrote the vector result first; when the scalar half read that register it got the new value. The sheriff's-station mirror floor (`dp3 r7.w, ... + maxs r0.x, r7.ww`) took its output alpha from a luminance instead of the vertex alpha, so its alpha test discarded it where the luminance was low and the white fill underneath showed. The vector result is now staged in `pv` when the scalar op reads its destination.
+- **`setp_inv`** returns 0 when its operand is 1. The fork returned 1, which broke the nested predicate push/inv/pop of the bloom threshold: every tap passed and the tone map added the blurred frame to every pixel at the glow strength (0.61 at the lake, 0.725 in the sheriff's station).
+- **`setp_*_push`** takes the predicate from `.w` and the result from `.x` of both operands (no value changed in this game: its uses are replicated swizzles).
+- **`cube`** takes its direction from the swizzled operand (`src0.z, src0.w, src0.x`); the game writes `cube rD, rS.xxzy, rS.yzxx`, so env-map reflections sampled the wrong face (X and Z swapped) in 156 shaders.
+- **Per-operand constant relative addressing** (`src_const_is_addressed`): `c[19 + a0] * c[9]` had become `c[19 + a0] * c[9 + a0]` (fire and smoke particle UVs).
+
+**Native renderer:**
+
+- **`k_16_16_16_16_FLOAT` render targets are RGBA16F.** The surface format switch took 31 (`k_16_16_FLOAT`) for it and sent 32 to RGBA8, so the half/quarter-resolution copies, the glow and the depth of field ran clipped at 1.0 in 8 bits. `ClassifySurfaceFormat` in `native_scale.h`, `TestSurfaceFormats`; an unknown surface format is now logged.
+- **EDRAM aliasing.** The game draws the HDR scene into a 7e3 target at tile 720, re-binds the same tiles as 8888 and tone-maps into them with SrcAlpha / InvSrcAlpha, so the scene is the blend destination wherever its alpha is below 1 (sky, cloud edges, glass). Each surface is its own host resource, so that destination was black or the previous frame. A colour target re-bound over tiles another target wrote since now starts with that content (same format: copy; 7e3 to 8888: `saturate`, as the emulator's ownership transfer does). `dp_native_edram_alias`, `TestEdram`.
+- **7e3 scene alpha is clamped to 0..1 at resolve** (it is fixed-point on the console; an additive glow pushed it to 1.4 and the tone map uses it as its blend factor). `dp_native_7e3_alpha`.
+- **A texture view of memory a resolve wrote last samples that resolve** (the emulator's texture cache is keyed by memory). `dp_native_resolve_alias`, `TestResolveAlias`.
+- **Texture replacement** (`textures\<hash>.png`, the keyboard prompts) works with the native renderer.
+
+**Launcher:** the native renderer is offered to everyone once (`launcher_native_offer_v2` in `launcher.ini`, Yes is the default button) with a request for impressions, FPS and hardware; the Native tab's label no longer says "work in progress"; keyboard prompt caps in the PC Director's Cut style (dark face, light bevel, white bold label).
 
 ## 1.4.7 (September 2026)
 

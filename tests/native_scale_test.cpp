@@ -108,6 +108,57 @@ void TestResolveFlags() {
 
 }  // namespace
 
+// [NEW FABLE VERSION] 2026-09-23: the D3DFORMATs DP1 creates surfaces with (log
+// of a native run: "Native renderer: surface ... format ...").
+void TestSurfaceFormats() {
+  CHECK(ClassifySurfaceFormat(0x1A22AB60) == SurfaceClass::kRgba16F);  // post chain, k_16_16_16_16_FLOAT (was RGBA8)
+  CHECK(ClassifySurfaceFormat(0x18280186) == SurfaceClass::kRgba8);    // A8R8G8B8
+  CHECK(ClassifySurfaceFormat(0x18280086) == SurfaceClass::kRgba8);
+  CHECK(ClassifySurfaceFormat(0x2DA2ABA4) == SurfaceClass::kR32F);     // luminance ladder
+  CHECK(ClassifySurfaceFormat(0x1A2201BF) == SurfaceClass::kRgba16F);  // 7e3 scene
+  CHECK(ClassifySurfaceFormat(0x2D200196) == SurfaceClass::kDepth24);
+  CHECK(ClassifySurfaceFormat(0x1A220197) == SurfaceClass::kDepthF24);
+  CHECK(ClassifySurfaceFormat(31) == SurfaceClass::kRg16F);            // k_16_16_FLOAT, not 16_16_16_16
+  CHECK(ClassifySurfaceFormat(7) == SurfaceClass::kRgba8);             // unmapped -> fallback...
+  CHECK(!IsKnownSurfaceFormat(7));                                     // ...and reported
+  for (uint32_t f : {0x1A22AB60u, 0x18280186u, 0x2DA2ABA4u, 0x1A2201BFu, 0x2D200196u, 0x1A220197u}) {
+    CHECK(IsKnownSurfaceFormat(f));
+  }
+  CHECK(SurfaceIs64bpp(0x1A22AB60));
+  CHECK(!SurfaceIs64bpp(0x1A2201BF));  // 7e3 is 32 bpp: DP1 re-binds its tiles as 8888 at the same pitch
+  CHECK(!SurfaceIs64bpp(0x18280186));
+}
+
+// Tile footprints cross-checked with the emulator's EDRAM dumps
+// (docs/hdr_audit_2026-09-14/game_pipeline.md: 234 tiles for 512x288 16F,
+// 63 for 256x144 16F).
+void TestEdram() {
+  CHECK(EdramTileSpan(1024, 576, false) == 13u * 36u);
+  CHECK(EdramTileSpan(1280, 720, false) == 16u * 45u);
+  CHECK(EdramTileSpan(512, 288, true) == 234u);
+  CHECK(EdramTileSpan(256, 144, true) == 63u);
+  CHECK(EdramTileSpan(32, 32, false) == 2u);
+  CHECK(EdramOverlap(720, 468, 720, 720));    // scene and the 1280x720 output
+  CHECK(EdramOverlap(720, 468, 1100, 10));
+  CHECK(!EdramOverlap(720, 468, 1188, 10));   // right after the scene
+  CHECK(!EdramOverlap(1440, 234, 720, 720));  // reflection at 1440 vs output 720..1439
+  // The tone map's re-bind: 7e3 scene -> 8888 on the same tiles.
+  CHECK(EdramTransferKind(0x1A2201BF, 0x18280186, true) == EdramTransfer::kSaturate7e3);
+  CHECK(EdramTransferKind(0x18280186, 0x18280086, true) == EdramTransfer::kCopy);  // tiled bit differs only
+  CHECK(EdramTransferKind(0x1A22AB60, 0x1A22AB60, true) == EdramTransfer::kCopy);
+  CHECK(EdramTransferKind(0x18280186, 0x1A2201BF, true) == EdramTransfer::kNone);  // 8888 -> 7e3
+  CHECK(EdramTransferKind(0x1A2201BF, 0x18280186, false) == EdramTransfer::kNone);  // other size / pitch
+}
+
+// [NEW FABLE VERSION] 2026-09-24: newest writer of a texture's memory wins
+// (dp_native_resolve_alias).
+void TestResolveAlias() {
+  CHECK(ResolveIsNewestWriter(0, 5, true));    // uploaded once, resolved since: the resolve's data
+  CHECK(!ResolveIsNewestWriter(6, 5, true));   // the CPU rewrote it after the resolve: the CPU data
+  CHECK(!ResolveIsNewestWriter(0, 0, true));   // never resolved
+  CHECK(!ResolveIsNewestWriter(0, 5, false));  // another size or format views that memory differently
+}
+
 int main() {
   TestClamp();
   TestTargetSizes();
@@ -115,6 +166,9 @@ int main() {
   TestViewportAndScissor();
   TestMemoryEstimate();
   TestResolveFlags();
+  TestSurfaceFormats();
+  TestEdram();
+  TestResolveAlias();
   if (g_failures == 0) std::printf("dp_native_scale_test: all checks passed\n");
   return g_failures == 0 ? 0 : 1;
 }

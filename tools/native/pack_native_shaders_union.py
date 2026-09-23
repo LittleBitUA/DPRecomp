@@ -36,7 +36,16 @@ blob = bytearray(b"DPNS0001" + struct.pack("<II", len(table), len(blob_dxil)))
 for hv, off, size, ispix, hostflags in table:
     blob += struct.pack("<QIIII", hv, off, size, ispix, hostflags)
 blob += blob_dxil
+# [NEW FABLE VERSION] 2026-09-23: never write into dist while the game runs
+# (rule: dist is untouched until the player closes the game; 23.09 23:5x this
+# script overwrote the live cache). The stage copy is always written.
+import subprocess
+running = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True).stdout.lower()
+game_running = "deadlyprem.exe" in running or "deadlyprem_usa.exe" in running
 for dest in DEST:
+    if game_running and "dist" in dest.lower():
+        print("SKIPPED (game running, deploy after it exits):", dest)
+        continue
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     open(dest, "wb").write(blob)
     print(dest, len(blob))

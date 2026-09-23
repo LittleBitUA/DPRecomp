@@ -46,6 +46,7 @@ set(DEADLYPREM_SOURCES
     src/native/native_graphics_system.cpp
     src/native/native_hooks.cpp
     src/native/native_renderer.cpp
+    src/native/native_texrep.cpp  # [NEW FABLE VERSION] textures\<hash>.png on the native path
 )
 
 # DP1 2026-09-06: embed the game icon on Windows (see src/deadlyprem.rc).
@@ -77,3 +78,6 @@ set_target_properties(dp_title_skip_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # [NEW FABLE VERSION] native renderer internal resolution rules
 add_executable(dp_native_scale_test tests/native_scale_test.cpp)
 set_target_properties(dp_native_scale_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [NEW FABLE VERSION] native renderer texture replacement rules (must match the SDK plugin)
+add_executable(dp_native_texrep_test tests/native_texrep_test.cpp)
+set_target_properties(dp_native_texrep_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

@@ -100,4 +100,74 @@ constexpr bool ResolveIsDepth(uint32_t flags) { return (flags & kResolveDepthSte
 constexpr bool ResolveClearsTarget(uint32_t flags) { return (flags & kResolveClearTarget) != 0; }
 constexpr bool ResolveClearsDepth(uint32_t flags) { return (flags & kResolveClearDepthStencil) != 0; }
 
+// [NEW FABLE VERSION] 2026-09-23: guest D3DFORMAT of an EDRAM surface (texture
+// format = bits 0-5, numbers from rexglue-sdk include/rex/graphics/xenos.h
+// TextureFormat) -> the host format class. 31 is k_16_16_FLOAT and 32 is
+// k_16_16_16_16_FLOAT: DP1's post chain (half/quarter copies, glow, DoF) uses
+// 32 (D3DFORMAT 0x1A22AB60), which used to fall through to RGBA8 while 31 was
+// taken for it, so the whole HDR post chain ran in 8-bit UNORM.
+enum class SurfaceClass : uint8_t { kRgba8, kRgba16F, kRg16F, kR32F, kR8, kDepth24, kDepthF24 };
+constexpr SurfaceClass ClassifySurfaceFormat(uint32_t guest_format) {
+  switch (guest_format & 0x3F) {
+    case 22: return SurfaceClass::kDepth24;   // k_24_8 (D24S8)
+    case 23: return SurfaceClass::kDepthF24;  // k_24_8_FLOAT (D24FS8)
+    case 26:                                  // k_16_16_16_16 (fixed -32..32: a float superset)
+    case 29:                                  // k_16_16_16_16_EXPAND
+    case 32:                                  // k_16_16_16_16_FLOAT
+    case 63:                                  // k_2_10_10_10_FLOAT_EDRAM (7e3): float superset
+      return SurfaceClass::kRgba16F;
+    case 31: return SurfaceClass::kRg16F;     // k_16_16_FLOAT
+    case 36: return SurfaceClass::kR32F;      // k_32_FLOAT
+    case 2: return SurfaceClass::kR8;         // k_8
+    default: return SurfaceClass::kRgba8;     // k_8_8_8_8 (6) and anything unmapped
+  }
+}
+constexpr bool IsKnownSurfaceFormat(uint32_t guest_format) {
+  switch (guest_format & 0x3F) {
+    case 2: case 6: case 22: case 23: case 26: case 29: case 31: case 32: case 36: case 63: return true;
+    default: return false;
+  }
+}
+// 64 bits per pixel in EDRAM (a tile then holds 40x16 pixels instead of 80x16).
+constexpr bool SurfaceIs64bpp(uint32_t guest_format) {
+  switch (guest_format & 0x3F) {
+    case 21: case 26: case 29: case 32: case 37: return true;  // 16_16_16_16 variants, k_32_32_FLOAT
+    default: return false;
+  }
+}
+
+// [NEW FABLE VERSION] 2026-09-23: EDRAM geometry. 2048 tiles of 80x16 samples
+// at 32 bpp; a surface at `base` covers pitch x rows tiles from there (1x MSAA,
+// which is all DP1 uses).
+inline constexpr uint32_t kEdramTiles = 2048;
+constexpr uint32_t EdramTileSpan(uint32_t width, uint32_t height, bool bpp64) {
+  return (((bpp64 ? width * 2 : width) + 79) / 80) * ((height + 15) / 16);
+}
+constexpr bool EdramOverlap(uint32_t base_a, uint32_t span_a, uint32_t base_b, uint32_t span_b) {
+  return base_a < base_b + span_b && base_b < base_a + span_a;
+}
+// What re-binding surface `dst` means for its content when `src` wrote the same
+// tiles last. Only an exact re-bind (same base, size and host scale) maps pixel
+// to pixel. Same texture format: the tiles' bits, a copy. 7e3 -> 8888: the
+// console would read raw 7e3 bits; the emulator (and so the look players know)
+// converts to saturate(value), which is what DP1's tone map needs where the
+// scene's alpha is below 1. 8888 -> 7e3 is a bit reinterpretation on the
+// console that DP1 only follows with full overdraw (the sky fill): left alone.
+enum class EdramTransfer : uint8_t { kNone, kCopy, kSaturate7e3 };
+constexpr EdramTransfer EdramTransferKind(uint32_t src_format, uint32_t dst_format, bool same_geometry) {
+  if (!same_geometry) return EdramTransfer::kNone;
+  const uint32_t s = src_format & 0x3F, d = dst_format & 0x3F;
+  if (s == d) return EdramTransfer::kCopy;
+  if (s == 63 && d == 6) return EdramTransfer::kSaturate7e3;
+  return EdramTransfer::kNone;
+}
+
+// [NEW FABLE VERSION] 2026-09-24: guest memory holds one content, the newest
+// writer's. A texture view samples the resolve that wrote its memory when that
+// resolve is newer than the last CPU write of it we saw and the two views agree
+// on size and format (dp_native_resolve_alias).
+constexpr bool ResolveIsNewestWriter(uint64_t view_cpu_seq, uint64_t resolve_seq, bool same_shape) {
+  return same_shape && resolve_seq > view_cpu_seq;
+}
+
 }  // namespace dp::native

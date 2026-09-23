@@ -24,6 +24,8 @@ struct RendererStats {
            uploads_tex = 0, pso_created = 0, tex_rehash = 0, tex_changes = 0, watch_hits = 0;
   // [NEW FABLE VERSION] 2026-09-22: performance counters for the frame line.
   uint32_t resolve_partial = 0;  // resolves with a source rect / dest point / dest level the blit ignores
+  uint32_t edram_transfers = 0;  // [NEW FABLE VERSION] targets refreshed from another target's EDRAM tiles
+  uint32_t resolve_aliases = 0;  // [NEW FABLE VERSION] binds that sampled another object's resolve (same memory)
   uint32_t psos_total = 0;       // pipelines alive (cumulative)
   uint64_t upload_bytes = 0;     // bytes written into the upload ring this frame
   uint64_t draw_cpu_us = 0;      // CPU time inside the native draw/clear/resolve/swap path this frame

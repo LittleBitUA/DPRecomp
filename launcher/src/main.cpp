@@ -56,6 +56,7 @@ void LoadLauncherLanguageFromToml();
 extern std::unordered_map<std::string, std::string> g_launcher_ini;
 void WriteLauncherIni();
 void MaybeShareShaderCache();
+void MaybeOfferNativeRenderer();  // [NEW FABLE VERSION]
 void ApplySteamDeckPresetIfDetected();
 void GenerateKeyPromptOverlay();
 void EnsureBundledAssets();
@@ -305,13 +306,17 @@ static const std::map<std::string, std::wstring>& UkTable() {
       {"Shader Storage Cache",      L"Зберігати шейдери на диску"},
       {"Share Shader Cache",        L"Надсилати кеш шейдерів"},
       {"Help other players?",       L"Допомогти іншим гравцям?"},
+      // [NEW FABLE VERSION] native renderer offer (2.0: shown to everyone once)
+      {"Try the native renderer?", L"Спробувати нативний рендер?"},
+      {"Deadly Premonition Recompilation 2.0: the native renderer is ready for testing.\n\nIt draws the game directly with DirectX 12 instead of emulating the Xbox 360 graphics chip: a higher frame rate, and a sharper picture at a higher internal resolution (up to 4x). This is the first test version brought to a proper state: colours, lighting, the sky, depth of field and the mirror floors now look the way they should.\n\nPlease play with it and tell us how it goes: your impressions, your FPS and your hardware (graphics card and processor), in the project's GitHub issues (github.com/LittleBitUA/DPRecomp).\n\nTurn the native renderer on now? You can switch it off at any time in Settings -> Native.",
+       L"Deadly Premonition Recompilation 2.0: нативний рендер готовий до тестування.\n\nВін малює гру напряму через DirectX 12 замість емуляції графічного чипа Xbox 360: вищий FPS і чіткіша картинка у вищій внутрішній роздільності (до 4x). Це перша тестова версія, доведена до нормального стану: кольори, освітлення, небо, глибина різкості й дзеркальні підлоги тепер виглядають як слід.\n\nБудь ласка, пограйте й розкажіть, як воно: ваші враження, скільки FPS і на якому залізі (відеокарта й процесор), у GitHub issues проєкту (github.com/LittleBitUA/DPRecomp).\n\nУвімкнути нативний рендер зараз? Вимкнути можна будь-коли: Налаштування -> Нативний."},
       {"Steam Deck preset",         L"Пресет Steam Deck"},
       {"Steam Overlay",             L"Оверлей Steam"},
       {"Button Prompts",            L"Підказки кнопок"},
       {"Texture Dump (textures\\dump)", L"Дамп текстур (textures\\dump)"},
-      {"Native Renderer (preview)",  L"Нативний рендер (прев'ю)"},
-      {"Work in progress: the picture is incomplete (white floor, shadows that slide, bright walls). Off = the stock emulated path, exactly as before.",
-                                    L"У розробці: картинка неповна (біла підлога, тіні «їздять», яскраві стіни). Вимкнено = штатний емульований шлях, як і раніше."},
+      {"Native Renderer (test)",  L"Нативний рендер (тест)"},
+      {"First test version brought to a proper state: DirectX 12 draws the game directly, faster, up to 4x internal resolution. Off = the stock emulated path, exactly as before. Please report your FPS, your hardware and anything that looks wrong on GitHub.",
+                                    L"Перша тестова версія, доведена до нормального стану: DirectX 12 малює гру напряму, швидше, до 4x внутрішньої роздільності. Вимкнено = штатний емульований шлях, як і раніше. Пишіть на GitHub свій FPS, залізо й усе, що виглядає не так."},
       {"Internal Resolution", L"Внутрішня роздільна здатність"},
       {"1x - 1280x720, as the console", L"1x - 1280x720, як на консолі"},
       {"2x - 2560x1440 (recommended)", L"2x - 2560x1440 (рекомендовано)"},
@@ -391,7 +396,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v1.4.7";
+constexpr const wchar_t* kLauncherVersion = L"v2.0.0";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -1232,8 +1237,9 @@ void DefineCvars() {
   // 2026-09-18: experimental native renderer (DPRecomp/src/native). Off = the
   // Xenos emulator exactly as before. 2026-09-19: moved to the Experimental
   // tab, off by default, released as a preview only (picture incomplete).
-  AddCvar("dp_native_render", "Native Renderer (preview)", kCatNative, K::kBool, "false", {}, 0, 0,
-          "Work in progress: the picture is incomplete (white floor, shadows that slide, bright walls). Off = the stock emulated path, exactly as before.");
+  // [NEW FABLE VERSION] 2026-09-24 (2.0): test version, no longer "broken picture".
+  AddCvar("dp_native_render", "Native Renderer (test)", kCatNative, K::kBool, "false", {}, 0, 0,
+          "First test version brought to a proper state: DirectX 12 draws the game directly, faster, up to 4x internal resolution. Off = the stock emulated path, exactly as before. Please report your FPS, your hardware and anything that looks wrong on GitHub.");
   // [NEW FABLE VERSION] 2026-09-22: internal resolution of the native renderer
   // (the scene, the reflections, the shadow maps and the final image), the way
   // DPfix raised renderWidth on the PC port. Ignored while the native renderer
@@ -3753,6 +3759,8 @@ void GenerateKeyPromptOverlay() {
   if (game_font) private_fonts.GetFamilies(1, &game_family, &found);
   const FontFamily& family = (game_font && found > 0) ? game_family : fallback;
   const FontStyle font_style = (game_font && found > 0) ? FontStyleRegular : FontStyleBold;
+  // [NEW FABLE VERSION] key cap labels: a plain bold sans like the PC version's caps.
+  FontFamily cap_family(L"Arial");
 
   // Movement keys as one label ("WASD") when they are single keys.
   std::wstring move_label;
@@ -3788,25 +3796,44 @@ void GenerateKeyPromptOverlay() {
         path.AddArc(q.X, q.Y + q.Height - rad * 2, rad * 2, rad * 2, 90, 90);
         path.CloseFigure();
       };
+      // [NEW FABLE VERSION] 2026-09-23: the PC Director's Cut look (dark
+      // face, light bevelled rim, white bold sans label) instead of white caps.
+      const float base = std::min(r.Width, r.Height);
       GraphicsPath cap;
       add_round(cap, r);
-      SolidBrush lip(Color(255, 150, 150, 150));
-      g.FillPath(&lip, &cap);
-      RectF face(r.X, r.Y, r.Width, r.Height - r.Height * 0.09f);
+      SolidBrush outline(Color(255, 12, 12, 12));
+      g.FillPath(&outline, &cap);
+      const float rim_in = std::max(1.0f, base * 0.045f);
+      RectF rim(r.X + rim_in, r.Y + rim_in, r.Width - rim_in * 2, r.Height - rim_in * 2);
+      GraphicsPath rim_path;
+      add_round(rim_path, rim);
+      LinearGradientBrush rim_fill(PointF(0, rim.Y), PointF(0, rim.Y + rim.Height), Color(255, 190, 190, 190),
+                                   Color(255, 88, 88, 88));
+      g.FillPath(&rim_fill, &rim_path);
+      const float face_in = std::max(2.0f, base * 0.10f);
+      RectF face(r.X + face_in, r.Y + face_in, r.Width - face_in * 2, r.Height - face_in * 2);
       GraphicsPath face_path;
       add_round(face_path, face);
-      SolidBrush fill(Color(255, 238, 238, 238));
-      g.FillPath(&fill, &face_path);
-      Pen pen(Color(255, 35, 35, 35), std::max(1.0f, 0.4f * S));
-      g.DrawPath(&pen, &cap);
+      LinearGradientBrush face_fill(PointF(0, face.Y), PointF(0, face.Y + face.Height), Color(255, 92, 92, 92),
+                                    Color(255, 34, 34, 34));
+      g.FillPath(&face_fill, &face_path);
       const size_t n = label.size();
-      const float base = std::min(r.Width, r.Height);
-      const float fsize = base * (n <= 1 ? 0.62f : n <= 2 ? 0.50f : n <= 4 ? 0.30f : n <= 6 ? 0.22f : 0.16f);
-      Font font(&family, fsize, font_style, UnitPixel);
+      const float fsize = base * (n <= 1 ? 0.56f : n <= 2 ? 0.44f : n <= 4 ? 0.30f : n <= 6 ? 0.22f : 0.16f);
       StringFormat sf;
       sf.SetAlignment(StringAlignmentCenter);
       sf.SetLineAlignment(StringAlignmentCenter);
-      SolidBrush text(Color(255, 25, 25, 25));
+      sf.SetFormatFlags(StringFormatFlagsNoWrap);
+      // One line, shrunk until it fits the face (WASD, CTRL, SPACE).
+      float fit = fsize;
+      for (int i = 0; i < 12 && !label.empty(); ++i) {
+        Font probe(&cap_family, fit, FontStyleBold, UnitPixel);
+        RectF box;
+        g.MeasureString(label.c_str(), -1, &probe, PointF(0, 0), &box);
+        if (box.Width <= face.Width * 0.92f) break;
+        fit *= 0.9f;
+      }
+      Font font(&cap_family, fit, FontStyleBold, UnitPixel);
+      SolidBrush text(Color(255, 245, 245, 245));
       g.DrawString(label.c_str(), -1, &font, face, &sf, &text);
     };
 
@@ -3843,8 +3870,8 @@ void GenerateKeyPromptOverlay() {
       SolidBrush yellow(Color(255, 242, 211, 27));
       g.FillPath(&yellow, &wheel_path);
       g.DrawPath(&pen, &wheel_path);
-      // Up / down arrows to the right of the mouse.
-      SolidBrush dark(Color(255, 35, 35, 35));
+      // Up / down arrows to the right of the mouse ([NEW FABLE VERSION] light on the dark cap).
+      SolidBrush dark(Color(255, 225, 225, 225));
       const float ax = x + w + arrows_w * 0.15f;
       const float aw = arrows_w, ah = h * 0.26f;
       const float cy = y + h * 0.5f;
@@ -3939,6 +3966,40 @@ void GenerateKeyPromptOverlay() {
 // multipart POST to the Discord webhook) so the launcher never blocks. The
 // fingerprint is recorded before the upload; a failed upload is retried the
 // next time the cache changes.
+// [NEW FABLE VERSION] 2026-09-23: offer the native renderer once. The answer
+// is recorded in launcher.ini before anything else happens, so the question
+// never comes back whatever the user picks; Settings -> Native can flip the
+// renderer later. "Yes" goes through the same LoadTomlValues / SaveToml pair as
+// the Settings dialog's Save button.
+// [NEW FABLE VERSION] 2026-09-24 (2.0): the renderer reached a proper state, so
+// the offer goes to everyone once more under a new key (launcher_native_offer_v2
+// = yes / no / already_on; the 1.4.x key launcher_native_offer is ignored) and
+// Yes is the default button.
+void MaybeOfferNativeRenderer() {
+  ReadLauncherIni();
+  if (g_launcher_ini.find("launcher_native_offer_v2") != g_launcher_ini.end()) return;
+  if (g_cvars.empty()) DefineCvars();
+  const std::wstring toml_path = GetExeDir() + L"\\" + kGameTomlName;
+  LoadTomlValues(toml_path);
+  CvarRow* native = nullptr;
+  for (auto& c : g_cvars) {
+    if (c.key == "dp_native_render") native = &c;
+  }
+  if (!native) return;
+  if (native->value == "true") {
+    g_launcher_ini["launcher_native_offer_v2"] = "already_on";
+    WriteLauncherIni();
+    return;
+  }
+  const int answer = MessageBoxW(nullptr, TrC("Deadly Premonition Recompilation 2.0: the native renderer is ready for testing.\n\nIt draws the game directly with DirectX 12 instead of emulating the Xbox 360 graphics chip: a higher frame rate, and a sharper picture at a higher internal resolution (up to 4x). This is the first test version brought to a proper state: colours, lighting, the sky, depth of field and the mirror floors now look the way they should.\n\nPlease play with it and tell us how it goes: your impressions, your FPS and your hardware (graphics card and processor), in the project's GitHub issues (github.com/LittleBitUA/DPRecomp).\n\nTurn the native renderer on now? You can switch it off at any time in Settings -> Native."), TrC("Try the native renderer?"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
+  g_launcher_ini["launcher_native_offer_v2"] = (answer == IDYES) ? "yes" : "no";
+  WriteLauncherIni();
+  if (answer == IDYES) {
+    native->value = "true";
+    SaveToml(toml_path);
+  }
+}
+
 void MaybeShareShaderCache() {
   if (kShaderCacheWebhookUrl[0] == L'\0') return;
   ReadLauncherIni();
@@ -4074,6 +4135,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   EnsureBundledAssets();
   GenerateKeyPromptOverlay();
   MaybeShareShaderCache();
+  MaybeOfferNativeRenderer();  // [NEW FABLE VERSION] once, see the function
   // If %TEMP%\dp1_update.log exists, the previous auto-updater run did not
   // complete — offer the user the log for diagnostic. Runs BEFORE the main
   // window is created so the dialog is the first thing they see.

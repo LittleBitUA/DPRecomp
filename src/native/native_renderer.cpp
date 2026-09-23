@@ -38,11 +38,52 @@
 
 #include "native_graphics_system.h"
 #include "native_scale.h"  // [NEW FABLE VERSION] internal resolution rules (tested in tests/native_scale_test.cpp)
+#include "native_texrep.h"  // [NEW FABLE VERSION] textures\<hash>.png replacement (tested in tests/native_texrep_test.cpp)
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "d3d12.lib")
 
 REXCVAR_DEFINE_BOOL(dp_native_no_alphatest, false, "DP1", "Diagnostic: ignore the guest alpha test");
+// [NEW FABLE VERSION] 2026-09-23: the scene targets are 7e3 (k_2_10_10_10_FLOAT),
+// whose alpha is fixed-point on the console and never leaves 0..1. The host
+// target is RGBA16F, where an additive glow mesh pushed the scene alpha to 1.4,
+// and the tone map uses that alpha as its SrcAlpha blend factor (a hard-edged
+// bright "paper" shape around lamps). The resolve clamps it to 0..1, as the
+// emulator's does (its alpha comes from the 16-bit ROV shadow, 0..1).
+REXCVAR_DEFINE_BOOL(dp_native_7e3_alpha, true, "DP1",
+                    "Native renderer: clamp the alpha of 7e3 scene targets to 0..1 when resolving them "
+                    "(the console's alpha is fixed-point)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// [NEW FABLE VERSION] 2026-09-23: surfaces are views of EDRAM tiles. DP1 draws
+// the HDR scene into a 7e3 surface at tile 720, then binds an 8888 surface on
+// the same tiles and tone-maps into it with SrcAlpha / InvSrcAlpha, so the
+// scene itself is the blend destination wherever its alpha is below 1 (sky,
+// cloud edges, glass: a quarter of an outdoor frame). The host keeps one
+// resource per surface, so that destination was whatever the 8888 surface held
+// from its own last use: black after a clear, or the previous frame (trails
+// behind moving things, a brown sky with a hard edge over the mountains,
+// doubled signs, blinking). Binding a surface now first copies in the newest
+// content of its tiles when another surface wrote them since: an exact re-bind
+// (same base, size and scale) is a copy, 7e3 -> 8888 is saturate(), as in the
+// emulator (the SDK's 7e3 -> 8888 ownership transfer). Other pairs keep their
+// own content and are logged once.
+// [NEW FABLE VERSION] 2026-09-24: textures are views of guest memory, and the
+// emulator's texture cache is keyed by memory; ours is keyed by fetch constant.
+// A texture whose memory was last written by a resolve through another texture
+// object now samples that resolve's result (same base, size and format). Found
+// while chasing the white sheriff's-office floor (fetch #9 of the floor shader,
+// 512x288 at 0x1C4C1000, is never written here), but that floor was the
+// recompiler's co-issue bug (XenosRecomp `pv`); this path did not fire once in
+// a whole session in the office (resolve aliases 0). Kept: it is the emulator's
+// semantics and costs a map lookup per CPU-texture bind.
+REXCVAR_DEFINE_BOOL(dp_native_resolve_alias, true, "DP1",
+                    "Native renderer: a texture view of memory a resolve wrote last samples that resolve's "
+                    "result (the emulator's texture cache is keyed by memory)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(dp_native_edram_alias, true, "DP1",
+                    "Native renderer: a render target re-bound over EDRAM tiles another target wrote since "
+                    "starts with that content (copy, or 7e3 -> 8888 saturate), as on the console")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(dp_native_7e3_resolve, true, "DP1",
                     "Native renderer: clamp and quantize 7e3 (k_2_10_10_10_FLOAT) colour targets to the "
                     "console's range (max 31.875) when resolving them")
@@ -230,6 +271,14 @@ struct GuestTexture {
   uint32_t srv_index = UINT32_MAX;
   uint32_t rtv_index = UINT32_MAX;  // when used as a resolve destination (2D: whole texture)
   std::vector<uint32_t> slice_rtvs;  // per array slice / cube face resolve destinations
+  // [NEW FABLE VERSION] host resource holds a textures\<hash>.png replacement
+  // (RGBA8 at the PNG's size) instead of the guest data.
+  bool replaced = false;
+  uint64_t replaced_hash = 0;
+  // [NEW FABLE VERSION] 2026-09-24: g_mem_seq of the last write of this
+  // texture's guest memory we know of (a resolve into it, or a CPU write the
+  // page watch or the rehash saw); 0 = only its initial upload.
+  uint64_t mem_seq = 0;
 };
 
 struct GuestSurface {
@@ -246,6 +295,9 @@ struct GuestSurface {
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   uint32_t view_index = UINT32_MAX;  // RTV or DSV
   uint32_t srv_index = UINT32_MAX;
+  // [NEW FABLE VERSION] 2026-09-23: g_edram_seq of this surface's last colour
+  // write (draw, clear, EDRAM transfer); 0 = never written.
+  uint64_t write_seq = 0;
 };
 
 struct GuestBuffer {
@@ -299,6 +351,13 @@ std::unordered_map<uint32_t, std::unique_ptr<GuestTexture>> g_textures;
 std::unordered_map<uint64_t, std::unique_ptr<GuestTexture>> g_textures_by_key;  // host textures: by fetch constant (memory), the truth
 std::unordered_map<uint32_t, uint64_t> g_object_key;  // last fetch key seen through a texture object (Unlock -> dirty)
 std::unordered_map<uint32_t, std::unique_ptr<GuestSurface>> g_surfaces;
+uint64_t g_edram_seq = 0;  // [NEW FABLE VERSION] colour writes into EDRAM, in order (see dp_native_edram_alias)
+// [NEW FABLE VERSION] 2026-09-24: guest memory writes in order, and the last
+// resolve destination per physical base (see dp_native_resolve_alias). Host
+// textures are never destroyed (g_textures_by_key only grows), so the raw
+// pointers stay valid. Render thread only.
+uint64_t g_mem_seq = 0;
+std::unordered_map<uint32_t, GuestTexture*> g_resolve_by_base;
 std::unordered_map<uint32_t, std::unique_ptr<GuestBuffer>> g_buffers;
 std::unordered_map<uint32_t, std::unique_ptr<GuestDecl>> g_decls;
 std::unordered_map<uint32_t, std::unique_ptr<GuestShader>> g_shaders;
@@ -529,11 +588,13 @@ float To7e3(float v) {
 }
 float4 PSMain(VSOut i) : SV_Target0 {
   float4 c = t0.SampleLevel(s0, i.uv, 0);
-  if (g_mode == 1) {
+  if (g_mode & 1u) {
     c.rgb = float3(To7e3(c.r), To7e3(c.g), To7e3(c.b));
-    // Alpha stays full precision: the console's 2-bit alpha is what gave the
-    // ROV emulator path its stair-stepped clouds (DP1 2026-09-07), and the
-    // smooth RTV look is the one that ships.
+  }
+  // [NEW FABLE VERSION] 2026-09-23: fixed-point alpha of a 7e3 target, see
+  // dp_native_7e3_alpha.
+  if (g_mode & 2u) {
+    c.a = saturate(c.a);
   }
   return c;
 }
@@ -851,28 +912,27 @@ struct SurfaceFormat {
   DXGI_FORMAT format;
   bool depth;
 };
+// [NEW FABLE VERSION] 2026-09-23: the guest format -> host class decision lives
+// in native_scale.h (ClassifySurfaceFormat, tested); 32 = k_16_16_16_16_FLOAT
+// used to fall through to RGBA8.
 SurfaceFormat MapSurfaceFormat(uint32_t guest_format) {
-  const uint32_t texture_format = guest_format & 0x3F;
-  switch (texture_format) {
-    case 22:  // k_24_8 (D24S8)
+  switch (ClassifySurfaceFormat(guest_format)) {
+    case SurfaceClass::kDepth24:
       // [NEW FABLE VERSION] the console's 24-bit UNORM depth: the polygon offset
       // (shadow casters) is converted in 1/2^24 units, which only holds on a
       // UNORM24 host format (on D32_FLOAT the bias scales with the depth value).
       return {DXGI_FORMAT_D24_UNORM_S8_UINT, true};
-    case 23:  // k_24_8_FLOAT (D24FS8)
+    case SurfaceClass::kDepthF24:
       return {DXGI_FORMAT_D32_FLOAT, true};
-    case 6:  // k_8_8_8_8
-      return {DXGI_FORMAT_R8G8B8A8_UNORM, false};
-    case 26:  // k_16_16_16_16
-    case 29:  // k_16_16_16_16_EXPAND
-    case 31:  // k_16_16_16_16_FLOAT (0x1F)
+    case SurfaceClass::kRgba16F:
       return {DXGI_FORMAT_R16G16B16A16_FLOAT, false};
-    case 36:  // k_32_FLOAT (0x24)
+    case SurfaceClass::kRg16F:
+      return {DXGI_FORMAT_R16G16_FLOAT, false};
+    case SurfaceClass::kR32F:
       return {DXGI_FORMAT_R32_FLOAT, false};
-    case 63:  // A2B10G10R10F_EDRAM (7e3) -> RGBA16F superset
-      return {DXGI_FORMAT_R16G16B16A16_FLOAT, false};
-    case 2:  // k_8
+    case SurfaceClass::kR8:
       return {DXGI_FORMAT_R8_UNORM, false};
+    case SurfaceClass::kRgba8:
     default:
       return {DXGI_FORMAT_R8G8B8A8_UNORM, false};
   }
@@ -1280,7 +1340,175 @@ void WatchTexture(GuestTexture& t) {
   t.watched = true;
 }
 
+// [NEW FABLE VERSION] 2026-09-23: texture replacement. The emulated path swaps
+// guest textures for textures\<hash>.png / <hash>.overlay.png in the SDK's GPU
+// plugin (the launcher's keyboard key caps over the button prompt atlas); the
+// native renderer does not load that plugin, so the prompts showed the pad
+// buttons. Same hash, same files, same overlay rules: see native_texrep.h.
+void DropHostTexture(GuestTexture& t) {
+  ForgetWatch(&t);
+  if (t.srv_index != UINT32_MAX) g.views.Free(t.srv_index);
+  if (t.rtv_index != UINT32_MAX) g.rtvs.Free(t.rtv_index);
+  for (uint32_t r : t.slice_rtvs) g.rtvs.Free(r);
+  t.slice_rtvs.clear();
+  t.srv_index = UINT32_MAX;
+  t.rtv_index = UINT32_MAX;
+  if (t.resource) RetireResource(std::move(t.resource));
+  t.resource.Reset();
+  t.state = D3D12_RESOURCE_STATE_COMMON;
+  t.watched = false;
+  t.replaced = false;
+  t.replaced_hash = 0;
+}
+
+// Guest base level as RGBA8 (for overlays): untiled and endian swapped the way
+// UploadTexture does it, then decoded on the CPU.
+bool DecodeGuestBaseRgba(const GuestTexture& t, std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) {
+  using xenos::TextureFormat;
+  texrep::Codec codec;
+  switch (t.info.format) {
+    case TextureFormat::k_8_8_8_8: codec = texrep::Codec::k8888; break;
+    case TextureFormat::k_8: codec = texrep::Codec::k8; break;
+    case TextureFormat::k_DXT1: codec = texrep::Codec::kDXT1; break;
+    case TextureFormat::k_DXT2_3: codec = texrep::Codec::kDXT2_3; break;
+    case TextureFormat::k_DXT4_5: codec = texrep::Codec::kDXT4_5; break;
+    case TextureFormat::k_DXT5A: codec = texrep::Codec::kDXT5A; break;
+    default: return false;
+  }
+  const rex::graphics::FormatInfo* fi = t.info.format_info();
+  if (!fi) return false;
+  const rex::graphics::TextureExtent ge = t.info.GetMipExtent(0, true);
+  const uint32_t bpb = fi->bytes_per_block();
+  const size_t row_pitch = size_t(ge.block_width) * bpb;
+  std::vector<uint8_t> linear(row_pitch * ge.block_height);
+  const uint8_t* src = HeaderPtr(t.info.memory.base_address);
+  if (t.info.is_tiled) {
+    rex::graphics::texture_conversion::UntileInfo ui = {};
+    ui.width = ge.block_width;
+    ui.height = ge.block_height;
+    ui.input_pitch = ge.block_pitch_h;
+    ui.output_pitch = ge.block_width;
+    ui.input_format_info = fi;
+    ui.output_format_info = fi;
+    const xenos::Endian endian = t.info.endianness;
+    ui.copy_callback = [endian](void* o, const void* i, size_t len) {
+      rex::graphics::texture_conversion::CopySwapBlock(endian, o, i, len);
+    };
+    rex::graphics::texture_conversion::Untile(linear.data(), src, &ui);
+  } else {
+    for (uint32_t y = 0; y < ge.block_height; ++y) {
+      rex::graphics::texture_conversion::CopySwapBlock(t.info.endianness, linear.data() + y * row_pitch,
+                                                        src + size_t(y) * ge.block_pitch_h * bpb, row_pitch);
+    }
+  }
+  width = t.width;
+  height = t.height;
+  return texrep::DecodeBase(codec, linear.data(), row_pitch, width, height, rgba);
+}
+
+// True when the texture is (now) served from a replacement PNG.
+bool UploadReplacement(GuestTexture& t) {
+  if (!t.info_valid || t.is_cube || t.is_3d || t.depth > 1 || t.is_resolve_target) return false;
+  if (!texrep::Active()) return false;
+  const xenos::xe_gpu_texture_fetch_t& fetch = t.fetch;
+  if (fetch.dimension != xenos::DataDimension::k2DOrStacked) return false;
+  // Exactly the SDK's key: TextureCache::BindingInfoFromFetchConstant +
+  // TextureKey::GetGuestLayout + HashGuestTexture.
+  uint32_t wm1 = 0, hm1 = 0, dm1 = 0, base_page = 0, mip_page = 0, mip_max = 0;
+  rex::graphics::texture_util::GetSubresourcesFromFetchConstant(fetch, &wm1, &hm1, &dm1, &base_page, &mip_page,
+                                                                nullptr, &mip_max);
+  if (!base_page || dm1 != 0) return false;
+  const xenos::TextureFormat format = rex::graphics::GetBaseFormat(fetch.format);
+  const rex::graphics::texture_util::TextureGuestLayout layout = rex::graphics::texture_util::GetGuestTextureLayout(
+      fetch.dimension, fetch.pitch, wm1 + 1, hm1 + 1, 1, fetch.tiled != 0, format, fetch.packed_mips != 0, true,
+      mip_max);
+  if (layout.packed_level == 0 || !layout.base.level_data_extent_bytes) return false;
+  const uint64_t hash = texrep::Hash(HeaderPtr(t.info.memory.base_address), layout.base.level_data_extent_bytes,
+                                     wm1 + 1, hm1 + 1, uint32_t(format));
+  const texrep::Image* image = texrep::Find(hash, [&t](std::vector<uint8_t>& rgba, uint32_t& w, uint32_t& h) {
+    return DecodeGuestBaseRgba(t, rgba, w, h);
+  });
+  if (!image) return false;
+  if (t.replaced && t.replaced_hash == hash && t.resource) {
+    t.dirty = false;  // same content as the PNG already on the GPU
+    WatchTexture(t);
+    return true;
+  }
+  if (t.resource) DropHostTexture(t);
+  const uint32_t mips = std::max(1u, std::min<uint32_t>(uint32_t(image->levels.size()), mip_max + 1));
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = image->width;
+  desc.Height = image->height;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = uint16_t(mips);
+  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.SampleDesc.Count = 1;
+  if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
+                                               &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&t.resource)))) {
+    REXLOG_ERROR("Native renderer: replacement {:016X} ({}x{}) host creation failed", hash, image->width,
+                 image->height);
+    t.resource.Reset();
+    return false;
+  }
+  t.state = D3D12_RESOURCE_STATE_COPY_DEST;
+  t.scale = 1;
+  UploadRing& ring = g.upload[g.frame_index];
+  for (uint32_t level = 0; level < mips; ++level) {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT rows = 0;
+    UINT64 row_bytes = 0, total = 0;
+    g.device->GetCopyableFootprints(&desc, level, 1, 0, &fp, &rows, &row_bytes, &total);
+    const size_t off = ring.Allocate(size_t(total), 512);
+    if (off == SIZE_MAX) {
+      REXLOG_WARN("Native renderer: upload ring full while uploading replacement {:016X}", hash);
+      RetireResource(std::move(t.resource));
+      t.resource.Reset();
+      t.state = D3D12_RESOURCE_STATE_COMMON;
+      return false;
+    }
+    const uint32_t lw = image->LevelWidth(level), lh = image->LevelHeight(level);
+    const std::vector<uint8_t>& src = image->levels[level];
+    for (uint32_t y = 0; y < lh; ++y) {
+      std::memcpy(ring.mapped + off + size_t(y) * fp.Footprint.RowPitch, src.data() + size_t(y) * lw * 4,
+                  size_t(lw) * 4);
+    }
+    fp.Offset = off;
+    D3D12_TEXTURE_COPY_LOCATION dl = {}, sl = {};
+    dl.pResource = t.resource.Get();
+    dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dl.SubresourceIndex = level;
+    sl.pResource = ring.buffer.Get();
+    sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    sl.PlacedFootprint = fp;
+    g.list->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    g.stats.upload_bytes += total;
+  }
+  t.srv_index = g.views.Allocate();
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Texture2D.MipLevels = mips;
+  // The PNG holds decoded RGBA in logical order, like a DXT texture on the
+  // host, so the guest's fetch swizzle applies unchanged.
+  srv.Shader4ComponentMapping = SrvMapping(t);
+  g.device->CreateShaderResourceView(t.resource.Get(), &srv, g.views.Cpu(t.srv_index));
+  Barrier(t.resource.Get(), t.state,
+          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  t.replaced = true;
+  t.replaced_hash = hash;
+  t.dirty = false;
+  g.stats.uploads_tex++;
+  WatchTexture(t);
+  return true;
+}
+
 bool UploadTexture(GuestTexture& t) {
+  // [NEW FABLE VERSION] a replacement PNG wins; a texture that had one but now
+  // holds other guest data goes back to the guest path with a fresh resource.
+  if (UploadReplacement(t)) return true;
+  if (t.replaced) DropHostTexture(t);
   if (!EnsureTextureResource(t)) return false;
   const rex::graphics::TextureInfo& info = t.info;
   const rex::graphics::FormatInfo* fi = info.format_info();
@@ -1772,12 +2000,17 @@ ID3D12PipelineState* GetPipeline(const PipelineKey& key, const GuestShader& vs, 
 }
 
 // Binds RT0/DS + viewport on the list if they changed.
-bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds) {
+void SyncEdramAlias(GuestSurface& s);  // [NEW FABLE VERSION] defined after Blit
+
+// [NEW FABLE VERSION] rt_cleared: the caller clears the colour target right away,
+// so its previous EDRAM content does not matter (no transfer).
+bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds, bool rt_cleared = false) {
   GuestSurface* rt = Lookup(g_surfaces, st.rt0);
   GuestSurface* ds = Lookup(g_surfaces, st.ds);
   if (rt && !EnsureSurfaceResource(*rt)) rt = nullptr;
   if (ds && !EnsureSurfaceResource(*ds)) ds = nullptr;
   if (!rt && !ds) return false;
+  if (rt && !rt_cleared) SyncEdramAlias(*rt);
   if (rt) Barrier(rt->resource.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
   if (ds) Barrier(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
   const uint32_t rt_id = rt ? rt->guest : 0, ds_id = ds ? ds->guest : 0;
@@ -1977,6 +2210,30 @@ GuestTexture* TextureForObject(uint32_t object) {
   uint32_t d[6];
   for (int i = 0; i < 6; ++i) d[i] = LoadU32(object + 28 + i * 4);
   return TextureForFetch(d, object);
+}
+
+// [NEW FABLE VERSION] 2026-09-24: see dp_native_resolve_alias. The resolve
+// destination that last wrote `t`'s memory, when that write is newer than any
+// CPU write of it we saw and the two views agree on size and format.
+GuestTexture* ResolvedAlias(const GuestTexture& t) {
+  if (!REXCVAR_GET(dp_native_resolve_alias) || !t.info_valid || t.is_cube || t.is_3d) return nullptr;
+  auto it = g_resolve_by_base.find(t.info.memory.base_address);
+  if (it == g_resolve_by_base.end()) return nullptr;
+  GuestTexture* r = it->second;
+  if (r == &t || !r->resource || r->srv_index == UINT32_MAX) return nullptr;
+  const bool same_shape = !r->is_cube && !r->is_3d && r->width == t.width && r->height == t.height &&
+                          r->info.format == t.info.format;
+  if (!ResolveIsNewestWriter(t.mem_seq, r->mem_seq, same_shape)) return nullptr;
+  static uint32_t alias_log = 8;
+  if (alias_log) {
+    --alias_log;
+    REXLOG_INFO("Native renderer: texture {:08X} ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) samples resolve target {:08X} "
+                "({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}): same memory {:08X}, {}x{}",
+                t.guest, t.fetch.dword_0, t.fetch.dword_1, t.fetch.dword_2, t.fetch.dword_3, t.fetch.dword_4,
+                t.fetch.dword_5, r->guest, r->fetch.dword_0, r->fetch.dword_1, r->fetch.dword_2, r->fetch.dword_3,
+                r->fetch.dword_4, r->fetch.dword_5, t.info.memory.base_address, t.width, t.height);
+  }
+  return r;
 }
 
 void DumpDrawLine(const DrawArgs& a, const GuestShader& vs, const GuestShader& ps, const GuestDecl& decl,
@@ -2312,6 +2569,7 @@ void ExecuteDraw(const DrawArgs& a) {
     // the guest memory at every bind and re-upload when it changed.
     if (t->written.exchange(false, std::memory_order_acq_rel)) {
       t->dirty = true;
+      t->mem_seq = ++g_mem_seq;  // [NEW FABLE VERSION] the CPU wrote it: newer than any resolve so far
       g.stats.tex_changes++;
       if (g_dump_active) {
         REXLOG_INFO("Native texwatch: s{} {:08X} ({} bytes) written by the CPU before draw #{}", slot, t->guest,
@@ -2330,11 +2588,20 @@ void ExecuteDraw(const DrawArgs& a) {
       if (hash != t->content_hash) {
         t->content_hash = hash;
         t->dirty = true;
+        t->mem_seq = ++g_mem_seq;  // [NEW FABLE VERSION]
         g.stats.tex_changes++;
         if (g_dump_active) {
           REXLOG_INFO("Native texwatch: s{} {:08X} ({} bytes) content changed before draw #{}", slot, t->guest,
                       t->info.memory.base_size, g_dump_seq);
         }
+      }
+    }
+    // [NEW FABLE VERSION] 2026-09-24: memory last written by a resolve through
+    // another texture object (dp_native_resolve_alias).
+    if (!t->is_resolve_target) {
+      if (GuestTexture* r = ResolvedAlias(*t)) {
+        t = r;
+        g.stats.resolve_aliases++;
       }
     }
     if (t->dirty && !t->is_resolve_target) {
@@ -2552,6 +2819,7 @@ void ExecuteDraw(const DrawArgs& a) {
     g.list->DrawInstanced(a.count, 1, a.start_vertex, 0);
   }
   g.stats.draws++;
+  if (rt && (Dev(kDevRbColorMask) & 0xF)) rt->write_seq = ++g_edram_seq;  // [NEW FABLE VERSION] EDRAM writer order
   if (g_dump_active && rt) {
     static uint64_t watch_ps = 0; static bool parsed = false;
     if (!parsed) { parsed = true; const std::string v = REXCVAR_GET(dp_native_dump_ps); if (!v.empty()) watch_ps = std::strtoull(v.c_str(), nullptr, 16); }
@@ -2585,6 +2853,59 @@ void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst
   st.bound_rt0 = st.bound_ds = UINT32_MAX;
   st.bound_pso = nullptr;
   st.root_bound = false;  // [NEW FABLE VERSION] the blit used its own root signature
+}
+
+// [NEW FABLE VERSION] 2026-09-23: see dp_native_edram_alias. Called before a
+// colour target is drawn to (or resolved); cheap when this surface is the
+// newest EDRAM writer, which is every draw after the first of a pass.
+void SyncEdramAlias(GuestSurface& s) {
+  if (s.depth || !s.resource || !REXCVAR_GET(dp_native_edram_alias)) return;
+  if (s.write_seq == g_edram_seq) return;
+  const uint32_t span = EdramTileSpan(s.width, s.height, SurfaceIs64bpp(s.guest_format));
+  GuestSurface* src = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    for (auto& entry : g_surfaces) {
+      GuestSurface* o = entry.second.get();
+      if (o == &s || o->depth || o->write_seq <= s.write_seq) continue;
+      if (!EdramOverlap(s.edram_base, span, o->edram_base,
+                        EdramTileSpan(o->width, o->height, SurfaceIs64bpp(o->guest_format)))) {
+        continue;
+      }
+      if (!src || o->write_seq > src->write_seq) src = o;
+    }
+  }
+  if (!src) return;
+  const bool same_geometry = src->resource && src->edram_base == s.edram_base && src->width == s.width &&
+                             src->height == s.height && src->scale == s.scale;
+  const EdramTransfer kind = EdramTransferKind(src->guest_format, s.guest_format, same_geometry);
+  if (kind == EdramTransfer::kNone) {
+    static uint32_t skip_log = 12;
+    if (skip_log) {
+      --skip_log;
+      REXLOG_INFO("Native renderer: EDRAM tiles of surface {:08X} ({}x{} fmt {:08X} base {}) were last written by "
+                  "{:08X} ({}x{} fmt {:08X} base {}): no exact transfer, the target keeps its own content",
+                  s.guest, s.width, s.height, s.guest_format, s.edram_base, src->guest, src->width, src->height,
+                  src->guest_format, src->edram_base);
+    }
+    return;
+  }
+  Barrier(src->resource.Get(), src->state,
+          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  Barrier(s.resource.Get(), s.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  // 7e3 -> 8888: the stored 7e3 value, saturated by the UNORM target (the SDK's
+  // DP1 transfer: saturate(7e3 float) * 255 + 0.5).
+  const uint32_t mode = (kind == EdramTransfer::kSaturate7e3 && REXCVAR_GET(dp_native_7e3_resolve)) ? 1u : 0u;
+  Blit(src->srv_index, g.rtvs.Cpu(s.view_index), s.format, s.hw(), s.hh(), mode);
+  s.write_seq = ++g_edram_seq;
+  g.stats.edram_transfers++;
+  static uint32_t transfer_log = 6;
+  if (transfer_log) {
+    --transfer_log;
+    REXLOG_INFO("Native renderer: EDRAM transfer {:08X} (fmt {:08X}) -> {:08X} (fmt {:08X}) base {} {}x{} ({})",
+                src->guest, src->guest_format, s.guest, s.guest_format, s.edram_base, s.width, s.height,
+                kind == EdramTransfer::kSaturate7e3 ? "7e3 -> 8888 saturate" : "copy");
+  }
 }
 
 }  // namespace
@@ -2771,6 +3092,14 @@ void OnCreateSurface(uint32_t width, uint32_t height, uint32_t format, uint32_t 
   const SurfaceFormat f = MapSurfaceFormat(format);
   s->format = f.format;
   s->depth = f.depth;
+  if (!IsKnownSurfaceFormat(format)) {  // [NEW FABLE VERSION] a silent RGBA8 fallback hid k_16_16_16_16_FLOAT
+    static uint32_t unknown_log = 8;
+    if (unknown_log) {
+      --unknown_log;
+      REXLOG_WARN("Native renderer: surface {:08X} {}x{} guest format {:08X} (texture format {}) has no host mapping, using RGBA8",
+                  surface, width, height, format, format & 0x3F);
+    }
+  }
   REXLOG_INFO("Native renderer: surface {:08X} {}x{} format {:08X} ({}) edram base {}", surface, width, height, format,
               f.depth ? "depth" : "colour", s->edram_base);
   std::lock_guard<std::mutex> lock(g_registry_mutex);
@@ -3113,7 +3442,7 @@ void OnClear(uint32_t flags, uint32_t color_ptr, float z, uint32_t stencil) {
   if (!InitContext() || !BeginFrame()) return;
   GuestSurface* rt = nullptr;
   GuestSurface* ds = nullptr;
-  if (!BindTargets(&rt, &ds)) return;
+  if (!BindTargets(&rt, &ds, (flags & 0xF) != 0)) return;
   g.stats.clears++;
   if (g_dump_active) {
     REXLOG_INFO("Native drawline #{} Clear flags {:08X} color {:08X} ({} {} {} {}) z {} stencil {} -> rt {:08X} ds {:08X}",
@@ -3127,6 +3456,7 @@ void OnClear(uint32_t flags, uint32_t color_ptr, float z, uint32_t stencil) {
       for (int i = 0; i < 4; ++i) color[i] = LoadF32(color_ptr + i * 4);
     }
     g.list->ClearRenderTargetView(g.rtvs.Cpu(rt->view_index), color, 0, nullptr);
+    rt->write_seq = ++g_edram_seq;  // [NEW FABLE VERSION]
   }
   if ((flags & 0x10) && ds) {
     g.list->ClearDepthStencilView(g.dsvs.Cpu(ds->view_index), D3D12_CLEAR_FLAG_DEPTH, z, 0, 0, nullptr);
@@ -3210,6 +3540,7 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
         if (clear_color_ptr) for (int i = 0; i < 4; ++i) color[i] = LoadF32(clear_color_ptr + i * 4);
         Barrier(rt->resource.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         g.list->ClearRenderTargetView(g.rtvs.Cpu(rt->view_index), color, 0, nullptr);
+        rt->write_seq = ++g_edram_seq;  // [NEW FABLE VERSION]
         g.stats.clears++;
       }
     }
@@ -3234,7 +3565,13 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
                 src && src->resource ? "host ok" : "no host");
   }
   if (!t) return;
+  // [NEW FABLE VERSION] a colour target resolved right after being re-bound over
+  // tiles another target wrote (no draw in between) resolves those tiles.
+  if (src && !depth && src->resource) SyncEdramAlias(*src);
   if (!src || !src->resource) return;
+  // [NEW FABLE VERSION] a replaced texture becoming a resolve destination gets
+  // a guest-format resource again (the PNG's RGBA8 size would not match).
+  if (t->replaced) DropHostTexture(*t);
   if (!t->is_resolve_target && t->resource && t->srv_index != UINT32_MAX && !t->is_cube && (t->depth <= 1 || t->is_3d)) {
     // Was sampled as a CPU texture before: the blit writes logical RGBA, drop the fetch swizzle.
     t->is_resolve_target = true;
@@ -3292,9 +3629,13 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   // destination is not (a small target below the scale threshold), the blit's
   // bilinear filter downsamples, which is what the console's resolve did.
   Blit(src->srv_index, g.rtvs.Cpu(rtv), t->format, t->hw(), t->hh(),
-       (src_7e3 && REXCVAR_GET(dp_native_7e3_resolve)) ? 1u : 0u);
+       ((src_7e3 && REXCVAR_GET(dp_native_7e3_resolve)) ? 1u : 0u) |
+           ((src_7e3 && REXCVAR_GET(dp_native_7e3_alpha)) ? 2u : 0u));  // [NEW FABLE VERSION] fixed-point alpha
   Barrier(t->resource.Get(), t->state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  // [NEW FABLE VERSION] 2026-09-24: this resolve is now the newest write of its memory.
+  t->mem_seq = ++g_mem_seq;
+  if (t->info_valid) g_resolve_by_base[t->info.memory.base_address] = t;
   if (g_dump_active && !t->is_cube && (t->depth <= 1 || t->is_3d)) {
     // Intermediate result of the pass chain (the end-of-frame dump only shows the last content).
     RecordDump(fmt::format("r{:03}", seq).c_str(), dest_texture, t->resource.Get(), t->state, t->hw(), t->hh(), t->format,

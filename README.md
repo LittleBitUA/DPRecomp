@@ -7,19 +7,19 @@
 **A native Windows port of *Deadly Premonition* (Xbox 360, 2010) by static recompilation. No emulator.**<br>
 60 FPS on the console's own time base · real mouse look · keyboard and PlayStation button prompts · FSR 3 and 2× supersampling · a launcher that updates itself · PAL and USA discs
 
-[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip)
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.0/DPRecomp-2.0.0-win64.zip)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.0/DPRecomp-2.0.0-win64.zip)
 [![Issues](https://img.shields.io/github/issues/LittleBitUA/DPRecomp?style=for-the-badge&color=orange)](https://github.com/LittleBitUA/DPRecomp/issues)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 1.4.7 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip)
+## [⬇ &nbsp;Download 2.0 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.0/DPRecomp-2.0.0-win64.zip)
 
-`DPRecomp-1.4.7-win64.zip` · 42 MB · Windows 10 / 11 64-bit
+`DPRecomp-2.0.0-win64.zip` · 42 MB · Windows 10 / 11 64-bit
 
-[Release notes](docs/RELEASE-NOTES-1.4.7.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-2.0.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -46,7 +46,7 @@
 
 **You need:** Windows 10 / 11 64-bit · a Direct3D 12 GPU with rasterizer-ordered views (NVIDIA GTX 900+, AMD RX 400+, Intel Arc; recent integrated graphics at 1×) · ~6 GB free for the game data · your *Deadly Premonition* Xbox 360 disc image or extracted files.
 
-1. **Download** [`DPRecomp-1.4.7-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.4.7/DPRecomp-1.4.7-win64.zip) and unzip it anywhere outside *Program Files*.
+1. **Download** [`DPRecomp-2.0.0-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.0/DPRecomp-2.0.0-win64.zip) and unzip it anywhere outside *Program Files*.
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
@@ -56,21 +56,24 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 
 ## What's new
 
-**1.4.7 — the native renderer preview stops blurring everything.** Off by default; the emulated path is unchanged. **Please try it and tell us how it runs** (see *Help us test* below).
+**2.0: the native renderer is ready for testing.** The game can now be drawn directly with DirectX 12 instead of an emulated Xbox 360 graphics chip, and this is the first version of that renderer we consider in a proper state: colours, light, the sky, depth of field and the mirror floors look the way they should. The launcher offers it once; the emulated path stays the default and is unchanged. **Please play with it and tell us how it goes: your impressions, your FPS and your hardware** (see *Help us test* below).
 
-- **Depth of field works.** The whole picture was evenly blurred, York included. The renderer cleared a render target on every resolve that carried the flag `0x10`, which we had read as "clear"; it is `D3DRESOLVE_FRAGMENT0`, the MSAA sample select the XDK fills in by itself. Deadly Premonition never clears on resolve, and its light pass relies on that: the depth that drives the blur survives two resolves in the same buffer. Now it does, and the background is soft while York and everything near him are sharp.
-- **2× and higher internal resolution no longer wrecks the picture.** Six pixel shaders (depth of field, edges, the post chain and the local-light shadow mask) read the pixel position, and at 2× it came in host pixels while the game's constants expect console pixels.
-- **Triangle fans are drawn** instead of skipped, so the small missing pieces of geometry are back.
-- **Less CPU per frame:** shader constants are uploaded only when the game changes them, and the root signature is bound once per frame.
-- Measured on an RTX 5070 at 2× in the Red Room: 60 fps held, the native renderer's CPU time 3.1–3.3 ms and GPU time 1.2–1.3 ms per frame.
+- **The main light is back.** A recompiler bug skipped the block that switches on each scene's main light (the sun outdoors) in 297 of the game's 462 pixel shaders, so the world was lit by the cool ambient light alone: flat and purple.
+- **No more milky veil.** The glow's bright-pass let every pixel through, so a blurred copy of the whole frame was added on top of it at 60–70% strength.
+- **The sky, trails and doubled signs.** The final colour pass draws over the HDR scene in the same video memory on the Xbox 360; the renderer now carries that memory over, so the sky shows through where it should instead of black or the previous frame.
+- **The mirror floor in the sheriff's station** reflects instead of being white, and env-map reflections come from the right direction.
+- **Fire and smoke** in the forest look like fire again, and **keyboard prompts** use the key textures with the native renderer too.
+- Measured on an RTX 5070 at 2× in the sheriff's station: 60 fps held, the native renderer's CPU time 5.1–6.1 ms and GPU time 1.4–1.6 ms per frame.
 
-[Full notes](docs/RELEASE-NOTES-1.4.7.md).
+[Full notes](docs/RELEASE-NOTES-2.0.md).
 
-| Red Room | The map table |
+| The sheriff's station | The hallway |
 |---|---|
-| ![Native renderer at 2x in the Red Room: York and the twins sharp, the background out of focus](docs/screenshots/native_147_redroom.jpg) | ![Native renderer at 2x: the map table with the figurines in focus](docs/screenshots/native_147_map.jpg) |
+| ![Native renderer at 2x: the sheriff's station with the dark mirror floor reflecting the room](docs/screenshots/native_20_station.jpg) | ![Native renderer at 2x: York and two deputies in the station's hallway](docs/screenshots/native_20_hallway.jpg) |
 
-*The native renderer in 1.4.7 at 2× internal resolution: depth of field as on the console.*
+*The native renderer in 2.0 at 2× internal resolution.*
+
+**1.4.7:** native renderer preview: depth of field works (the whole frame was blurred), 2× no longer wrecks the image, triangle fans. [Notes](docs/RELEASE-NOTES-1.4.7.md).
 
 **1.4.6:** native renderer preview: internal resolution up to 4×, mipmaps, the console's shadow depth format and colour range, a recompiler fix for conditional shader branches. [Notes](docs/RELEASE-NOTES-1.4.6.md).
 
@@ -92,7 +95,7 @@ Everything since 1.0, version by version: [docs/CHANGELOG.md](docs/CHANGELOG.md)
 
 Every fix in the list above started as somebody's report. What is most useful right now:
 
-- **The native renderer preview** (launcher → **Native**), now that 1.4.7 fixed the blur. It is incomplete on purpose, and hardware other than ours is the part we cannot see. Tell us your GPU and CPU, the frame rate in the same spot with the renderer off and on, and whether **Internal Resolution** 2× is playable. The log line that starts `Native renderer: frame #` carries the frame, CPU and GPU milliseconds we need; attach `logs\deadlyprem_XXX.log`.
+- **The native renderer** (launcher → **Native**), new in 2.0. Hardware other than ours is the part we cannot see. Tell us your GPU and CPU, the frame rate in the same spot with the renderer off and on, and whether **Internal Resolution** 2× is playable. The log line that starts `Native renderer: frame #` carries the frame, CPU and GPU milliseconds we need; attach `logs\deadlyprem_XXX.log`.
 - **60 FPS oddities:** anything that runs at the wrong speed or desyncs from the voices. The scene where York meets Emily and George is our reference.
 - **The ROV path's leftovers:** hard contours on tree crowns and glass, light-blue polygonal patches on characters in dialogue scenes, flat cloud blotches (#10). A screenshot plus the scene name.
 - **Steam Deck and AMD integrated graphics:** frame rates with ROV vs RTV, 1× vs 2×.
@@ -234,11 +237,12 @@ Yes. Turn on *Texture Dump* in the launcher (Advanced), play, pick the PNG from 
 - Shadows only appear on nearby casters (#25); this is how the game builds its cascades and is probably the console's behaviour, but it is not verified against hardware yet.
 - Linux is not supported yet.
 
-**The native renderer preview (off by default):**
+**The native renderer (off unless you turn it on):**
 
-- The mirror floor in the sheriff's station comes out white, and outdoors the picture has a milky veil over it. Same root cause, still open.
-- Shadows slide with the character instead of staying put (not re-checked since the resolve fix in 1.4.7; reports welcome).
-- Tree crowns and bushes show thin dark contour lines.
+- A mirror can show a doubled image.
+- In one cutscene a lamp's light switches on and off as the camera turns.
+- Shadows sliding with the character and thin dark contour lines on tree crowns were reported before 2.0 and have not been re-checked since; tell us if you still see them.
+- Most of the testing was on the PAL version; the USA build runs the same renderer with fewer hours on it.
 
 ---
 
