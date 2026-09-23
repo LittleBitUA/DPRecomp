@@ -1,6 +1,14 @@
 # Changelog
 
-Release notes for each version: [2.0](RELEASE-NOTES-2.0.md) · [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [2.0.1](RELEASE-NOTES-2.0.1.md) · [2.0](RELEASE-NOTES-2.0.md) · [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 2.0.1 (September 2026)
+
+Native renderer safety fixes from an adversarial review of 2.0; the picture in every scene tested for 2.0 is unchanged.
+
+- **`dp_native_resolve_alias` is off by default.** A texture view created after a level load over memory an old resolve had written (same size and format, another fetch key) would sample that stale resolve for good: an aliased view is never uploaded, so it is never page-watched, and `OnUnlock` does not mark it newer. The path did not fire once in the 2.0 test session (the mirror-floor fix is the recompiler's co-issue fix). It can still be switched on in `deadlyprem.toml` to experiment.
+- **The EDRAM transfer keeps the registry lock until the copy is recorded**, so a surface released on another thread (`OnRelease`) cannot be freed between the scan and the blit.
+- **No per-draw rescans:** a surface that was checked since the last colour write into EDRAM is not scanned again (`alias_checked_seq`); depth-only draws with a colour target bound used to rescan every surface on every draw.
 
 ## 2.0 (September 2026)
 

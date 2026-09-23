@@ -76,7 +76,12 @@ REXCVAR_DEFINE_BOOL(dp_native_7e3_alpha, true, "DP1",
 // recompiler's co-issue bug (XenosRecomp `pv`); this path did not fire once in
 // a whole session in the office (resolve aliases 0). Kept: it is the emulator's
 // semantics and costs a map lookup per CPU-texture bind.
-REXCVAR_DEFINE_BOOL(dp_native_resolve_alias, true, "DP1",
+// [NEW FABLE VERSION] 2.0.1: off by default. Adversarial review: a view created
+// after a level load over memory an old resolve wrote (same size and format,
+// other fetch key) would sample that stale resolve forever, because an aliased
+// view is never uploaded and so never page-watched. Zero hits in the 2.0 test
+// session; turn on only to experiment.
+REXCVAR_DEFINE_BOOL(dp_native_resolve_alias, false, "DP1",
                     "Native renderer: a texture view of memory a resolve wrote last samples that resolve's "
                     "result (the emulator's texture cache is keyed by memory)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -298,6 +303,9 @@ struct GuestSurface {
   // [NEW FABLE VERSION] 2026-09-23: g_edram_seq of this surface's last colour
   // write (draw, clear, EDRAM transfer); 0 = never written.
   uint64_t write_seq = 0;
+  // [NEW FABLE VERSION] 2.0.1: g_edram_seq when SyncEdramAlias last scanned for
+  // this surface; nothing to do again until another colour write happens.
+  uint64_t alias_checked_seq = 0;
 };
 
 struct GuestBuffer {
@@ -2861,19 +2869,23 @@ void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst
 void SyncEdramAlias(GuestSurface& s) {
   if (s.depth || !s.resource || !REXCVAR_GET(dp_native_edram_alias)) return;
   if (s.write_seq == g_edram_seq) return;
+  // [NEW FABLE VERSION] 2.0.1: scanned since the last EDRAM write: same answer.
+  if (s.alias_checked_seq == g_edram_seq) return;
+  s.alias_checked_seq = g_edram_seq;
   const uint32_t span = EdramTileSpan(s.width, s.height, SurfaceIs64bpp(s.guest_format));
+  // [NEW FABLE VERSION] 2.0.1: the registry lock is held until the transfer is
+  // recorded, so OnRelease on another thread cannot free `src` in between
+  // (nothing below takes the lock again: Barrier, Blit and the log do not).
+  std::lock_guard<std::mutex> lock(g_registry_mutex);
   GuestSurface* src = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
-    for (auto& entry : g_surfaces) {
-      GuestSurface* o = entry.second.get();
-      if (o == &s || o->depth || o->write_seq <= s.write_seq) continue;
-      if (!EdramOverlap(s.edram_base, span, o->edram_base,
-                        EdramTileSpan(o->width, o->height, SurfaceIs64bpp(o->guest_format)))) {
-        continue;
-      }
-      if (!src || o->write_seq > src->write_seq) src = o;
+  for (auto& entry : g_surfaces) {
+    GuestSurface* o = entry.second.get();
+    if (o == &s || o->depth || o->write_seq <= s.write_seq) continue;
+    if (!EdramOverlap(s.edram_base, span, o->edram_base,
+                      EdramTileSpan(o->width, o->height, SurfaceIs64bpp(o->guest_format)))) {
+      continue;
     }
+    if (!src || o->write_seq > src->write_seq) src = o;
   }
   if (!src) return;
   const bool same_geometry = src->resource && src->edram_base == s.edram_base && src->width == s.width &&
