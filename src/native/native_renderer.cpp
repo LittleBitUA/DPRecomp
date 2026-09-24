@@ -3,6 +3,7 @@
 // thread that calls the XDK (Main XThread), one frame = one command list.
 
 #include "native_renderer.h"
+#include "native_cache_path.h"  // [new_fix_24092026] issue #33
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,9 @@
 #include <rex/hash.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
+#include <rex/logging/api.h>  // [new_fix_24092026] FlushLogging before the exit after a GPU loss
+#include <rex/filesystem.h>   // [new_fix_24092026] GetExecutableFolder (shader cache lookup)
+#include <thread>              // [new_fix_24092026] the GPU-lost message box thread
 #include <rex/memory/utils.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
@@ -34,6 +38,8 @@
 
 #include <d3dcompiler.h>
 #include <windows.h>
+#include <intrin.h>    // [new_fix_24092026] __rdtsc
+#include <tlhelp32.h>  // [new_fix_24092026] thread snapshot (dp_native_perf_threads)
 #include <wrl/client.h>
 
 #include "native_graphics_system.h"
@@ -84,6 +90,37 @@ REXCVAR_DEFINE_BOOL(dp_native_7e3_alpha, true, "DP1",
 REXCVAR_DEFINE_BOOL(dp_native_resolve_alias, false, "DP1",
                     "Native renderer: a texture view of memory a resolve wrote last samples that resolve's "
                     "result (the emulator's texture cache is keyed by memory)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// [new_fix_24092026] The console passes the front buffer through the display
+// gamma ramp (DC_LUT) the XDK programs for the display type the kernel reports
+// through VdGetCurrentDisplayGamma (the SDK reports TV / BT.709). The emulated
+// path applies it at swap; measured on DP1 it darkens shadows and low mids
+// (input 32/255 -> 66/1023 instead of 128, 128/255 -> 462 instead of 513).
+// The native renderer had no ramp at all (a lighter, flatter picture). Now the
+// Swap hook lets the XDK write the pending ramp (native_hooks.cpp),
+// NativeGraphicsSystem captures it (native_gamma.h) and the final blit applies
+// the table. Off = the previous native output.
+// [new_fix_24092026] CPU per host thread over each stats window (see
+// ThreadCpuReport). Off: no thread snapshot at all.
+REXCVAR_DEFINE_BOOL(dp_native_perf_threads, false, "DP1",
+                    "Native renderer stats line: CPU share of the busiest host threads over the window")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// [new_fix_24092026] GPU loss diagnostics: a DRED breadcrumb context (marker)
+// per draw / blit / clear / resolve and names on the renderer's resources, so a
+// device removal names the operation that was running. Read at startup: the
+// DRED setting has to exist before the D3D12 device does.
+// [new_fix_24092026] test only: remove the D3D12 device at this native frame.
+REXCVAR_DEFINE_INT32(dp_native_test_gpu_loss_frame, 0, "DP1",
+                     "Native renderer test: remove the D3D12 device at this frame to exercise the GPU-loss path "
+                     "(0 = never)");
+REXCVAR_DEFINE_BOOL(dp_native_gpu_markers, false, "DP1",
+                    "Native renderer diagnostics: tag every GPU operation for DRED so a GPU loss names the draw "
+                    "(small CPU cost per draw)");
+// [new_fix_24092026] 2.0.2: off by default until the GPU losses seen with it
+// on (24.09) are explained by a DRED log.
+REXCVAR_DEFINE_BOOL(dp_native_gamma_ramp, false, "DP1",
+                    "Native renderer: apply the console's display gamma ramp (DC_LUT) to the final image, as the "
+                    "emulated path does")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(dp_native_edram_alias, true, "DP1",
                     "Native renderer: a render target re-bound over EDRAM tiles another target wrote since "
@@ -206,12 +243,22 @@ struct ShaderCache {
   bool Load() {
     if (loaded) return true;
     loaded = true;
-    std::filesystem::path path = std::filesystem::current_path() / "native" / "dp_native_shaders.bin";
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-      REXLOG_ERROR("Native renderer: shader cache {} not found - every draw will be skipped", path.string());
+    // [new_fix_24092026] issue #33: native\ or the copy launcher updates
+    // deliver to the shareable folder, whichever is newer (native_cache_path.h).
+    const std::filesystem::path base = rex::filesystem::GetExecutableFolder();
+    const auto found = FindShaderCache(base, WorkingDirOrEmpty());
+    if (!found) {
+      REXLOG_ERROR("Native renderer: shader cache {} not found (nor {}) - every draw will be skipped",
+                   ShaderCacheZipPath(base).string(), ShaderCacheUpdaterPath(base).string());
       return false;
     }
+    const std::filesystem::path path = *found;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+      REXLOG_ERROR("Native renderer: shader cache {} cannot be opened - every draw will be skipped", path.string());
+      return false;
+    }
+    REXLOG_INFO("Native renderer: shader cache {}", path.string());
     file.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     if (file.size() < 16 || std::memcmp(file.data(), "DPNS0001", 8) != 0) {
       REXLOG_ERROR("Native renderer: shader cache {} has a bad header", path.string());
@@ -360,6 +407,7 @@ std::unordered_map<uint64_t, std::unique_ptr<GuestTexture>> g_textures_by_key;  
 std::unordered_map<uint32_t, uint64_t> g_object_key;  // last fetch key seen through a texture object (Unlock -> dirty)
 std::unordered_map<uint32_t, std::unique_ptr<GuestSurface>> g_surfaces;
 uint64_t g_edram_seq = 0;  // [NEW FABLE VERSION] colour writes into EDRAM, in order (see dp_native_edram_alias)
+uint32_t g_gamma_lut_srv = UINT32_MAX;  // [new_fix_24092026] 256x1 display gamma ramp (see dp_native_gamma_ramp)
 // [NEW FABLE VERSION] 2026-09-24: guest memory writes in order, and the last
 // resolve destination per physical base (see dp_native_resolve_alias). Host
 // textures are never destroyed (g_textures_by_key only grows), so the raw
@@ -560,6 +608,8 @@ inline double QpcToMs(int64_t ticks) {
 }
 struct PerfWindow {
   std::vector<float> frame_ms, cpu_ms, wait_ms, gpu_ms;
+  std::vector<float> thread_ms;      // [new_fix_24092026] main thread CPU per frame
+  uint64_t last_thread_cycles = 0;   // [new_fix_24092026]
   int64_t last_swap = 0;
   int64_t cpu_ticks = 0;   // native path CPU time this frame
   int64_t wait_ticks = 0;  // fence waits this frame
@@ -570,11 +620,105 @@ struct ScopedCpuTimer {
   ~ScopedCpuTimer() { g_perf.cpu_ticks += Qpc() - t0; }
 };
 
+// [new_fix_24092026] dp_native_gpu_markers (see LogDeviceRemoval).
+bool GpuMarkersOn() {
+  static const bool on = REXCVAR_GET(dp_native_gpu_markers);
+  return on;
+}
+// A PIX-style Unicode marker (metadata 0): DRED records it as the breadcrumb
+// context of the next operation.
+void GpuMarker(const std::string& s) {
+  if (!GpuMarkersOn() || !g.list) return;
+  const std::wstring w(s.begin(), s.end());
+  g.list->SetMarker(0, w.c_str(), UINT((w.size() + 1) * sizeof(wchar_t)));
+}
+// Names cost nothing per frame (once per resource) and make a DRED page fault
+// name the resource, so they are always on; only the per-draw markers wait for
+// dp_native_gpu_markers.
+void NameResource(ID3D12Object* o, const std::string& s) {
+  if (!o) return;
+  const std::wstring w(s.begin(), s.end());
+  o->SetName(w.c_str());
+}
+
+// [new_fix_24092026] TSC ticks per millisecond, measured against QPC since the
+// first call (QueryThreadCycleTime counts TSC ticks). 0 for the first 100 ms.
+double TscPerMs() {
+  static const int64_t q0 = Qpc();
+  static const uint64_t t0 = __rdtsc();
+  const double ms = QpcToMs(Qpc() - q0);
+  return ms > 100.0 ? double(__rdtsc() - t0) / ms : 0.0;
+}
+
+// [new_fix_24092026] dp_native_perf_threads: CPU share of each host thread since
+// the previous call (1.00 = one core busy the whole window), busiest 8, and the
+// sum over all threads. Called once per stats window from the Swap thread.
+std::string ThreadCpuReport() {
+  static std::unordered_map<DWORD, uint64_t> prev;
+  static uint64_t prev_tsc = 0;
+  const uint64_t tsc = __rdtsc();
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE) return "threads n/a";
+  const DWORD pid = GetCurrentProcessId();
+  struct Row {
+    double share;
+    std::string name;
+  };
+  std::vector<Row> rows;
+  std::unordered_map<DWORD, uint64_t> next;
+  double total = 0.0;
+  THREADENTRY32 te = {};
+  te.dwSize = sizeof(te);
+  for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+    if (te.th32OwnerProcessID != pid) continue;
+    HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+    if (!h) continue;
+    ULONG64 cycles = 0;
+    if (QueryThreadCycleTime(h, &cycles)) {
+      next[te.th32ThreadID] = cycles;
+      const auto it = prev.find(te.th32ThreadID);
+      const uint64_t before = it != prev.end() ? it->second : 0;  // new thread: all of its cycles are in this window
+      if (prev_tsc && tsc > prev_tsc && cycles >= before) {
+        const double share = double(cycles - before) / double(tsc - prev_tsc);
+        total += share;
+        std::string name;
+        PWSTR desc = nullptr;
+        // Looked up at run time: a static import would stop the exe from
+        // loading at all on Windows 10 before 1607.
+        using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+        static const auto get_desc = reinterpret_cast<GetThreadDescriptionFn>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
+        if (get_desc && SUCCEEDED(get_desc(h, &desc)) && desc) {
+          const int n = WideCharToMultiByte(CP_UTF8, 0, desc, -1, nullptr, 0, nullptr, nullptr);
+          if (n > 1) {
+            name.resize(size_t(n - 1));
+            WideCharToMultiByte(CP_UTF8, 0, desc, -1, name.data(), n, nullptr, nullptr);
+          }
+          LocalFree(desc);
+        }
+        if (name.empty()) name = fmt::format("tid {}", te.th32ThreadID);
+        rows.push_back({share, std::move(name)});
+      }
+    }
+    CloseHandle(h);
+  }
+  CloseHandle(snap);
+  prev.swap(next);
+  const bool first = prev_tsc == 0;
+  prev_tsc = tsc;
+  if (first) return "threads: first window";
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.share > b.share; });
+  std::string s = fmt::format("cpu cores busy {:.2f} ({} threads):", total, rows.size());
+  for (size_t i = 0; i < rows.size() && i < 8; ++i) s += fmt::format(" [{} {:.2f}]", rows[i].name, rows[i].share);
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // Blit shader: full-screen triangle sampling t0 into the bound RTV.
 // ---------------------------------------------------------------------------
 const char kBlitHlsl[] = R"(
 Texture2D<float4> t0 : register(t0);
+Texture2D<float4> t1 : register(t1);  // [new_fix_24092026] display gamma ramp (mode 4)
 SamplerState s0 : register(s0);
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 VSOut VSMain(uint id : SV_VertexID) {
@@ -604,6 +748,19 @@ float4 PSMain(VSOut i) : SV_Target0 {
   if (g_mode & 2u) {
     c.a = saturate(c.a);
   }
+  // [new_fix_24092026] the console's display gamma ramp: the 8-bit front buffer
+  // value indexes the 256-entry table (t1, 256x1 R10G10B10A2), per channel.
+  // Between two entries the value is interpolated: exact for an 8-bit input,
+  // no extra banding for a filtered or wider source.
+  if (g_mode & 4u) {
+    float3 x = saturate(c.rgb) * 255.0;
+    uint3 lo = uint3(floor(x));
+    uint3 hi = min(lo + 1u, 255u);
+    float3 f = x - float3(lo);
+    c.r = lerp(t1.Load(int3(lo.r, 0, 0)).r, t1.Load(int3(hi.r, 0, 0)).r, f.r);
+    c.g = lerp(t1.Load(int3(lo.g, 0, 0)).g, t1.Load(int3(hi.g, 0, 0)).g, f.g);
+    c.b = lerp(t1.Load(int3(lo.b, 0, 0)).b, t1.Load(int3(hi.b, 0, 0)).b, f.b);
+  }
   return c;
 }
 )";
@@ -621,7 +778,16 @@ bool CompileBlit() {
   D3D12_DESCRIPTOR_RANGE range = {};
   range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
   range.NumDescriptors = 1;
-  D3D12_ROOT_PARAMETER params[2] = {};
+  // [new_fix_24092026] t1: the display gamma ramp table for the final blit.
+  D3D12_DESCRIPTOR_RANGE range_lut = {};
+  range_lut.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  range_lut.NumDescriptors = 1;
+  range_lut.BaseShaderRegister = 1;
+  D3D12_ROOT_PARAMETER params[3] = {};
+  params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[2].DescriptorTable.NumDescriptorRanges = 1;
+  params[2].DescriptorTable.pDescriptorRanges = &range_lut;
+  params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   params[0].DescriptorTable.NumDescriptorRanges = 1;
   params[0].DescriptorTable.pDescriptorRanges = &range;
@@ -636,7 +802,7 @@ bool CompileBlit() {
   sampler.MaxLOD = D3D12_FLOAT32_MAX;
   sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   D3D12_ROOT_SIGNATURE_DESC desc = {};
-  desc.NumParameters = 2;
+  desc.NumParameters = 3;  // [new_fix_24092026] + the gamma ramp table
   desc.pParameters = params;
   desc.NumStaticSamplers = 1;
   desc.pStaticSamplers = &sampler;
@@ -855,6 +1021,7 @@ bool InitContext() {
   ok = ok && SUCCEEDED(g.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g.allocators[0].Get(), nullptr,
                                                    IID_PPV_ARGS(&g.list)));
   if (ok) g.list->Close();
+  if (ok) g.list->SetName(L"DP1 native frame list");  // [new_fix_24092026] DRED names the list
   ok = ok && SUCCEEDED(g.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g.fence)));
   g.fence_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
   ok = ok && g.fence_event != nullptr;
@@ -1100,6 +1267,8 @@ bool EnsureSurfaceResource(GuestSurface& s) {
     }
   }
   s.state = initial;
+  NameResource(s.resource.Get(), fmt::format("surface {:08X} {}x{} x{} fmt {:08X}", s.guest, s.width, s.height, s.scale,
+                                             s.guest_format));  // [new_fix_24092026]
   if (s.depth) {
     s.view_index = g.dsvs.Allocate();
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
@@ -1209,6 +1378,8 @@ bool EnsureTextureResource(GuestTexture& t) {
     }
   }
   t.state = D3D12_RESOURCE_STATE_COPY_DEST;
+  NameResource(t.resource.Get(), fmt::format("texture {:08X} {}x{} x{} dxgi {}{}", t.guest, t.width, t.height, t.scale,
+                                             uint32_t(t.format), t.is_resolve_target ? " resolve" : ""));  // [new_fix_24092026]
   t.srv_index = g.views.Allocate();
   D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
   srv.Format = t.format;
@@ -2820,6 +2991,10 @@ void ExecuteDraw(const DrawArgs& a) {
   g.list->SetGraphicsRootConstantBufferView(2, ring.buffer->GetGPUVirtualAddress() + sh_off);
   g.list->IASetPrimitiveTopology(topo);
   g.list->IASetVertexBuffers(0, vbv_count, vbv);
+  if (GpuMarkersOn()) {  // [new_fix_24092026]
+    GpuMarker(fmt::format("draw {} vs {:016X} ps {:016X} rt {:08X} ds {:08X} prim {}", g.stats.draws, vs->hash,
+                          ps->hash, st.rt0, st.ds, uint32_t(topo)));
+  }
   if (indexed) {
     g.list->IASetIndexBuffer(&ibv);
     g.list->DrawIndexedInstanced(index_count, instance_count, start_index, base_vertex, start_instance);
@@ -2854,8 +3029,14 @@ void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst
   g.list->SetPipelineState(pso);
   g.list->SetGraphicsRootSignature(g.blit_root_signature.Get());
   g.list->SetGraphicsRootDescriptorTable(0, g.views.Gpu(src_srv));
+  // [new_fix_24092026] t1 is read only in mode 4; any valid 2D SRV fills it otherwise.
+  g.list->SetGraphicsRootDescriptorTable(2, g.views.Gpu(g_gamma_lut_srv != UINT32_MAX ? g_gamma_lut_srv : src_srv));
   g.list->SetGraphicsRoot32BitConstant(1, mode, 0);
   g.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  if (GpuMarkersOn()) {  // [new_fix_24092026]
+    GpuMarker(fmt::format("blit mode {} src srv {} lut srv {} {}x{} fmt {}", mode, src_srv, g_gamma_lut_srv, width,
+                          height, uint32_t(dst_format)));
+  }
   g.list->DrawInstanced(3, 1, 0, 0);
   // Invalidate the game-side mirror: the next draw rebinds targets/PSO.
   st.bound_rt0 = st.bound_ds = UINT32_MAX;
@@ -3461,6 +3642,7 @@ void OnClear(uint32_t flags, uint32_t color_ptr, float z, uint32_t stencil) {
                 g_dump_seq++, flags, color_ptr, color_ptr ? LoadF32(color_ptr) : 0.f, color_ptr ? LoadF32(color_ptr + 4) : 0.f,
                 color_ptr ? LoadF32(color_ptr + 8) : 0.f, color_ptr ? LoadF32(color_ptr + 12) : 0.f, z, stencil, st.rt0, st.ds);
   }
+  if (GpuMarkersOn()) GpuMarker(fmt::format("clear flags {:08X} rt {:08X} ds {:08X}", flags, st.rt0, st.ds));  // [new_fix_24092026]
   // Xbox 360 D3DCLEAR flags: bits 0-3 = TARGET0..3, 0x10 = ZBUFFER, 0x20 = STENCIL.
   if ((flags & 0xF) && rt) {
     float color[4] = {0, 0, 0, 0};
@@ -3519,6 +3701,10 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   GuestTexture* t = TextureForObject(dest_texture);
   const bool depth = (flags & 4) != 0;
   GuestSurface* src = Lookup(g_surfaces, depth ? st.ds : st.rt0);
+  if (GpuMarkersOn()) {  // [new_fix_24092026]
+    GpuMarker(fmt::format("resolve flags {:08X} src {:08X} dest texture {:08X} level {} slice {}", flags,
+                          depth ? st.ds : st.rt0, dest_texture, dest_level, dest_slice));
+  }
   // [NEW FABLE VERSION] the blit copies the whole surface into mip 0; count (and
   // log the first few) resolves that ask for a sub-rectangle, a destination
   // point or a mip level, so the gap is measurable instead of assumed.
@@ -3660,6 +3846,13 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
   RendererStats stats = g.stats;
   stats.watch_hits = g_watch_hits.exchange(0, std::memory_order_relaxed);
   if (!InitContext()) return stats;
+  if (const int32_t f = REXCVAR_GET(dp_native_test_gpu_loss_frame); f > 0 && g.frame_number == uint32_t(f)) {
+    ComPtr<ID3D12Device5> d5;  // [new_fix_24092026] test hook, see dp_native_test_gpu_loss_frame
+    if (SUCCEEDED(g.device->QueryInterface(IID_PPV_ARGS(&d5)))) {
+      REXLOG_WARN("Native renderer: test: removing the D3D12 device at frame {}", f);
+      d5->RemoveDevice();
+    }
+  }
   auto* system = NativeGraphicsSystem::instance();
   GuestTexture* front = TextureForObject(front_buffer_texture);
   if (g.frame_number < 3 || g.frame_number % 600 == 0) {
@@ -3741,6 +3934,16 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
     g_perf.last_swap = now;
     g_perf.cpu_ms.push_back(float(QpcToMs(g_perf.cpu_ticks)));
     g_perf.wait_ms.push_back(float(QpcToMs(g_perf.wait_ticks)));
+    // [new_fix_24092026] CPU the Swap thread (the game's main thread) really
+    // used since the previous Swap: game code + XDK + native, waits excluded.
+    ULONG64 cycles = 0;
+    if (QueryThreadCycleTime(GetCurrentThread(), &cycles)) {
+      const double per_ms = TscPerMs();
+      if (g_perf.last_thread_cycles && per_ms > 0.0 && cycles >= g_perf.last_thread_cycles) {
+        g_perf.thread_ms.push_back(float(double(cycles - g_perf.last_thread_cycles) / per_ms));
+      }
+      g_perf.last_thread_cycles = cycles;
+    }
     stats.draw_cpu_us = uint64_t(QpcToMs(g_perf.cpu_ticks) * 1000.0);
     g_perf.cpu_ticks = 0;
     g_perf.wait_ticks = 0;
@@ -3762,10 +3965,14 @@ std::string PerfSummaryAndReset() {
   };
   const size_t frames = g_perf.frame_ms.size(), gpu_frames = g_perf.gpu_ms.size();
   const auto f = pct(g_perf.frame_ms), c = pct(g_perf.cpu_ms), w = pct(g_perf.wait_ms), gpu = pct(g_perf.gpu_ms);
+  const auto m = pct(g_perf.thread_ms);  // [new_fix_24092026]
   std::string s = fmt::format(
-      "frame ms p50/p90/p99 {:.1f}/{:.1f}/{:.1f} ({} frames), native cpu ms {:.2f}/{:.2f}/{:.2f}, fence wait ms "
-      "{:.2f}/{:.2f}/{:.2f}, gpu ms {:.2f}/{:.2f}/{:.2f} ({} frames)",
-      f[0], f[1], f[2], frames, c[0], c[1], c[2], w[0], w[1], w[2], gpu[0], gpu[1], gpu[2], gpu_frames);
+      "frame ms p50/p90/p99 {:.1f}/{:.1f}/{:.1f} ({} frames), main thread cpu ms {:.2f}/{:.2f}/{:.2f}, native cpu ms "
+      "{:.2f}/{:.2f}/{:.2f}, fence wait ms {:.2f}/{:.2f}/{:.2f}, gpu ms {:.2f}/{:.2f}/{:.2f} ({} frames)",
+      f[0], f[1], f[2], frames, m[0], m[1], m[2], c[0], c[1], c[2], w[0], w[1], w[2], gpu[0], gpu[1], gpu[2],
+      gpu_frames);
+  if (REXCVAR_GET(dp_native_perf_threads)) s += "; " + ThreadCpuReport();  // [new_fix_24092026]
+  g_perf.thread_ms.clear();
   g_perf.frame_ms.clear();
   g_perf.cpu_ms.clear();
   g_perf.wait_ms.clear();
@@ -3774,6 +3981,163 @@ std::string PerfSummaryAndReset() {
 }
 
 void RendererSubmitCurrentFrame() { SubmitFrame(); }
+
+bool GammaRampEnabled() { return REXCVAR_GET(dp_native_gamma_ramp); }  // [new_fix_24092026]
+
+// [new_fix_24092026] Before the D3D12 device exists: DRED breadcrumb contexts
+// (the markers) when dp_native_gpu_markers is on. The SDK provider already
+// forces auto-breadcrumbs and page-fault data.
+void PrepareGpuDiagnostics() {
+  if (!REXCVAR_GET(dp_native_gpu_markers)) return;
+  HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+  auto get = d3d12 ? reinterpret_cast<PFN_D3D12_GET_DEBUG_INTERFACE>(GetProcAddress(d3d12, "D3D12GetDebugInterface"))
+                   : nullptr;
+  ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> settings;
+  if (get && SUCCEEDED(get(IID_PPV_ARGS(&settings)))) {
+    settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+    settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+    settings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+    REXLOG_INFO("Native renderer: GPU markers on (dp_native_gpu_markers): DRED breadcrumb contexts forced on");
+  } else {
+    REXLOG_WARN("Native renderer: GPU markers requested but DRED breadcrumb contexts are unavailable");
+  }
+}
+
+namespace {
+const char* BreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
+  static const char* const kNames[] = {"SetMarker", "BeginEvent", "EndEvent", "DrawInstanced", "DrawIndexedInstanced",
+                                       "ExecuteIndirect", "Dispatch", "CopyBufferRegion", "CopyTextureRegion",
+                                       "CopyResource", "CopyTiles", "ResolveSubresource", "ClearRenderTargetView",
+                                       "ClearUnorderedAccessView", "ClearDepthStencilView", "ResourceBarrier",
+                                       "ExecuteBundle", "Present", "ResolveQueryData", "BeginSubmission",
+                                       "EndSubmission"};
+  return uint32_t(op) < sizeof(kNames) / sizeof(kNames[0]) ? kNames[op] : "op";
+}
+std::string Narrow(const wchar_t* w) {
+  std::string s;
+  if (!w) return s;
+  for (; *w; ++w) s.push_back(*w < 128 ? char(*w) : '?');
+  return s;
+}
+}  // namespace
+
+namespace {
+// [new_fix_24092026] The newest deadlyprem*.log next to the exe = this session's.
+std::wstring CurrentLogPath() {
+  wchar_t exe[MAX_PATH] = {};
+  if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return L"logs";
+  const std::filesystem::path dir = std::filesystem::path(exe).parent_path() / "logs";
+  std::filesystem::path best;
+  std::filesystem::file_time_type best_time{};
+  std::error_code ec;
+  for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+    const std::wstring name = e.path().filename().wstring();
+    if (name.rfind(L"deadlyprem", 0) != 0 || e.path().extension() != L".log") continue;
+    const auto t = e.last_write_time(ec);
+    if (!ec && (best.empty() || t > best_time)) {
+      best = e.path();
+      best_time = t;
+    }
+  }
+  return best.empty() ? dir.wstring() : best.wstring();
+}
+
+// [new_fix_24092026] A lost D3D12 device does not come back and the native
+// renderer cannot recreate its resources: tell the player where the log is and
+// close, instead of the frozen window the game used to leave behind. The box
+// runs on a thread of its own (the caller may be the UI thread inside a paint;
+// a message loop there could run the app's shutdown underneath it), and that
+// thread ends the process.
+void ExitAfterGpuLoss() {
+  rex::FlushLogging();
+  std::thread([] {
+  const std::wstring text =
+      L"The graphics card stopped responding while the native renderer was drawing (GPU lost).\n\n"
+      L"The game has to close. Please report it at github.com/LittleBitUA/DPRecomp/issues and attach this log "
+      L"(it records what the graphics card was doing):\n\n" +
+      CurrentLogPath() +
+      L"\n\nUntil it is fixed you can play with the emulated renderer: launcher -> Settings -> Native -> "
+      L"turn off \"Native Renderer (test)\".";
+  MessageBoxW(nullptr, text.c_str(), L"Deadly Premonition Recompilation - GPU lost",
+              MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+  rex::FlushLogging();
+  std::_Exit(3);
+  }).detach();
+}
+}  // namespace
+
+// [new_fix_24092026] Once per session, from the presenter's loss callback:
+// reason + DRED to the log, then the message and exit.
+void LogDeviceRemoval() {
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) return;
+  if (!g.device) {
+    REXLOG_ERROR("Native renderer: GPU lost before the renderer had a device");
+    ExitAfterGpuLoss();
+    return;
+  }
+  const HRESULT reason = g.device->GetDeviceRemovedReason();
+  const char* what = reason == DXGI_ERROR_DEVICE_HUNG ? "DEVICE_HUNG (a GPU operation ran too long: TDR)"
+                   : reason == DXGI_ERROR_DEVICE_REMOVED ? "DEVICE_REMOVED (page fault or driver)"
+                   : reason == DXGI_ERROR_DEVICE_RESET ? "DEVICE_RESET (bad command)"
+                   : reason == DXGI_ERROR_DRIVER_INTERNAL_ERROR ? "DRIVER_INTERNAL_ERROR"
+                   : reason == DXGI_ERROR_INVALID_CALL ? "INVALID_CALL"
+                   : reason == S_OK ? "S_OK (device still alive)" : "other";
+  REXLOG_ERROR("Native renderer: GPU loss reason 0x{:08X} {} (frame {}, draws this frame {})", uint32_t(reason), what,
+               g.frame_number, g.stats.draws);
+  ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+  if (FAILED(g.device->QueryInterface(IID_PPV_ARGS(&dred)))) {
+    REXLOG_ERROR("Native renderer: no DRED data");
+    ExitAfterGpuLoss();
+    return;
+  }
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs = {};
+  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
+    uint32_t lists = 0;
+    for (const D3D12_AUTO_BREADCRUMB_NODE1* n = crumbs.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
+      const uint32_t count = n->BreadcrumbCount;
+      const uint32_t completed = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
+      if (!n->pCommandHistory || completed >= count) continue;  // finished lists
+      if (++lists > 16) break;
+      REXLOG_ERROR("Native renderer: DRED list '{}' on queue '{}': {} of {} ops completed",
+                   n->pCommandListDebugNameA ? n->pCommandListDebugNameA : Narrow(n->pCommandListDebugNameW),
+                   n->pCommandQueueDebugNameA ? n->pCommandQueueDebugNameA : Narrow(n->pCommandQueueDebugNameW),
+                   completed, count);
+      const uint32_t from = completed > 6 ? completed - 6 : 0, to = std::min(count, completed + 4);
+      for (uint32_t i = from; i < to; ++i) {
+        REXLOG_ERROR("Native renderer: DRED   [{}] {}{}", i, BreadcrumbOpName(n->pCommandHistory[i]),
+                     i == completed ? "   <-- first op not completed" : "");
+      }
+      // The markers: the last few at or before the first unfinished op, and the next one.
+      int32_t last = -1;
+      for (uint32_t c = 0; c < n->BreadcrumbContextsCount; ++c) {
+        if (n->pBreadcrumbContexts[c].BreadcrumbIndex <= completed) last = int32_t(c);
+      }
+      for (int32_t c = std::max(0, last - 3); c >= 0 && c <= last + 1 && uint32_t(c) < n->BreadcrumbContextsCount; ++c) {
+        REXLOG_ERROR("Native renderer: DRED   marker at op {}: {}{}", n->pBreadcrumbContexts[c].BreadcrumbIndex,
+                     Narrow(n->pBreadcrumbContexts[c].pContextString), c == last ? "   <-- running" : "");
+      }
+    }
+    if (!lists) REXLOG_ERROR("Native renderer: DRED: no unfinished command list recorded");
+  }
+  D3D12_DRED_PAGE_FAULT_OUTPUT1 fault = {};
+  if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&fault)) && fault.PageFaultVA) {
+    REXLOG_ERROR("Native renderer: DRED page fault at GPU VA 0x{:016X}", fault.PageFaultVA);
+    uint32_t k = 0;
+    for (const D3D12_DRED_ALLOCATION_NODE1* a = fault.pHeadExistingAllocationNode; a && k < 8; a = a->pNext, ++k) {
+      REXLOG_ERROR("Native renderer: DRED   live allocation near it: '{}' type {}",
+                   a->ObjectNameA ? a->ObjectNameA : Narrow(a->ObjectNameW), int(a->AllocationType));
+    }
+    k = 0;
+    for (const D3D12_DRED_ALLOCATION_NODE1* a = fault.pHeadRecentFreedAllocationNode; a && k < 8; a = a->pNext, ++k) {
+      REXLOG_ERROR("Native renderer: DRED   recently FREED allocation near it: '{}' type {}",
+                   a->ObjectNameA ? a->ObjectNameA : Narrow(a->ObjectNameW), int(a->AllocationType));
+    }
+  } else {
+    REXLOG_ERROR("Native renderer: DRED: no page fault recorded");
+  }
+  ExitAfterGpuLoss();
+}
 
 // Used by NativeGraphicsSystem::PresentFromRenderer to draw the blit into the
 // presenter texture with the renderer's list (same frame).
@@ -3808,7 +4172,58 @@ void RendererBlitToPresenter(uint32_t src_srv, ID3D12Resource* dest, uint32_t wi
     scratch_h = height;
   }
   Barrier(scratch.Get(), scratch_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-  Blit(src_srv, g.rtvs.Cpu(scratch_rtv), rex::ui::d3d12::D3D12Presenter::kGuestOutputFormat, width, height);
+  // [new_fix_24092026] the console's display gamma ramp (dp_native_gamma_ramp):
+  // upload the captured table when it changes, apply it in the blit (mode 4).
+  uint32_t present_mode = 0;
+  if (REXCVAR_GET(dp_native_gamma_ramp)) {
+    static ComPtr<ID3D12Resource> lut;
+    static D3D12_RESOURCE_STATES lut_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    static uint32_t lut_version = UINT32_MAX;
+    std::array<uint32_t, 256> table;
+    auto* sys = NativeGraphicsSystem::instance();
+    const uint32_t version = sys ? sys->CopyGammaRamp(table) : 0;
+    if (version != 0 && !lut) {
+      D3D12_RESOURCE_DESC ld = {};
+      ld.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      ld.Width = 256;
+      ld.Height = 1;
+      ld.DepthOrArraySize = 1;
+      ld.MipLevels = 1;
+      ld.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+      ld.SampleDesc.Count = 1;
+      if (SUCCEEDED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault,
+                                                      D3D12_HEAP_FLAG_NONE, &ld, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                      nullptr, IID_PPV_ARGS(&lut)))) {
+        lut_state = D3D12_RESOURCE_STATE_COPY_DEST;
+        if (g_gamma_lut_srv == UINT32_MAX) g_gamma_lut_srv = g.views.Allocate();
+        g.device->CreateShaderResourceView(lut.Get(), nullptr, g.views.Cpu(g_gamma_lut_srv));
+      }
+    }
+    if (lut && version != 0 && version != lut_version) {
+      UploadRing& ring = g.upload[g.frame_index];
+      const size_t off = ring.Allocate(256 * 4, 512);
+      if (off != SIZE_MAX) {
+        uint32_t* dst = reinterpret_cast<uint32_t*>(ring.mapped + off);
+        for (uint32_t i = 0; i < 256; ++i) dst[i] = Lut30ToR10G10B10A2(table[i]);
+        Barrier(lut.Get(), lut_state, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION ldst = {}, lsrc = {};
+        ldst.pResource = lut.Get();
+        ldst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        lsrc.pResource = ring.buffer.Get();
+        lsrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        lsrc.PlacedFootprint.Offset = off;
+        lsrc.PlacedFootprint.Footprint = {DXGI_FORMAT_R10G10B10A2_UNORM, 256, 1, 1, 256 * 4};
+        g.list->CopyTextureRegion(&ldst, 0, 0, 0, &lsrc, nullptr);
+        Barrier(lut.Get(), lut_state,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        lut_version = version;
+      }
+    }
+    // The last uploaded table stays valid when this frame's upload found no ring space.
+    if (lut && lut_version != UINT32_MAX) present_mode = 4;
+  }
+  Blit(src_srv, g.rtvs.Cpu(scratch_rtv), rex::ui::d3d12::D3D12Presenter::kGuestOutputFormat, width, height,
+       present_mode);
   Barrier(scratch.Get(), scratch_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
   D3D12_RESOURCE_BARRIER to_copy = {};
   to_copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

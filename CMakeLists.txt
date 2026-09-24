@@ -76,3 +76,9 @@ set_target_properties(dp_native_scale_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # [NEW FABLE VERSION] native renderer texture replacement rules (must match the SDK plugin)
 add_executable(dp_native_texrep_test tests/native_texrep_test.cpp)
 set_target_properties(dp_native_texrep_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [new_fix_24092026] native renderer: capture of the console's display gamma ramp
+add_executable(dp_native_gamma_test tests/native_gamma_test.cpp)
+set_target_properties(dp_native_gamma_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [new_fix_24092026] issue #33: where the native shader cache is looked up
+add_executable(dp_native_cache_path_test tests/native_cache_path_test.cpp)
+set_target_properties(dp_native_cache_path_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

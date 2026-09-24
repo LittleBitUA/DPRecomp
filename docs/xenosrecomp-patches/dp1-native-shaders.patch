@@ -40,7 +40,7 @@ index 3bf37ba..cdb76e6 100644
          }
          else
 diff --git a/XenosRecomp/main.cpp b/XenosRecomp/main.cpp
-index e1aba4a..b08321c 100644
+index e1aba4a..9f568e3 100644
 --- a/XenosRecomp/main.cpp
 +++ b/XenosRecomp/main.cpp
 @@ -27,12 +27,26 @@ struct RecompiledShader
@@ -155,7 +155,7 @@ index e1aba4a..b08321c 100644
                          foundAny = true;
                      }
  
-@@ -220,58 +269,132 @@ int main(int argc, char** argv)
+@@ -220,58 +269,145 @@ int main(int argc, char** argv)
                  files.emplace_back(std::move(fileData));
          }
  
@@ -322,11 +322,24 @@ index e1aba4a..b08321c 100644
 -                if ((currentProgress % 10) == 0 || (currentProgress == shaders.size() - 1))
 -                    fmt::println("Recompiling shaders... {}%", currentProgress / float(shaders.size()) * 100.0f);
 -            });
++        // [new_fix_24092026] diagnostic: XENOS_KEEP_HLSL=<dir> keeps every
++        // translated shader's HLSL as <dir>/<ucode hash>.hlsl.
++        if (const char* keep = getenv("XENOS_KEEP_HLSL"))
++        {
++            std::filesystem::create_directories(keep, ec);
++            for (size_t i = 0; i < order.size(); i++)
++            {
++                if (std::filesystem::exists(hlslPath(i)))
++                    std::filesystem::copy_file(hlslPath(i),
++                        std::filesystem::path(keep) / fmt::format("{:016X}.hlsl", order[i].second->ucodeHash),
++                        std::filesystem::copy_options::overwrite_existing, ec);
++            }
++        }
 +        std::filesystem::remove_all(hlslDir, ec);
  
          fmt::println("Creating shader cache...");
  
-@@ -291,6 +414,24 @@ int main(int argc, char** argv)
+@@ -291,6 +427,24 @@ int main(int argc, char** argv)
          // dpxr-fork: entry gains ucodeHash + isPixelShader + vertex element
          // table range; failed shaders keep their hashes with zero-size
          // blobs (runtime falls back).
@@ -351,7 +364,7 @@ index e1aba4a..b08321c 100644
          size_t failCount = 0;
          for (auto& [hash, shader] : shaders)
          {
-@@ -310,12 +451,20 @@ int main(int argc, char** argv)
+@@ -310,12 +464,20 @@ int main(int argc, char** argv)
                          vertexElements.push_back(vs->vertexElementsAndInterpolators[vs->field18 + i]);
                  }
              }
@@ -374,7 +387,7 @@ index e1aba4a..b08321c 100644
                  dxil.insert(dxil.end(), reinterpret_cast<uint8_t *>(shader.dxil->GetBufferPointer()),
                      reinterpret_cast<uint8_t *>(shader.dxil->GetBufferPointer()) + shader.dxil->GetBufferSize());
              }
-@@ -340,6 +489,29 @@ int main(int argc, char** argv)
+@@ -340,6 +502,29 @@ int main(int argc, char** argv)
              std::string binPath = std::string(output) + ".bin";
              writeAllBytes(binPath.c_str(), dxil.data(), dxil.size());
              fmt::println("DXIL sidecar: {} ({} bytes)", binPath, dxil.size());
@@ -577,7 +590,7 @@ index b279ee4..394c5f5 100644
  {
      uint index = cubeMapData.cubeMapIndex;
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 81ef3c5..b9a821c 100644
+index 81ef3c5..feae8b1 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -16,8 +16,8 @@ static constexpr char SWIZZLES[] =
@@ -1089,18 +1102,21 @@ index 81ef3c5..b9a821c 100644
              else
              {
                  out += "0.0;\n";
-@@ -1517,8 +1702,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1517,8 +1702,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
      out += "\tint a0 = 0;\n";
      out += "\tint aL = 0;\n";
-+    out += "\tint aLn = 0;\n";  // dp1: iteration counter; aL starts at the loop constant start and moves by its step
++    // dp1 [new_fix_24092026] one iteration counter and one saved aL
++    // per loop nesting level (the Xenos loop stack is 4 deep).
++    out += "\tint aLn0 = 0, aLn1 = 0, aLn2 = 0, aLn3 = 0;\n";
++    out += "\tint aLs0 = 0, aLs1 = 0, aLs2 = 0, aLs3 = 0;\n";
      out += "\tbool p0 = false;\n";
      out += "\tfloat ps = 0.0;\n";
 +    out += "\tfloat4 pv = 0.0;\n";  // dp1 [NEW FABLE VERSION] staged vector result (co-issue)
  
      // dpxr-fork: loop/integer constants from the live loop-constant bank
      // (count, start, step packed per dword). Registers with baked int4
-@@ -1613,7 +1800,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1613,7 +1803,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
      else
      {
          out += "\n\tuint pc = 0;\n";
@@ -1113,7 +1129,17 @@ index 81ef3c5..b9a821c 100644
          out += "\t{\n";
          out += "\t\tswitch (pc)\n";
          out += "\t\t{\n";
-@@ -1658,6 +1849,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1622,6 +1816,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     controlFlowCode = code;
+     instrAddress = 0;
+     uint32_t pc = 0;
++    // dp1 [new_fix_24092026] loop nesting level in program order
++    // (LoopStart/LoopEnd pairs nest lexically in both control-flow paths).
++    uint32_t loopDepth = 0;
+ 
+     while (instrAddress < instrSize)
+     {
+@@ -1658,6 +1855,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
              uint32_t sequence = 0;
              bool shouldReturn = false;
              bool shouldCloseCurlyBracket = false;
@@ -1121,7 +1147,7 @@ index 81ef3c5..b9a821c 100644
  
              switch (cfInstr.opcode)
              {
-@@ -1669,6 +1861,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1669,6 +1867,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  shouldReturn = (cfInstr.opcode == ControlFlowOpcode::ExecEnd);
                  break;
  
@@ -1135,7 +1161,7 @@ index 81ef3c5..b9a821c 100644
              case ControlFlowOpcode::CondExec:
              case ControlFlowOpcode::CondExecEnd:
              case ControlFlowOpcode::CondExecPredClean:
-@@ -1676,15 +1875,32 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1676,15 +1881,32 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  address = cfInstr.condExec.address;
                  count = cfInstr.condExec.count;
                  sequence = cfInstr.condExec.sequence;
@@ -1169,46 +1195,86 @@ index 81ef3c5..b9a821c 100644
                  break;
  
              case ControlFlowOpcode::LoopStart:
-@@ -1694,14 +1910,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1694,34 +1916,73 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  #ifdef UNLEASHED_RECOMP
                      print("[unroll] ");
                  #endif
 -                    println("for (aL = 0; aL < i{}.x; aL++)", uint32_t(cfInstr.loopStart.loopId));
 +                    // dp1: Xenos loop constant = count (bits 0-7), initial aL (8-15), step (16-23).
-+                    println("for (aLn = 0, aL = i{0}.y; aLn < i{0}.x; aLn++, aL += i{0}.z)", uint32_t(cfInstr.loopStart.loopId));
++                    // [new_fix_24092026] per-level counter, aL pushed here.
++                    println("aLs{0} = aL;", (std::min)(loopDepth, 3u));
++                    indent();
++                    println("for (aLn{1} = 0, aL = i{0}.y; aLn{1} < i{0}.x; aLn{1}++, aL += i{0}.z)",
++                        uint32_t(cfInstr.loopStart.loopId), (std::min)(loopDepth, 3u));
                      indent();
                      out += "{\n";
                      ++indentation;
                  }
-                 else 
+-                else 
++                else
                  {
 -                    out += "\t\t\taL = 0;\n";
++                    // [new_fix_24092026] push aL, per-level counter.
++                    println("\t\t\taLs{} = aL;", (std::min)(loopDepth, 3u));
 +                    println("\t\t\taL = i{}.y;", uint32_t(cfInstr.loopStart.loopId));
-+                    out += "\t\t\taLn = 0;\n";
++                    println("\t\t\taLn{} = 0;", (std::min)(loopDepth, 3u));
 +                    // dp1: a zero loop count skips the body (Xenos / Xenia semantics, DP1 leaves the
 +                    // light loops of its floor material at 0); the loop start carries the address
 +                    // past the loop end. The simple path's for-loop already skips.
 +                    println("\t\t\tif (i{}.x == 0)", uint32_t(cfInstr.loopStart.loopId));
 +                    out += "\t\t\t{\n";
++                    println("\t\t\t\taL = aLs{};", (std::min)(loopDepth, 3u));
 +                    println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopStart.address));
 +                    out += "\t\t\t\tcontinue;\n";
 +                    out += "\t\t\t}\n";
                  }
++                ++loopDepth;
                  break;
  
-@@ -1714,8 +1940,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             case ControlFlowOpcode::LoopEnd:
++            {
++                // [new_fix_24092026] pop the loop level; a predicated
++                // break leaves the loop when p0 == condition (checked after the
++                // iteration increment, as the sequencer does).
++                if (loopDepth > 0)
++                    --loopDepth;
++                const uint32_t level = (std::min)(loopDepth, 3u);
+                 if (simpleControlFlow)
+                 {
++                    if (cfInstr.loopEnd.isPredicatedBreak)
++                    {
++                        indent();
++                        println("if ({}p0) break;", cfInstr.loopEnd.condition ? "" : "!");
++                    }
+                     --indentation;
+                     indent();
+                     out += "}\n";
++                    indent();
++                    println("aL = aLs{};", level);
                  }
                  else
                  {
 -                    out += "\t\t\t++aL;\n";
 -                    println("\t\t\tif (aL < i{}.x)", uint32_t(cfInstr.loopEnd.loopId));
-+                    out += "\t\t\t++aLn;\n";
++                    println("\t\t\t++aLn{};", level);
 +                    println("\t\t\taL += i{}.z;", uint32_t(cfInstr.loopEnd.loopId));
-+                    println("\t\t\tif (aLn < i{}.x)", uint32_t(cfInstr.loopEnd.loopId));
++                    if (cfInstr.loopEnd.isPredicatedBreak)
++                        println("\t\t\tif (!({}p0) && aLn{} < i{}.x)", cfInstr.loopEnd.condition ? "" : "!", level,
++                            uint32_t(cfInstr.loopEnd.loopId));
++                    else
++                        println("\t\t\tif (aLn{} < i{}.x)", level, uint32_t(cfInstr.loopEnd.loopId));
                      out += "\t\t\t{\n";
                      println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopEnd.address));
                      out += "\t\t\t\tcontinue;\n";
-@@ -1835,6 +2062,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     out += "\t\t\t}\n";
++                    println("\t\t\taL = aLs{};", level);
+                 }
+                 break;
++            }
+ 
+             case ControlFlowOpcode::CondJmp:
+             {
+@@ -1835,6 +2096,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                  instructionCode += 3;
              }
  
@@ -1225,7 +1291,7 @@ index 81ef3c5..b9a821c 100644
              if (shouldReturn)
              {
                  if (isPixelShader)
-@@ -1853,6 +2090,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1853,6 +2124,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      indent();
                      out += "}";
  
@@ -1238,7 +1304,7 @@ index 81ef3c5..b9a821c 100644
                  #ifdef UNLEASHED_RECOMP
                      specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
  
-@@ -1876,7 +2119,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1876,7 +2153,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      if (!hasMtxProjection)
                  #endif
                      {
@@ -1252,7 +1318,7 @@ index 81ef3c5..b9a821c 100644
                      }
                  }
  
-@@ -1925,7 +2173,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1925,7 +2207,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          out += "\t}\n";
  
      if (!isPixelShader && hasMtxProjection)

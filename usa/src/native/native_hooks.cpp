@@ -42,6 +42,9 @@
 #define DP_NATIVE_STR(name) DP_NATIVE_STR2(name)
 #define DP_NATIVE_FN(name) name
 #if defined(DP_REGION_USA)
+#define DPX_824D9B18 sub_824D9268  // [new_fix_24092026] XDK gamma ramp dispatcher (PAL - 0x8B0, same body)
+#define DPX_824D6010 sub_824D5760  // [new_fix_24092026] XDK gamma ramp writer, 256-entry table
+#define DPX_824D6108 sub_824D5858  // [new_fix_24092026] XDK gamma ramp writer, PWL
 #define DPX_824CD6E0 sub_824CCE30
 #define DPX_824CD888 sub_824CCFD8
 #define DPX_824CDF30 sub_824CD680
@@ -109,6 +112,7 @@
 #define DPX_824D5AA8 sub_824D5AA8
 #define DPX_824D5B78 sub_824D5B78
 #define DPX_824DA330 sub_824DA330
+#define DPX_824D9B18 sub_824D9B18  // [new_fix_24092026] XDK gamma ramp dispatcher
 #define DPX_824E5DB8 sub_824E5DB8
 #define DPX_824E7E70 sub_824E7E70
 #define DPX_824E7F98 sub_824E7F98
@@ -166,10 +170,83 @@ REX_EXTERN(DP_NATIVE_IMP(DPX_824E5DB8));  // D3DDevice_Resolve(dev, flags, rect,
 REX_EXTERN(DP_NATIVE_IMP(DPX_824E7E70));  // D3DDevice_ClearF(dev, flags, rects, float4* color, ?, stencil; z = f1)
 REX_EXTERN(DP_NATIVE_IMP(DPX_824D1AF8));  // D3DDevice_SetShaderGPRAllocation
 REX_EXTERN(DP_NATIVE_IMP(DPX_824D2E78));  // XDK BlockOnFence(dev, fence)
+// [new_fix_24092026] XDK gamma ramp dispatcher(dev, frontBufferFormat, ramp): writes
+// the display gamma ramp into the ring (default ramp for the display type when
+// ramp == 0; PWL for a 2_10_10_10 front buffer, the 256-entry table otherwise).
+REX_EXTERN(DP_NATIVE_IMP(DPX_824D9B18));
+REX_EXTERN(DP_NATIVE_IMP(DPX_824D6010));
+REX_EXTERN(DP_NATIVE_IMP(DPX_824D6108));
+
+namespace {
+// [new_fix_24092026] diagnostic: the first calls of the XDK gamma ramp path,
+// in both paths (the emulated one is the reference). r4 of the writers is a
+// D3DGAMMARAMP (WORD red[256], green[256], blue[256], big-endian).
+std::atomic<int32_t> g_gamma_trace_budget{12};
+template <typename Ctx>
+void GammaTrace(const char* what, const Ctx& ctx, bool ramp_in_r4) {
+  if (g_gamma_trace_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+  std::string sample;
+  if (ramp_in_r4 && ctx.r4.u32) {
+    const auto* ramp = reinterpret_cast<const uint8_t*>(REX_KERNEL_MEMORY()->TranslateVirtual(ctx.r4.u32));
+    auto word = [&](uint32_t off) { return uint32_t(ramp[off]) << 8 | ramp[off + 1]; };
+    for (uint32_t i : {1u, 8u, 32u, 64u, 128u, 192u, 255u}) {
+      sample += fmt::format(" [{}]={},{},{}", i, word(i * 2), word(512 + i * 2), word(1024 + i * 2));
+    }
+  }
+  REXLOG_INFO("Native gamma trace: {} (native {}) lr={:08X} r3={:08X} r4={:08X} r5={:08X}{}", what,
+              dp::native::Enabled(), uint32_t(ctx.lr), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, sample);
+}
+}  // namespace
+
+REX_HOOK_RAW(DPX_824D9B18) {  // [new_fix_24092026] diagnostic, calls the XDK body
+  GammaTrace("dispatcher(dev, front buffer format, ramp)", ctx, false);
+  DP_NATIVE_IMP(DPX_824D9B18)(ctx, base);
+}
+REX_HOOK_RAW(DPX_824D6010) {  // [new_fix_24092026] diagnostic, calls the XDK body
+  GammaTrace("table writer(dev, ramp)", ctx, true);
+  DP_NATIVE_IMP(DPX_824D6010)(ctx, base);
+}
+REX_HOOK_RAW(DPX_824D6108) {  // [new_fix_24092026] diagnostic, calls the XDK body
+  GammaTrace("pwl writer(dev, ramp)", ctx, false);
+  DP_NATIVE_IMP(DPX_824D6108)(ctx, base);
+}
 
 REX_HOOK_RAW(DPX_824DA330) {
   XdkTrace(DP_NATIVE_STR(DPX_824DA330), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
   DP_NATIVE_PASSTHROUGH(DPX_824DA330);
+  // [new_fix_24092026] The XDK's Swap writes the display gamma ramp when the
+  // device marks it pending (byte dev+10943 bit 0x40, which Swap clears). The
+  // native Swap does not run the XDK body, so the ramp was never written and the
+  // native picture had no display gamma. Do that part here: the XDK dispatcher
+  // writes the ramp into the ring, where NativeGraphicsSystem captures the DC_LUT
+  // writes (native_gamma.h) and the present blit applies them.
+  //
+  // Measured on the emulated path (24.09): the XDK makes ONE call, at swap #2,
+  // dispatcher(dev, 0x28280106 = 8_8_8_8 front buffer, dev+15212 = the device's
+  // stored D3DGAMMARAMP, filled at device creation from the display type). Swap #1
+  // takes the branch that sets bit 0x40 and suppresses the write; swap #2 writes
+  // and clears it. The native Swap mirrors the net effect: the stored ramp once
+  // per device, and again whenever bit 0x40 is set. SetGammaRamp writes its ramp
+  // into the ring itself, so custom ramps reach NativeGraphicsSystem without this.
+  if (dp::native::GammaRampEnabled() && ctx.r3.u32) {
+    static uint32_t s_gamma_device = 0;  // Swap runs on the render thread only
+    auto* pending = reinterpret_cast<uint8_t*>(REX_KERNEL_MEMORY()->TranslateVirtual(ctx.r3.u32 + 10943));
+    const bool requested = (*pending & 0x40) != 0;
+    if (requested || s_gamma_device != ctx.r3.u32) {
+      s_gamma_device = ctx.r3.u32;
+      *pending = uint8_t(*pending & ~0x40);
+      const uint64_t r3 = ctx.r3.u64, r4 = ctx.r4.u64, r5 = ctx.r5.u64, lr = ctx.lr;
+      ctx.r4.u64 = 0x28280106;          // the XDK's 8_8_8_8 front-buffer format: the 256-entry table
+      ctx.r5.u64 = ctx.r3.u32 + 15212;  // the device's stored ramp, as the XDK Swap passes it
+      DP_NATIVE_IMP(DPX_824D9B18)(ctx, base);
+      ctx.r3.u64 = r3;
+      ctx.r4.u64 = r4;
+      ctx.r5.u64 = r5;
+      ctx.lr = lr;
+      REXLOG_INFO("Native renderer: display gamma ramp written from the device ramp ({})",
+                  requested ? "XDK re-request" : "first swap of this device");
+    }
+  }
   auto* system = dp::native::NativeGraphicsSystem::instance();
   const dp::native::RendererStats stats = dp::native::OnSwap(ctx.r4.u32);
   if (system) {

@@ -1180,7 +1180,7 @@ index a744375..bdd819f 100644
  
    ++counter_;
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..a9a7147 100644
+index 19874a5..ebcfbf4 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -10,6 +10,8 @@
@@ -1200,7 +1200,40 @@ index 19874a5..a9a7147 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -2400,7 +2403,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2046,6 +2049,32 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+ 
+         context.SetIs8bpc(!use_pwl_gamma_ramp && !use_fxaa);
+ 
++        // [new_fix_24092026] diagnostic: which gamma ramp the emulated path
++        // applies (DP1 native renderer parity). First 4 changes only.
++        {
++          static uint32_t gamma_log_left = 4;
++          static bool logged_once = false;
++          const bool dirty = use_pwl_gamma_ramp ? !gamma_ramp_pwl_up_to_date_
++                                                : !gamma_ramp_256_entry_table_up_to_date_;
++          if (gamma_log_left && (dirty || !logged_once)) {
++            --gamma_log_left;
++            logged_once = true;
++            const reg::DC_LUT_30_COLOR* t = gamma_ramp_256_entry_table();
++            bool identity = true;
++            for (uint32_t i = 0; i < 256; ++i) {
++              const uint32_t v = i * 0x3FF / 0xFF;
++              if (t[i].color_10_red != v || t[i].color_10_green != v || t[i].color_10_blue != v) identity = false;
++            }
++            auto e = [&](uint32_t i) {
++              return fmt::format("[{}]={},{},{}", i, uint32_t(t[i].color_10_red), uint32_t(t[i].color_10_green),
++                                 uint32_t(t[i].color_10_blue));
++            };
++            REXGPU_INFO("DP1 gamma ramp at swap: format {} pwl {} dirty {} table identity {}: {} {} {} {} {} {} {} {}",
++                        uint32_t(frontbuffer_format), use_pwl_gamma_ramp, dirty, identity, e(1), e(8), e(32), e(64),
++                        e(128), e(192), e(254), e(255));
++          }
++        }
++
+         // Upload the new gamma ramp, using the upload buffer for the current
+         // frame (will close the frame after this anyway, so can't write
+         // multiple times per frame).
+@@ -2400,7 +2429,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    }
    if (REXCVAR_GET(async_shader_compilation) &&
        pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
@@ -1227,7 +1260,7 @@ index 19874a5..a9a7147 100644
    }
  
    // Update the textures - this may bind pipelines.
-@@ -3215,6 +3236,10 @@ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HR
+@@ -3215,6 +3262,10 @@ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HR
    }
    REXGPU_ERROR("D3D12 device removed: HRESULT 0x{:08X} - {}", static_cast<unsigned>(reason),
                 reason_str);

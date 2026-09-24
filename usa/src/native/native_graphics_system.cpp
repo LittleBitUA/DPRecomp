@@ -29,6 +29,11 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include "native_cache_path.h"  // [new_fix_24092026] issue #33
+
+#include <atomic>
+#include <rex/filesystem.h>
+
 REXCVAR_DEFINE_INT32(dp_native_thread_dump_at, 0, "DP1",
                      "Native renderer diagnostics: N seconds after boot log every guest thread's guest stack once "
                      "(0 = off)");
@@ -43,7 +48,22 @@ using Microsoft::WRL::ComPtr;
 using rex::X_STATUS;
 
 bool Enabled() {
-  static const bool enabled = REXCVAR_GET(dp_native_render);
+  // [new_fix_24092026] issue #33: without its shader cache the native renderer
+  // skips every draw (a black screen for the whole session). Fall back to the
+  // emulated renderer instead; decided once, before the graphics system is
+  // chosen, like the cvar itself.
+  static const bool enabled = [] {
+    if (!REXCVAR_GET(dp_native_render)) return false;
+    const std::filesystem::path base = rex::filesystem::GetExecutableFolder();  // as ShaderCache::Load
+    if (FindShaderCache(base, WorkingDirOrEmpty())) {
+      PrepareGpuDiagnostics();  // [new_fix_24092026] before the D3D12 device is created
+      return true;
+    }
+    REXLOG_ERROR("Native renderer requested (dp_native_render) but its shader cache is missing ({} and {}); "
+                 "using the emulated renderer. Reinstall from the release zip to get the native renderer.",
+                 ShaderCacheZipPath(base).string(), ShaderCacheUpdaterPath(base).string());
+    return false;
+  }();
   return enabled;
 }
 
@@ -201,7 +221,11 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
   }
   app_context_ = app_context;
   auto loss_cb = [](bool is_responsible, bool /*statically_from_ui_thread*/) {
+    // [new_fix_24092026] once: the presenter reports the loss on every refresh.
+    static std::atomic<bool> reported{false};
+    if (reported.exchange(true)) return;
     REXLOG_ERROR("Native renderer: host GPU lost (responsible: {})", is_responsible);
+    LogDeviceRemoval();  // reason, DRED breadcrumbs, page fault, then the message and exit
   };
   if (app_context_) {
     // Presenter creation must happen on the UI thread (same rule as the emulator).
@@ -367,6 +391,11 @@ void NativeGraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
 // CommandProcessor::WriteRegister).
 void NativeGraphicsSystem::WalkRegisterWrite(uint32_t index, uint32_t value) {
   constexpr uint32_t kScratchUmsk = 0x01DC, kScratchAddr = 0x01DD, kScratchReg0 = 0x0578;
+  if (index >= kRegDcLutRwMode && index <= kRegDcLutWriteEnMask) {  // [new_fix_24092026]
+    std::lock_guard<std::mutex> lock(gamma_mutex_);
+    gamma_.Write(index, value);
+    return;
+  }
   if (index >= 0x4000 && index < 0x4400) ring_alu_vs_writes_.fetch_add(1, std::memory_order_relaxed);
   if (index >= 0x4400 && index < 0x4800) ring_alu_ps_writes_.fetch_add(1, std::memory_order_relaxed);
   if (index == kScratchUmsk) {
@@ -388,7 +417,14 @@ std::string NativeGraphicsSystem::RingStats() const {
     const uint32_t n = ring_opcodes_[i].load(std::memory_order_relaxed);
     if (n) ops += fmt::format(" {:02X}:{}", i, n);
   }
-  return fmt::format("ring kicks {} packets {} ibs {} fence writes {} mem writes {} scratch writes {} alu vs {} ps {} const loads {} dwords {} umsk {:X} addr {:08X}; ops{}",
+  uint32_t dc_lut_writes = 0, dc_lut_version = 0;  // [new_fix_24092026] display gamma ramp traffic
+  {
+    std::lock_guard<std::mutex> lock(gamma_mutex_);
+    dc_lut_writes = gamma_.writes();
+    dc_lut_version = gamma_.version();
+  }
+  return fmt::format("dc_lut writes {} changes {}; ring kicks {} packets {} ibs {} fence writes {} mem writes {} scratch writes {} alu vs {} ps {} const loads {} dwords {} umsk {:X} addr {:08X}; ops{}",
+                     dc_lut_writes, dc_lut_version,
                      ring_kicks_.load(), ring_packets_.load(), ring_ibs_.load(), ring_fence_writes_.load(),
                      ring_mem_writes_.load(), ring_scratch_writes_.load(), ring_alu_vs_writes_.load(),
                      ring_alu_ps_writes_.load(), ring_const_loads_.load(), ring_const_dwords_.load(), scratch_umsk_, scratch_addr_, ops);
@@ -598,7 +634,28 @@ void NativeGraphicsSystem::PresentFromRenderer(uint32_t src_srv, uint32_t width,
                                  });
 }
 
+// [new_fix_24092026] see native_gamma.h.
+uint32_t NativeGraphicsSystem::CopyGammaRamp(std::array<uint32_t, 256>& out) const {
+  std::lock_guard<std::mutex> lock(gamma_mutex_);
+  out = gamma_.table();
+  return gamma_.version();
+}
+
 void NativeGraphicsSystem::OnSwapDone(uint32_t front_buffer_texture) {
+  {  // [new_fix_24092026] log the guest display gamma ramp the first times it changes
+    std::lock_guard<std::mutex> lock(gamma_mutex_);
+    if (gamma_.version() != gamma_logged_version_ && gamma_logs_left_) {
+      --gamma_logs_left_;
+      gamma_logged_version_ = gamma_.version();
+      const auto& t = gamma_.table();
+      auto e = [&](uint32_t i) {
+        return fmt::format("[{}]={},{},{}", i, Lut30Red(t[i]), Lut30Green(t[i]), Lut30Blue(t[i]));
+      };
+      REXLOG_INFO("Native renderer: guest display gamma ramp (version {}, identity {}, pwl writes {}): {} {} {} {} {} {} {} {}",
+                  gamma_.version(), gamma_.IsIdentity(), gamma_.pwl_writes(), e(1), e(8), e(32), e(64), e(128),
+                  e(192), e(254), e(255));
+    }
+  }
   frame_count_.fetch_add(1, std::memory_order_relaxed);
   rex::SetFrameNumber(rex::GetFrameNumber() + 1);
   if (!presented_this_frame_) PresentFrame(front_buffer_texture);

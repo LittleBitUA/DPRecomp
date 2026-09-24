@@ -24,6 +24,8 @@
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/presenter.h>
 
+#include "native_gamma.h"  // [new_fix_24092026] the console's display gamma ramp
+
 namespace rex::memory {
 class Memory;
 }
@@ -96,6 +98,12 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   uint32_t ring_read_index_ = 0;  // dwords
   uint32_t scratch_umsk_ = 0;
   uint32_t scratch_addr_ = 0;
+  // [new_fix_24092026] DC_LUT writes (see native_gamma.h). Written
+  // on the guest threads that kick the ring or poke MMIO, read at present.
+  mutable std::mutex gamma_mutex_;
+  GuestGammaRamp gamma_;
+  uint32_t gamma_logged_version_ = 0;
+  uint32_t gamma_logs_left_ = 4;
   std::atomic<uint32_t> pending_cp_interrupts_{0};
   std::atomic<uint32_t> ring_packets_{0};
   std::atomic<uint32_t> ring_fence_writes_{0};
@@ -111,6 +119,9 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   uint32_t ring_diag_budget_ = 40;
  public:
   std::string RingStats() const;
+  // [new_fix_24092026] the guest's current 256-entry display gamma table
+  // (DC_LUT_30_COLOR layout) and its change counter.
+  uint32_t CopyGammaRamp(std::array<uint32_t, 256>& out) const;
  private:
   void WalkRing(uint32_t write_index);
   void WalkPackets(const uint8_t* base, uint32_t capacity_bytes, uint32_t read_bytes, uint32_t write_bytes, int depth);

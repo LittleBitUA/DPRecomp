@@ -74,6 +74,12 @@ RendererStats OnSwap(uint32_t front_buffer_texture);
 // the blit of `src_srv` into the presenter's guest-output texture on the
 // renderer's command list, then submits the frame.
 void RendererBlitToPresenter(uint32_t src_srv, ID3D12Resource* dest, uint32_t width, uint32_t height);
+// [new_fix_24092026] dp_native_gamma_ramp: apply the console's display gamma ramp.
+bool GammaRampEnabled();
+// [new_fix_24092026] GPU loss diagnostics: DRED setting before the device
+// exists (dp_native_gpu_markers), and the one-time dump on a GPU loss.
+void PrepareGpuDiagnostics();
+void LogDeviceRemoval();
 void RendererSubmitCurrentFrame();
 
 }  // namespace dp::native

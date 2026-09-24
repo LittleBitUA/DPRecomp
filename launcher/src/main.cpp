@@ -396,7 +396,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v2.0.1";
+constexpr const wchar_t* kLauncherVersion = L"v2.0.2";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -2182,6 +2182,21 @@ static int Run(const std::wstring& zip, const std::wstring& install, DWORD paren
       }
     }
     if (!err.empty()) break;
+    // [new_fix_24092026] issue #33: the native renderer's shader cache. It was
+    // missing from the list above, so launcher updates never delivered it.
+    // Not fatal (the exes are already replaced; the game also finds the copy in
+    // the shareable folder below, or falls back to the emulated renderer).
+    {
+      const auto src = root / L"native";
+      if (std::filesystem::exists(src, ec)) {
+        std::wstring derr;
+        if (CopyTree(src, install_dir / L"native", L"", derr)) {
+          L(L"copy: native/*");
+        } else {
+          L(L"native copy FAILED (continuing): " + derr);
+        }
+      }
+    }
     {
       const auto src = root / L"userdata" / L"cache" / L"shaders" / L"shareable";
       if (std::filesystem::exists(src, ec)) {
