@@ -7,19 +7,19 @@
 **A native Windows port of *Deadly Premonition* (Xbox 360, 2010) by static recompilation. No emulator.**<br>
 60 FPS on the console's own time base · real mouse look · keyboard and PlayStation button prompts · FSR 3 and 2× supersampling · a launcher that updates itself · PAL and USA discs
 
-[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip)
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.4/DPRecomp-2.0.4-win64.zip)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.4/DPRecomp-2.0.4-win64.zip)
 [![Issues](https://img.shields.io/github/issues/LittleBitUA/DPRecomp?style=for-the-badge&color=orange)](https://github.com/LittleBitUA/DPRecomp/issues)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 2.0.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip)
+## [⬇ &nbsp;Download 2.0.4 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.4/DPRecomp-2.0.4-win64.zip)
 
-`DPRecomp-2.0.3-win64.zip` · 47 MB · Windows 10 / 11 64-bit
+`DPRecomp-2.0.4-win64.zip` · 47 MB · Windows 10 / 11 64-bit
 
-[Release notes](docs/RELEASE-NOTES-2.0.3.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-2.0.4.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -46,7 +46,7 @@
 
 **You need:** Windows 10 / 11 64-bit · a Direct3D 12 GPU with rasterizer-ordered views (NVIDIA GTX 900+, AMD RX 400+, Intel Arc; recent integrated graphics at 1×) · ~6 GB free for the game data · your *Deadly Premonition* Xbox 360 disc image or extracted files.
 
-1. **Download** [`DPRecomp-2.0.3-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip) and unzip it anywhere outside *Program Files*.
+1. **Download** [`DPRecomp-2.0.4-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.4/DPRecomp-2.0.4-win64.zip) and unzip it anywhere outside *Program Files*.
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
@@ -55,6 +55,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new
+
+**2.0.4:** fixes holes and spikes on some objects with the native renderer: pillows, York's tie showing through his back, door handles and trees pulled across the screen. [Notes](docs/RELEASE-NOTES-2.0.4.md).
 
 **2.0.3:** fixes the native renderer's crashes ("GPU lost") while exploring and after closing the pause menu. [Notes](docs/RELEASE-NOTES-2.0.3.md).
 
@@ -291,6 +293,12 @@ The AI reads thousands of lines of runtime and game listings faster than a perso
 - **[miniz](https://github.com/richgel999/miniz)** (MIT) — the zip reader inside the launcher's updater.
 - **[Zacksly](https://zacksly.itch.io)** — *PS5 Button Icons and Controls*, the PlayStation prompt icons ([CC BY 3.0](https://creativecommons.org/licenses/by/3.0/), resized, otherwise unmodified; `prompts/LICENSE-zacksly.txt`).
 - **The testers.** SilentHeII, Crowley9, Dominus41, DexgamingX, GradiusHead and everyone who filed an issue, sent a save, a log or a DebugView capture: the black screen under Steam recording, the audio desync, the doubled sounds, the coffee cup, the morgue, the Steam Deck updater. Each one became a fix or is on its way to one.
+
+### Everyone who helped on GitHub
+
+Thank you for your activity and for supporting the project. Every issue, log, save, screenshot, capture and comment from the people below was read, and many of them turned into fixes: the crashes in 2.0.3 and the torn models in 2.0.4 were found from your logs and saves. Listed by how much they took part:
+
+[Crowley9](https://github.com/Crowley9) · [SilentHeII](https://github.com/SilentHeII) · [kite1234567](https://github.com/kite1234567) · [DexgamingX](https://github.com/DexgamingX) · [Dominus41](https://github.com/Dominus41) · [Dumpster73](https://github.com/Dumpster73) · [EliParker28](https://github.com/EliParker28) · [Jax765](https://github.com/Jax765) · [Bakanda07](https://github.com/Bakanda07) · [michaelbub](https://github.com/michaelbub) · [l2nkxk8z](https://github.com/l2nkxk8z) · [Lord-Zedd](https://github.com/Lord-Zedd) · [pascnoty](https://github.com/pascnoty) · [PsychotropicPineapples](https://github.com/PsychotropicPineapples) · [seascape](https://github.com/seascape) · [valeraudovenko32-oss](https://github.com/valeraudovenko32-oss) · [Akelaphobia](https://github.com/Akelaphobia) · [Behelit09](https://github.com/Behelit09) · [dailyrana](https://github.com/dailyrana) · [ehw](https://github.com/ehw) · [Emanu1995](https://github.com/Emanu1995) · [Hunk4TH](https://github.com/Hunk4TH) · [LeEpic69](https://github.com/LeEpic69) · [Mutcholoko](https://github.com/Mutcholoko) · [NineKain](https://github.com/NineKain) · [OtaconRevengeance](https://github.com/OtaconRevengeance) · [TGolias](https://github.com/TGolias) · [themanwiththeplan911](https://github.com/themanwiththeplan911) · [TylerJaacks](https://github.com/TylerJaacks) · [valeriyjurievich-ctrl](https://github.com/valeriyjurievich-ctrl)
 
 ---
 

@@ -5,6 +5,7 @@
 #include "native_renderer.h"
 #include "native_cache_path.h"  // [new_fix_24092026] issue #33
 #include "native_retire.h"      // [new_fix_24092026] 2.0.3: issues #33/#34
+#include "native_buffer_header.h"  // [new_fix_24092026] 2.0.4: issue #35
 
 #include <algorithm>
 #include <array>
@@ -2064,16 +2065,16 @@ bool UploadTexture(GuestTexture& t) {
 // the fetch type in bits 0-1), +28 = size in bytes | endian (VB only; the IB's
 // endian and 16/32-bit format live in Common (+0) bits 29-30 and 31).
 void RefreshBufferHeader(GuestBuffer& b) {
-  const uint32_t dw0 = LoadU32(b.guest + 24), dw1 = LoadU32(b.guest + 28);
-  const uint32_t address = dw0 & ~3u;
-  const uint32_t size = ((dw1 >> 2) & 0xFFFFFF) * 4;
-  if (b.index) {
-    const uint32_t common = LoadU32(b.guest);
-    b.index32 = (common & 0x80000000u) != 0;
-    b.endian = (common >> 29) & 3;
-  } else {
-    b.endian = dw1 & 3;
-  }
+  // [new_fix_24092026] 2.0.4 (issue #35): an index buffer's +28 is its size in
+  // BYTES and +24 its plain address; 2.0.3 decoded both as a vertex fetch
+  // constant and lost the last index of odd 16-bit index counts
+  // (native_buffer_header.h).
+  const BufferHeader h = DecodeBufferHeader(b.index, b.index ? LoadU32(b.guest) : 0u, LoadU32(b.guest + 24),
+                                            LoadU32(b.guest + 28));
+  const uint32_t address = h.address;
+  const uint32_t size = h.size;
+  b.endian = h.endian;
+  if (b.index) b.index32 = h.index32;
   if (address != b.address || size != b.size) {
     if (b.watched) {
       ForgetWatch(&b);
@@ -2878,6 +2879,15 @@ void ExecuteDraw(const DrawArgs& a) {
     if (ib->written.load(std::memory_order_acquire)) ib->dirty = true;
     if (ib->dirty && !UploadBuffer(*ib)) return SkipLog("index buffer upload failed", ib->guest);
     ibv = {ib->resource->GetGPUVirtualAddress(), ib->size, ib->index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
+    // [new_fix_24092026] 2.0.4: D3D12 reads 0 past the end of the view; the
+    // console reads whatever memory follows. Logged, not guessed at.
+    if (size_t(a.start_index) + a.count > ib->size / (ib->index32 ? 4u : 2u)) {
+      static std::atomic<uint32_t> past_end{0};
+      if (past_end.fetch_add(1, std::memory_order_relaxed) < 8) {
+        REXLOG_WARN("Native renderer: draw reads indices {}..{} of index buffer {:08X}, which holds {} ({} bytes)",
+                    a.start_index, a.start_index + a.count, ib->guest, ib->size / (ib->index32 ? 4u : 2u), ib->size);
+      }
+    }
     strip_cut = a.prim == 6;
     start_index = a.start_index;
   }
