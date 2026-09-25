@@ -4,6 +4,7 @@
 
 #include "native_renderer.h"
 #include "native_cache_path.h"  // [new_fix_24092026] issue #33
+#include "native_retire.h"      // [new_fix_24092026] 2.0.3: issues #33/#34
 
 #include <algorithm>
 #include <array>
@@ -417,6 +418,10 @@ std::unordered_map<uint32_t, GuestTexture*> g_resolve_by_base;
 std::unordered_map<uint32_t, std::unique_ptr<GuestBuffer>> g_buffers;
 std::unordered_map<uint32_t, std::unique_ptr<GuestDecl>> g_decls;
 std::unordered_map<uint32_t, std::unique_ptr<GuestShader>> g_shaders;
+// [new_fix_24092026] 2.0.3: objects the game released (or re-created at the same
+// address), waiting for DestroyReleasedObjects. Under g_registry_mutex.
+std::vector<std::unique_ptr<GuestBuffer>> g_released_buffers;
+std::vector<std::unique_ptr<GuestSurface>> g_released_surfaces;
 
 template <typename T>
 T* Lookup(std::unordered_map<uint32_t, std::unique_ptr<T>>& map, uint32_t guest) {
@@ -459,6 +464,7 @@ struct UploadRing {
                                                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer)))) {
       return false;
     }
+    buffer->SetName(L"DP1 upload ring");  // [new_fix_24092026] 2.0.3
     D3D12_RANGE no_read = {0, 0};
     return SUCCEEDED(buffer->Map(0, &no_read, reinterpret_cast<void**>(&mapped)));
   }
@@ -476,6 +482,9 @@ struct DescriptorAllocator {
   uint32_t size = 0, increment = 0, next = 0;
   std::vector<uint32_t> free_list;
   bool shader_visible = false;
+  // [new_fix_24092026] 2.0.3: indices come back from the retire queue's drain,
+  // which does not have to run on the thread that allocates.
+  std::mutex mutex;
   bool Init(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, uint32_t count, bool visible) {
     D3D12_DESCRIPTOR_HEAP_DESC desc = {};
     desc.Type = type;
@@ -488,6 +497,7 @@ struct DescriptorAllocator {
     return true;
   }
   uint32_t Allocate() {
+    std::lock_guard<std::mutex> lock(mutex);
     if (!free_list.empty()) {
       uint32_t i = free_list.back();
       free_list.pop_back();
@@ -497,7 +507,13 @@ struct DescriptorAllocator {
     return next++;
   }
   void Free(uint32_t index) {
-    if (index != UINT32_MAX) free_list.push_back(index);
+    if (index == UINT32_MAX) return;
+    std::lock_guard<std::mutex> lock(mutex);
+    free_list.push_back(index);
+  }
+  uint32_t InUse() {  // [new_fix_24092026] 2.0.3: stats
+    std::lock_guard<std::mutex> lock(mutex);
+    return next - uint32_t(free_list.size());
   }
   D3D12_CPU_DESCRIPTOR_HANDLE Cpu(uint32_t index) const {
     D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
@@ -540,7 +556,7 @@ struct Context {
   ComPtr<ID3D12Fence> fence;
   HANDLE fence_event = nullptr;
   UINT64 fence_values[kFramesInFlight] = {};
-  UINT64 fence_next = 1;
+  FenceCounter fences;  // [new_fix_24092026] 2.0.3: frame fence values (native_retire.h); read on any thread
   uint32_t frame_index = 0;
   UploadRing upload[kFramesInFlight];
   DescriptorAllocator views, samplers, rtvs, dsvs;
@@ -567,7 +583,7 @@ struct Context {
   bool recording = false;
   bool ready = false;
   bool failed = false;
-  std::vector<ComPtr<ID3D12Resource>> retired[kFramesInFlight];
+  // [new_fix_24092026] 2.0.3: retired objects live in g_retired (fence-tagged), see native_retire.h.
   RendererStats stats;
   uint32_t frame_number = 0;
   // [NEW FABLE VERSION] constant banks: guest bytes of the last upload (big-endian,
@@ -899,6 +915,7 @@ bool CreateWhiteTexture() {
                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g.white_texture)))) {
     return false;
   }
+  g.white_texture->SetName(L"DP1 white 1x1");  // [new_fix_24092026] 2.0.3
   g.white_srv = g.views.Allocate();
   g.device->CreateShaderResourceView(g.white_texture.Get(), nullptr, g.views.Cpu(g.white_srv));
   {
@@ -921,8 +938,107 @@ bool CreateWhiteTexture() {
   return true;
 }
 
+// [new_fix_24092026] 2.0.3 (issues #33/#34, native_retire.h): what the renderer
+// stops using waits for the fence value of the frame being recorded (between
+// frames: of the next one). Up to 2.0.2 it went into the list of the current
+// frame slot, and a resource retired between frames or from a loading thread
+// was released while the frame just submitted could still read it.
+struct RetiredObject {
+  ComPtr<ID3D12Resource> resource;
+  DescriptorAllocator* heap = nullptr;  // a descriptor index to give back to `heap`
+  uint32_t index = UINT32_MAX;
+};
+// Never destroyed: the guest's loading threads can still release objects while
+// the process exits.
+RetireQueue<RetiredObject>& Retired() {
+  static auto* queue = new RetireQueue<RetiredObject>();
+  return *queue;
+}
+std::atomic<uint32_t> g_retired_count{0}, g_freed_count{0}, g_recreated_count{0};
+
+UINT64 RetireFence() { return g.fences.ForRetire(); }
+
 void RetireResource(ComPtr<ID3D12Resource> r) {
-  if (r) g.retired[g.frame_index].push_back(std::move(r));
+  if (!r) return;
+  Retired().Push(RetireFence(), RetiredObject{std::move(r), nullptr, UINT32_MAX});
+  g_retired_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void RetireDescriptor(DescriptorAllocator& heap, uint32_t index) {
+  if (index == UINT32_MAX) return;
+  Retired().Push(RetireFence(), RetiredObject{nullptr, &heap, index});
+}
+
+// Frame start, after the wait: everything the GPU has finished with goes (the
+// resources are released when `done` goes out of scope).
+void ReleaseRetired() {
+  std::vector<RetiredObject> done = Retired().TakeCompleted(g.fence->GetCompletedValue());
+  for (RetiredObject& o : done) {
+    if (o.heap) o.heap->Free(o.index);
+    if (o.resource) g_freed_count.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+// [new_fix_24092026] 2.0.3: a full descriptor heap is logged (a few times) and
+// the caller gives up on that object instead of writing past the heap.
+void HeapFull(const char* what) {
+  static std::atomic<uint32_t> logged{0};
+  if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+    REXLOG_ERROR("Native renderer: {} descriptor heap full, the object is not drawn", what);
+  }
+}
+
+// [new_fix_24092026] 2.0.3: the recording path writes one command list, so the
+// guest threads that reach it (draws, clears and resolves on the game's
+// RenderThread, resolves and Swap on its main thread) must take turns. The game
+// does that itself; this lock makes sure of it, and the first times a thread
+// has to wait for another one are logged (that would be a bug of its own).
+std::recursive_mutex g_record_mutex;
+std::atomic<DWORD> g_record_owner{0};
+std::atomic<uint32_t> g_record_overlaps{0};
+struct RecordScope {
+  std::unique_lock<std::recursive_mutex> lock;
+  DWORD previous_owner = 0;
+  explicit RecordScope(const char* where) : lock(g_record_mutex, std::try_to_lock) {
+    if (!lock.owns_lock()) {
+      const DWORD holder = g_record_owner.load(std::memory_order_relaxed);
+      const uint32_t n = g_record_overlaps.fetch_add(1, std::memory_order_relaxed);
+      if (n < 8) {
+        REXLOG_WARN("Native renderer: {} on thread {} waits for thread {}, still recording (overlap #{})", where,
+                    GetCurrentThreadId(), holder, n + 1);
+      }
+      lock.lock();
+    }
+    previous_owner = g_record_owner.exchange(GetCurrentThreadId(), std::memory_order_relaxed);
+  }
+  ~RecordScope() { g_record_owner.store(previous_owner, std::memory_order_relaxed); }
+};
+
+void ForgetWatch(GuestBuffer* b);  // page watch (defined with UploadTexture)
+
+// [new_fix_24092026] 2.0.3: frame start, on the recording thread (inside
+// RecordScope, before any Lookup of this frame). What OnRelease, RegisterBuffer
+// and OnCreateSurface unlinked is torn down here: the recording thread may have
+// been using the object while another thread released it. Resources and shader
+// views go through the retire queue, RTV/DSV indices back at once (CPU-only
+// heaps, read when a command is recorded), then the object is destroyed.
+void DestroyReleasedObjects() {
+  std::vector<std::unique_ptr<GuestBuffer>> buffers;
+  std::vector<std::unique_ptr<GuestSurface>> surfaces;
+  {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    buffers.swap(g_released_buffers);
+    surfaces.swap(g_released_surfaces);
+  }
+  for (auto& b : buffers) {
+    ForgetWatch(b.get());
+    RetireResource(std::move(b->resource));
+  }
+  for (auto& s : surfaces) {
+    (s->depth ? g.dsvs : g.rtvs).Free(s->view_index);
+    RetireDescriptor(g.views, s->srv_index);
+    RetireResource(std::move(s->resource));
+  }
 }
 
 void Barrier(ID3D12Resource* r, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STATES to) {
@@ -954,7 +1070,8 @@ bool BeginFrame() {
     const uint64_t t0 = g.ts_mapped[g.frame_index * 2], t1 = g.ts_mapped[g.frame_index * 2 + 1];
     if (t1 > t0 && g.ts_frequency) g_perf.gpu_ms.push_back(float(double(t1 - t0) * 1000.0 / double(g.ts_frequency)));
   }
-  g.retired[g.frame_index].clear();
+  DestroyReleasedObjects();  // [new_fix_24092026] 2.0.3
+  ReleaseRetired();          // [new_fix_24092026] 2.0.3: by fence, not by frame slot (native_retire.h)
   g.allocators[g.frame_index]->Reset();
   g.list->Reset(g.allocators[g.frame_index].Get(), nullptr);
   g.upload[g.frame_index].head = 0;
@@ -995,8 +1112,8 @@ void SubmitFrame() {
   g.list->Close();
   ID3D12CommandList* lists[] = {g.list.Get()};
   g.queue->ExecuteCommandLists(1, lists);
-  g.fence_values[g.frame_index] = g.fence_next;
-  g.queue->Signal(g.fence.Get(), g.fence_next++);
+  // [new_fix_24092026] 2.0.3: signal the value, then move on (FenceCounter, tested)
+  g.fence_values[g.frame_index] = g.fences.Submit([](uint64_t value) { g.queue->Signal(g.fence.Get(), value); });
   g.frame_index = (g.frame_index + 1) % kFramesInFlight;
   g.recording = false;
   g.provider->LogDebugLayerMessages();
@@ -1047,6 +1164,7 @@ bool InitContext() {
       if (SUCCEEDED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE,
                                                       &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                       IID_PPV_ARGS(&g.ts_readback))) &&
+          SUCCEEDED(g.ts_readback->SetName(L"DP1 GPU timestamps")) &&  // [new_fix_24092026] 2.0.3
           SUCCEEDED(g.ts_readback->Map(0, nullptr, reinterpret_cast<void**>(&g.ts_mapped))) &&
           SUCCEEDED(g.queue->GetTimestampFrequency(&g.ts_frequency))) {
         // ready
@@ -1269,13 +1387,24 @@ bool EnsureSurfaceResource(GuestSurface& s) {
   s.state = initial;
   NameResource(s.resource.Get(), fmt::format("surface {:08X} {}x{} x{} fmt {:08X}", s.guest, s.width, s.height, s.scale,
                                              s.guest_format));  // [new_fix_24092026]
+  // [new_fix_24092026] 2.0.3: both views or neither (a full heap is logged, not
+  // written past; the resource just created goes through the retire queue).
+  DescriptorAllocator& target_views = s.depth ? g.dsvs : g.rtvs;
+  s.view_index = target_views.Allocate();
+  s.srv_index = g.views.Allocate();
+  if (s.view_index == UINT32_MAX || s.srv_index == UINT32_MAX) {
+    HeapFull(s.view_index == UINT32_MAX ? (s.depth ? "depth stencil view" : "render target view") : "shader view");
+    target_views.Free(s.view_index);
+    g.views.Free(s.srv_index);
+    s.view_index = s.srv_index = UINT32_MAX;
+    RetireResource(std::move(s.resource));
+    return false;
+  }
   if (s.depth) {
-    s.view_index = g.dsvs.Allocate();
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
     dsv.Format = s.format;
     dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     g.device->CreateDepthStencilView(s.resource.Get(), &dsv, g.dsvs.Cpu(s.view_index));
-    s.srv_index = g.views.Allocate();
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
     srv.Format = d24 ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : DXGI_FORMAT_R32_FLOAT;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1283,9 +1412,7 @@ bool EnsureSurfaceResource(GuestSurface& s) {
     srv.Texture2D.MipLevels = 1;
     g.device->CreateShaderResourceView(s.resource.Get(), &srv, g.views.Cpu(s.srv_index));
   } else {
-    s.view_index = g.rtvs.Allocate();
     g.device->CreateRenderTargetView(s.resource.Get(), nullptr, g.rtvs.Cpu(s.view_index));
-    s.srv_index = g.views.Allocate();
     g.device->CreateShaderResourceView(s.resource.Get(), nullptr, g.views.Cpu(s.srv_index));
   }
   return true;
@@ -1340,6 +1467,13 @@ uint32_t SrvMapping(const GuestTexture& t) {
 bool EnsureTextureResource(GuestTexture& t) {
   if (t.resource) return true;
   if (!t.info_valid || t.format == DXGI_FORMAT_UNKNOWN || !t.width || !t.height) return false;
+  // [new_fix_24092026] 2.0.3: the view slot first (a full heap: logged, nothing
+  // created, no descriptor written past the heap).
+  const uint32_t srv_index = g.views.Allocate();
+  if (srv_index == UINT32_MAX) {
+    HeapFull("shader view");
+    return false;
+  }
   // [NEW FABLE VERSION] only resolve destinations follow the resolution scale
   // (a CPU-uploaded texture has to keep the guest's size and tiling), and they
   // hold exactly what the blit writes: one level, no mip chain.
@@ -1366,7 +1500,10 @@ bool EnsureTextureResource(GuestTexture& t) {
     REXLOG_ERROR("Native renderer: texture {:08X} {}x{} (host {}x{}) format {} host creation failed", t.guest, t.width,
                  t.height, t.hw(), t.hh(), uint32_t(t.format));
     // [NEW FABLE VERSION] same 1x fallback as the surfaces.
-    if (t.scale == 1) return false;
+    if (t.scale == 1) {
+      g.views.Free(srv_index);  // [new_fix_24092026] 2.0.3: never written
+      return false;
+    }
     REXLOG_WARN("Native renderer: retrying texture {:08X} at 1x (dp_native_scale {} did not fit)", t.guest, t.scale);
     t.scale = 1;
     desc.Width = t.width;
@@ -1374,13 +1511,14 @@ bool EnsureTextureResource(GuestTexture& t) {
     if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
                                                  &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                  IID_PPV_ARGS(&t.resource)))) {
+      g.views.Free(srv_index);  // [new_fix_24092026] 2.0.3: never written
       return false;
     }
   }
   t.state = D3D12_RESOURCE_STATE_COPY_DEST;
   NameResource(t.resource.Get(), fmt::format("texture {:08X} {}x{} x{} dxgi {}{}", t.guest, t.width, t.height, t.scale,
                                              uint32_t(t.format), t.is_resolve_target ? " resolve" : ""));  // [new_fix_24092026]
-  t.srv_index = g.views.Allocate();
+  t.srv_index = srv_index;  // [new_fix_24092026] 2.0.3: allocated above
   D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
   srv.Format = t.format;
   srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1400,10 +1538,26 @@ bool EnsureTextureResource(GuestTexture& t) {
   }
   srv.Shader4ComponentMapping = SrvMapping(t);
   g.device->CreateShaderResourceView(t.resource.Get(), &srv, g.views.Cpu(t.srv_index));
-  if (renderable && !t.is_cube && t.depth <= 1) {
-    t.rtv_index = g.rtvs.Allocate();
-    g.device->CreateRenderTargetView(t.resource.Get(), nullptr, g.rtvs.Cpu(t.rtv_index));
+  // [new_fix_24092026] 2.0.3: no RTV here any more. Every renderable texture got
+  // one for good (textures are never destroyed, the heap holds 512); only
+  // resolve destinations need it, EnsureTextureRtv makes it on the first resolve.
+  return true;
+}
+
+// [new_fix_24092026] 2.0.3: the whole-texture RTV of a 2D resolve destination.
+bool EnsureTextureRtv(GuestTexture& t) {
+  if (t.rtv_index != UINT32_MAX) return true;
+  if (!t.resource || t.is_cube || t.depth > 1 || t.format == DXGI_FORMAT_BC1_UNORM ||
+      t.format == DXGI_FORMAT_BC2_UNORM || t.format == DXGI_FORMAT_BC3_UNORM) {
+    return false;
   }
+  const uint32_t index = g.rtvs.Allocate();
+  if (index == UINT32_MAX) {
+    HeapFull("render target view");
+    return false;
+  }
+  g.device->CreateRenderTargetView(t.resource.Get(), nullptr, g.rtvs.Cpu(index));
+  t.rtv_index = index;
   return true;
 }
 
@@ -1526,8 +1680,8 @@ void WatchTexture(GuestTexture& t) {
 // buttons. Same hash, same files, same overlay rules: see native_texrep.h.
 void DropHostTexture(GuestTexture& t) {
   ForgetWatch(&t);
-  if (t.srv_index != UINT32_MAX) g.views.Free(t.srv_index);
-  if (t.rtv_index != UINT32_MAX) g.rtvs.Free(t.rtv_index);
+  RetireDescriptor(g.views, t.srv_index);  // [new_fix_24092026] 2.0.3: after the GPU, like the resource
+  g.rtvs.Free(t.rtv_index);                 // CPU-only heap: read when a command is recorded
   for (uint32_t r : t.slice_rtvs) g.rtvs.Free(r);
   t.slice_rtvs.clear();
   t.srv_index = UINT32_MAX;
@@ -1631,6 +1785,7 @@ bool UploadReplacement(GuestTexture& t) {
     t.resource.Reset();
     return false;
   }
+  NameResource(t.resource.Get(), fmt::format("replacement {:016X} for texture {:08X}", hash, t.guest));  // [new_fix_24092026] 2.0.3
   t.state = D3D12_RESOURCE_STATE_COPY_DEST;
   t.scale = 1;
   UploadRing& ring = g.upload[g.frame_index];
@@ -1665,6 +1820,12 @@ bool UploadReplacement(GuestTexture& t) {
     g.stats.upload_bytes += total;
   }
   t.srv_index = g.views.Allocate();
+  if (t.srv_index == UINT32_MAX) {  // [new_fix_24092026] 2.0.3
+    HeapFull("shader view");
+    RetireResource(std::move(t.resource));
+    t.state = D3D12_RESOURCE_STATE_COMMON;
+    return false;
+  }
   D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
   srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1945,6 +2106,8 @@ bool UploadBuffer(GuestBuffer& b) {
       return false;
     }
     b.state = D3D12_RESOURCE_STATE_COPY_DEST;
+    NameResource(b.resource.Get(), fmt::format("{} buffer {:08X} {} bytes", b.index ? "index" : "vertex", b.guest,
+                                               b.size));  // [new_fix_24092026] 2.0.3: DRED names it
   }
   UploadRing& ring = g.upload[g.frame_index];
   const size_t bytes = (b.size + 3) & ~3u;
@@ -2044,7 +2207,9 @@ struct BindState {
   D3D12_VIEWPORT viewport = {0, 0, 1280, 720, 0, 1};
   bool viewport_valid = false;
   // Host-side "what is bound on the command list" mirror.
-  uint32_t bound_rt0 = UINT32_MAX, bound_ds = UINT32_MAX;
+  // [new_fix_24092026] 2.0.3: the bound GuestSurface objects (not guest addresses:
+  // an object re-created at the same address must be bound again).
+  uintptr_t bound_rt0 = UINTPTR_MAX, bound_ds = UINTPTR_MAX;
   ID3D12PipelineState* bound_pso = nullptr;
   bool root_bound = false;  // [NEW FABLE VERSION] game root signature + bindless tables set on the list
 };
@@ -2192,7 +2357,7 @@ bool BindTargets(GuestSurface** out_rt, GuestSurface** out_ds, bool rt_cleared =
   if (rt && !rt_cleared) SyncEdramAlias(*rt);
   if (rt) Barrier(rt->resource.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
   if (ds) Barrier(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-  const uint32_t rt_id = rt ? rt->guest : 0, ds_id = ds ? ds->guest : 0;
+  const uintptr_t rt_id = reinterpret_cast<uintptr_t>(rt), ds_id = reinterpret_cast<uintptr_t>(ds);  // [new_fix_24092026] 2.0.3
   if (rt_id != st.bound_rt0 || ds_id != st.bound_ds) {
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rt ? g.rtvs.Cpu(rt->view_index) : D3D12_CPU_DESCRIPTOR_HANDLE{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = ds ? g.dsvs.Cpu(ds->view_index) : D3D12_CPU_DESCRIPTOR_HANDLE{};
@@ -2574,6 +2739,7 @@ void RecordDump(const char* what, uint32_t guest, ID3D12Resource* res, D3D12_RES
                 uint32_t h, DXGI_FORMAT format, uint32_t slice = 0, uint32_t slices = 1);
 void ExecuteDraw(const DrawArgs& a) {
   ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
+  RecordScope record_scope(__func__);  // [new_fix_24092026] 2.0.3
   if (!InitContext() || !BeginFrame()) {
     g.stats.draws_skipped++;
     return;
@@ -3039,7 +3205,7 @@ void Blit(uint32_t src_srv, D3D12_CPU_DESCRIPTOR_HANDLE dst_rtv, DXGI_FORMAT dst
   }
   g.list->DrawInstanced(3, 1, 0, 0);
   // Invalidate the game-side mirror: the next draw rebinds targets/PSO.
-  st.bound_rt0 = st.bound_ds = UINT32_MAX;
+  st.bound_rt0 = st.bound_ds = UINTPTR_MAX;  // [new_fix_24092026] 2.0.3
   st.bound_pso = nullptr;
   st.root_bound = false;  // [NEW FABLE VERSION] the blit used its own root signature
 }
@@ -3138,6 +3304,7 @@ void RecordDump(const char* what, uint32_t guest, ID3D12Resource* res, D3D12_RES
                                                IID_PPV_ARGS(&item.readback)))) {
     return;
   }
+  item.readback->SetName(L"DP1 dump readback");  // [new_fix_24092026] 2.0.3
   const D3D12_RESOURCE_STATES before = state;
   Barrier(res, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
   D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
@@ -3164,7 +3331,7 @@ void RecordDump(const char* what, uint32_t guest, ID3D12Resource* res, D3D12_RES
 
 void WriteDumps(uint32_t frame) {
   if (g_dump_items.empty()) return;
-  const UINT64 last = g.fence_next - 1;
+  const UINT64 last = g.fences.LastSubmitted();  // [new_fix_24092026] 2.0.3
   if (g.fence->GetCompletedValue() < last) {
     g.fence->SetEventOnCompletion(last, g.fence_event);
     WaitForSingleObject(g.fence_event, INFINITE);
@@ -3296,6 +3463,13 @@ void OnCreateSurface(uint32_t width, uint32_t height, uint32_t format, uint32_t 
   REXLOG_INFO("Native renderer: surface {:08X} {}x{} format {:08X} ({}) edram base {}", surface, width, height, format,
               f.depth ? "depth" : "colour", s->edram_base);
   std::lock_guard<std::mutex> lock(g_registry_mutex);
+  // [new_fix_24092026] 2.0.3: a surface object re-created at the address of one
+  // we never saw released: its host target can still be in use by a submitted
+  // frame, so it is retired like a Release instead of destroyed here.
+  if (auto it = g_surfaces.find(surface); it != g_surfaces.end()) {
+    g_released_surfaces.push_back(std::move(it->second));  // torn down at the next frame start
+    g_recreated_count.fetch_add(1, std::memory_order_relaxed);
+  }
   g_surfaces[surface] = std::move(s);
 }
 
@@ -3313,6 +3487,12 @@ static void RegisterBuffer(uint32_t guest, bool index) {
                 guest, b->address, b->size, b->endian, b->index32);
   }
   std::lock_guard<std::mutex> lock(g_registry_mutex);
+  // [new_fix_24092026] 2.0.3: as OnCreateSurface (the old entry, its resource
+  // and its page watch are torn down at the next frame start).
+  if (auto it = g_buffers.find(guest); it != g_buffers.end()) {
+    g_released_buffers.push_back(std::move(it->second));
+    g_recreated_count.fetch_add(1, std::memory_order_relaxed);
+  }
   g_buffers[guest] = std::move(b);
 }
 void OnCreateVertexBuffer(uint32_t vb) { RegisterBuffer(vb, false); }
@@ -3536,23 +3716,23 @@ void OnRelease(uint32_t object, uint32_t refcount_before) {
   g_object_key.erase(object);
   if (auto it = g_textures.find(object); it != g_textures.end()) {
     ForgetWatch(it->second.get());
-    if (it->second->srv_index != UINT32_MAX) g.views.Free(it->second->srv_index);
-    if (it->second->rtv_index != UINT32_MAX) g.rtvs.Free(it->second->rtv_index);
+    RetireDescriptor(g.views, it->second->srv_index);  // [new_fix_24092026] 2.0.3
+    g.rtvs.Free(it->second->rtv_index);
     for (uint32_t r : it->second->slice_rtvs) g.rtvs.Free(r);
     RetireResource(std::move(it->second->resource));
     g_textures.erase(it);
     return;
   }
+  // [new_fix_24092026] 2.0.3: unlinked here, torn down at the next frame start
+  // (DestroyReleasedObjects): this can be a loading thread, and the recording
+  // thread may be using the object right now.
   if (auto it = g_buffers.find(object); it != g_buffers.end()) {
-    ForgetWatch(it->second.get());
-    RetireResource(std::move(it->second->resource));
+    g_released_buffers.push_back(std::move(it->second));
     g_buffers.erase(it);
     return;
   }
   if (auto it = g_surfaces.find(object); it != g_surfaces.end()) {
-    if (it->second->view_index != UINT32_MAX) (it->second->depth ? g.dsvs : g.rtvs).Free(it->second->view_index);
-    if (it->second->srv_index != UINT32_MAX) g.views.Free(it->second->srv_index);
-    RetireResource(std::move(it->second->resource));
+    g_released_surfaces.push_back(std::move(it->second));
     g_surfaces.erase(it);
     return;
   }
@@ -3632,6 +3812,7 @@ void OnDrawVerticesUP(uint32_t prim, uint32_t count, uint32_t data, uint32_t str
 
 void OnClear(uint32_t flags, uint32_t color_ptr, float z, uint32_t stencil) {
   ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
+  RecordScope record_scope(__func__);  // [new_fix_24092026] 2.0.3
   if (!InitContext() || !BeginFrame()) return;
   GuestSurface* rt = nullptr;
   GuestSurface* ds = nullptr;
@@ -3697,6 +3878,7 @@ static uint32_t SliceRtv(GuestTexture& t, uint32_t slice) {
 void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_t dest_point_ptr,
                uint32_t dest_level, uint32_t dest_slice, uint32_t clear_color_ptr, float clear_z) {
   ScopedCpuTimer cpu_timer;  // [NEW FABLE VERSION]
+  RecordScope record_scope(__func__);  // [new_fix_24092026] 2.0.3
   if (!InitContext() || !BeginFrame()) return;
   GuestTexture* t = TextureForObject(dest_texture);
   const bool depth = (flags & 4) != 0;
@@ -3783,7 +3965,16 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
       srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
       srv.Texture2D.MipLevels = 1;
     }
-    g.device->CreateShaderResourceView(t->resource.Get(), &srv, g.views.Cpu(t->srv_index));
+    // [new_fix_24092026] 2.0.3: a new slot; the old one can still be read by a
+    // submitted frame (native_retire.h). A full heap keeps the 2.0.2 rewrite.
+    const uint32_t fresh = g.views.Allocate();
+    if (fresh != UINT32_MAX) {
+      g.device->CreateShaderResourceView(t->resource.Get(), &srv, g.views.Cpu(fresh));
+      RetireDescriptor(g.views, t->srv_index);
+      t->srv_index = fresh;
+    } else {
+      g.device->CreateShaderResourceView(t->resource.Get(), &srv, g.views.Cpu(t->srv_index));
+    }
   }
   t->is_resolve_target = true;
   t->dirty = false;
@@ -3793,8 +3984,8 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   // the mips below it would otherwise keep stale CPU content forever.
   if (t->resource && (t->mip_levels > 1 || t->scale != ScaleFor(t->width, t->height))) {
     ForgetWatch(t);
-    if (t->srv_index != UINT32_MAX) g.views.Free(t->srv_index);
-    if (t->rtv_index != UINT32_MAX) g.rtvs.Free(t->rtv_index);
+    RetireDescriptor(g.views, t->srv_index);  // [new_fix_24092026] 2.0.3
+    g.rtvs.Free(t->rtv_index);
     for (uint32_t r : t->slice_rtvs) g.rtvs.Free(r);
     t->slice_rtvs.clear();
     t->srv_index = UINT32_MAX;
@@ -3806,7 +3997,8 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   }
   const bool block_compressed = t->format == DXGI_FORMAT_BC1_UNORM || t->format == DXGI_FORMAT_BC2_UNORM ||
                                 t->format == DXGI_FORMAT_BC3_UNORM;
-  if (!EnsureTextureResource(*t) || block_compressed || (t->rtv_index == UINT32_MAX && !t->is_cube && t->depth <= 1)) {
+  if (!EnsureTextureResource(*t) || block_compressed ||
+      (!t->is_cube && t->depth <= 1 && !EnsureTextureRtv(*t))) {  // [new_fix_24092026] 2.0.3: RTV on first resolve
     if (g.log_budget) {
       --g.log_budget;
       REXLOG_WARN("Native renderer: resolve destination {:08X} has no host RTV (format {})", dest_texture, uint32_t(t->format));
@@ -3843,6 +4035,7 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
 
 RendererStats OnSwap(uint32_t front_buffer_texture) {
   const int64_t swap_t0 = Qpc();  // [NEW FABLE VERSION]
+  RecordScope record_scope(__func__);  // [new_fix_24092026] 2.0.3
   RendererStats stats = g.stats;
   stats.watch_hits = g_watch_hits.exchange(0, std::memory_order_relaxed);
   if (!InitContext()) return stats;
@@ -3912,7 +4105,7 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
     }
   }
   g.frame_number++;
-  st.bound_rt0 = st.bound_ds = UINT32_MAX;
+  st.bound_rt0 = st.bound_ds = UINTPTR_MAX;  // [new_fix_24092026] 2.0.3
   st.bound_pso = nullptr;
   st.root_bound = false;  // [NEW FABLE VERSION] new command list next frame
   // The game's vertex streaming pools (4 x 1.3 MB, FixBufferCopy threads) are
@@ -3972,6 +4165,14 @@ std::string PerfSummaryAndReset() {
       f[0], f[1], f[2], frames, m[0], m[1], m[2], c[0], c[1], c[2], w[0], w[1], w[2], gpu[0], gpu[1], gpu[2],
       gpu_frames);
   if (REXCVAR_GET(dp_native_perf_threads)) s += "; " + ThreadCpuReport();  // [new_fix_24092026]
+  // [new_fix_24092026] 2.0.3: host object lifetime (native_retire.h), shader
+  // view heap use, and the recording-path turn check (RecordScope).
+  s += fmt::format("; retired {} freed {} waiting {}, re-created without Release {}, views {}/{} rtv {}/{} dsv {}/{}, recording overlaps {}",
+                   g_retired_count.exchange(0, std::memory_order_relaxed),
+                   g_freed_count.exchange(0, std::memory_order_relaxed), Retired().size(),
+                   g_recreated_count.load(std::memory_order_relaxed), g.views.InUse(), kViewHeapSize, g.rtvs.InUse(),
+                   kRtvHeapSize, g.dsvs.InUse(), kDsvHeapSize,
+                   g_record_overlaps.load(std::memory_order_relaxed));
   g_perf.thread_ms.clear();
   g_perf.frame_ms.clear();
   g_perf.cpu_ms.clear();
@@ -4165,8 +4366,13 @@ void RendererBlitToPresenter(uint32_t src_srv, ID3D12Resource* dest, uint32_t wi
                                                  IID_PPV_ARGS(&scratch)))) {
       return;
     }
+    scratch->SetName(L"DP1 present scratch");  // [new_fix_24092026] 2.0.3
     scratch_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
     if (scratch_rtv == UINT32_MAX) scratch_rtv = g.rtvs.Allocate();
+    if (scratch_rtv == UINT32_MAX) {  // [new_fix_24092026] 2.0.3
+      HeapFull("render target view");
+      return;
+    }
     g.device->CreateRenderTargetView(scratch.Get(), nullptr, g.rtvs.Cpu(scratch_rtv));
     scratch_w = width;
     scratch_h = height;
@@ -4195,8 +4401,14 @@ void RendererBlitToPresenter(uint32_t src_srv, ID3D12Resource* dest, uint32_t wi
                                                       D3D12_HEAP_FLAG_NONE, &ld, D3D12_RESOURCE_STATE_COPY_DEST,
                                                       nullptr, IID_PPV_ARGS(&lut)))) {
         lut_state = D3D12_RESOURCE_STATE_COPY_DEST;
+        lut->SetName(L"DP1 display gamma ramp");  // [new_fix_24092026] 2.0.3
         if (g_gamma_lut_srv == UINT32_MAX) g_gamma_lut_srv = g.views.Allocate();
-        g.device->CreateShaderResourceView(lut.Get(), nullptr, g.views.Cpu(g_gamma_lut_srv));
+        if (g_gamma_lut_srv != UINT32_MAX) {  // [new_fix_24092026] 2.0.3
+          g.device->CreateShaderResourceView(lut.Get(), nullptr, g.views.Cpu(g_gamma_lut_srv));
+        } else {
+          HeapFull("shader view");
+          lut.Reset();  // never used by a command list yet
+        }
       }
     }
     if (lut && version != 0 && version != lut_version) {

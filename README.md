@@ -7,19 +7,19 @@
 **A native Windows port of *Deadly Premonition* (Xbox 360, 2010) by static recompilation. No emulator.**<br>
 60 FPS on the console's own time base · real mouse look · keyboard and PlayStation button prompts · FSR 3 and 2× supersampling · a launcher that updates itself · PAL and USA discs
 
-[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.2/DPRecomp-2.0.2-win64.zip)
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.2/DPRecomp-2.0.2-win64.zip)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip)
 [![Issues](https://img.shields.io/github/issues/LittleBitUA/DPRecomp?style=for-the-badge&color=orange)](https://github.com/LittleBitUA/DPRecomp/issues)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 2.0.2 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.2/DPRecomp-2.0.2-win64.zip)
+## [⬇ &nbsp;Download 2.0.3 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip)
 
-`DPRecomp-2.0.2-win64.zip` · 42 MB · Windows 10 / 11 64-bit
+`DPRecomp-2.0.3-win64.zip` · 47 MB · Windows 10 / 11 64-bit
 
-[Release notes](docs/RELEASE-NOTES-2.0.2.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-2.0.3.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -46,7 +46,7 @@
 
 **You need:** Windows 10 / 11 64-bit · a Direct3D 12 GPU with rasterizer-ordered views (NVIDIA GTX 900+, AMD RX 400+, Intel Arc; recent integrated graphics at 1×) · ~6 GB free for the game data · your *Deadly Premonition* Xbox 360 disc image or extracted files.
 
-1. **Download** [`DPRecomp-2.0.2-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.2/DPRecomp-2.0.2-win64.zip) and unzip it anywhere outside *Program Files*.
+1. **Download** [`DPRecomp-2.0.3-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.3/DPRecomp-2.0.3-win64.zip) and unzip it anywhere outside *Program Files*.
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
@@ -55,6 +55,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new
+
+**2.0.3:** fixes the native renderer's crashes ("GPU lost") while exploring and after closing the pause menu. [Notes](docs/RELEASE-NOTES-2.0.3.md).
 
 **2.0.2:** the native renderer no longer shows a black screen after updating with the launcher's Update button (its shader file was never copied), and if the graphics card stops responding the game now says so and closes instead of freezing, with the details in the log. [Notes](docs/RELEASE-NOTES-2.0.2.md).
 

@@ -87,3 +87,6 @@ set_target_properties(dp_native_gamma_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # [new_fix_24092026] issue #33: where the native shader cache is looked up
 add_executable(dp_native_cache_path_test tests/native_cache_path_test.cpp)
 set_target_properties(dp_native_cache_path_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [new_fix_24092026] 2.0.3, issues #33/#34: GPU lifetime of retired host objects
+add_executable(dp_native_retire_test tests/native_retire_test.cpp)
+set_target_properties(dp_native_retire_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
