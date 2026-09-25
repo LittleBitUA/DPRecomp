@@ -30,6 +30,9 @@
 #include "native/native_graphics_system.h"
 #include "native/native_renderer.h"
 
+#include <d3d12.h>  // [new_fix_25092026_glitch] dp_d3d12_gpu_validation
+#include <wrl/client.h>
+
 // ---------------------------------------------------------------------------
 // XDK entry names per region (2026-09-20). DPX_<PAL address> expands to the
 // PAL or the USA function; the USA names come from find_usa_func.py (the XDK
@@ -127,6 +130,31 @@ REXCVAR_DEFINE_BOOL(dp_native_trace, false, "DP1",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 // [NEW FABLE VERSION] 2026-09-22: the frame statistics line (draws, uploads, PSOs,
 // frame/CPU/GPU time percentiles) every N frames; 600 = every 10 s at 60 fps.
+// [new_fix_25092026_glitch] #37 (Radeon: characters lit by the ambient light only).
+// D3D12 GPU-based validation: every descriptor a shader reads is checked on the
+// GPU (wrong type, uninitialised, out of the heap), which NVIDIA tolerates and AMD
+// does not. Must run before the device exists: called from OnPostInitLogging.
+REXCVAR_DEFINE_BOOL(dp_d3d12_gpu_validation, false, "DP1",
+                    "Diagnostics: D3D12 GPU-based validation (very slow; needs d3d12_debug = true for "
+                    "its messages in the log and the Windows optional feature Graphics Tools)");
+
+void DPEnableGpuValidation() {
+  if (!REXCVAR_GET(dp_d3d12_gpu_validation)) return;
+  HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+  auto get_debug = d3d12 ? reinterpret_cast<PFN_D3D12_GET_DEBUG_INTERFACE>(
+                               GetProcAddress(d3d12, "D3D12GetDebugInterface"))
+                         : nullptr;
+  Microsoft::WRL::ComPtr<ID3D12Debug1> debug;
+  if (!get_debug || FAILED(get_debug(IID_PPV_ARGS(&debug)))) {
+    REXLOG_WARN("dp_d3d12_gpu_validation: no D3D12 debug layer (install the Windows optional feature "
+                "Graphics Tools)");
+    return;
+  }
+  debug->EnableDebugLayer();
+  debug->SetEnableGPUBasedValidation(TRUE);
+  REXLOG_INFO("D3D12 GPU-based validation enabled (dp_d3d12_gpu_validation; messages need d3d12_debug = true)");
+}
+
 REXCVAR_DEFINE_INT32(dp_native_stats_frames, 600, "DP1",
                      "Native renderer: print the frame statistics line every N frames (0 = never)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

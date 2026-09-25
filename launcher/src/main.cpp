@@ -396,7 +396,7 @@ constexpr int kBtnUpdate = 4;
 // Embedded launcher version. Bump on every release. The boot-time GitHub
 // API probe compares this to the latest release `tag_name` to decide whether
 // to show the "Update available" banner. Keep resources.rc in sync.
-constexpr const wchar_t* kLauncherVersion = L"v2.0.4";
+constexpr const wchar_t* kLauncherVersion = L"v2.0.5";
 // v1.1: opt-in shader cache sharing. When the user enables "Share Shader
 // Cache" (launcher.ini: launcher_share_shader_cache = on) the launcher zips
 // userdata\cache\shaders\shareable\*.xsh / *.xpso (game shader microcode +
@@ -1293,9 +1293,10 @@ void DefineCvars() {
   // (dp_skip_intro in deadlyprem_hooks.cpp). Off = the game as shipped.
   AddCvar("dp_skip_intro", "Skip Intro", kCatAdvanced,
           K::kEnum, "off",
-          {{"off",   "Off (publisher logos, then the title screen)"},
-           {"logos", "Skip the logos (straight to the title screen)"},
-           {"menu",  "Skip the logos and press Start (straight to the main menu)"}});
+          // [new_fix_25092026_glitch] the skip now also covers the opening movie.
+          {{"off",   "Off (publisher logos and the opening movie, then the title screen)"},
+           {"logos", "Skip the logos and the opening movie (straight to the title screen)"},
+           {"menu",  "Skip the logos and the movie, press Start (straight to the main menu)"}});
 
   // ===== MOUSE =====
   AddCvar("mnk_mode", "Mouse & Keyboard Mode", kCatMouse, K::kBool, "true");

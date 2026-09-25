@@ -47,6 +47,7 @@
 
 #include "deadlyprem_pad_layout.h"
 #include "deadlyprem_title_skip.h"
+#include "deadlyprem_keyboard_driving.h"  // [new_fix_25092026_glitch]
 
 #include "deadlyprem_pch.h"  // PPCRegister / PPCContext (generated/default is on the include path)
 
@@ -301,9 +302,10 @@ void DPAudioCueHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5, PPCRegist
 // logic and the measured state sequence are in src/deadlyprem_title_skip.h
 // (tests/title_skip_test.cpp); this hook only reads and writes guest memory.
 REXCVAR_DEFINE_STRING(dp_skip_intro, "off", "DP1",
-                      "Skip the intro: off = the four publisher logos play; logos = jump "
-                      "straight to the title screen; menu = also press Start for you and land "
-                      "in the main menu. Exact names; anything else = off (DPRecomp #19)")
+                      "Skip the intro: off = the four publisher logos and the opening movie "
+                      "play; logos = skip both, straight to the title screen; menu = also press "
+                      "Start for you and land in the main menu. Exact names; anything else = "
+                      "off (DPRecomp #19)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(dp_title_state_log, false, "DP1",
                     "Log the title mode's state transitions (logos, press start, attract demo, "
@@ -361,13 +363,18 @@ dp::SkipIntro DPSkipIntroLevel() {
   return level;
 }
 
-// Title mode bookkeeping. The hook runs on the game thread only.
+// Title mode bookkeeping. [new_fix_25092026_glitch] Not one thread: the init
+// (phase 0) runs on the Main XThread, the per-frame updates on the GameThread
+// (log 017: both threads alive at once). Whatever the game's own handoff
+// guarantees, the lock orders them here; uncontended, once a frame.
+std::mutex g_title_mutex;
 dp::TitleSkipState g_title;
 uint32_t g_title_block = 0;
 }  // namespace
 
 void DPTitleModeHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
   const uint32_t phase = r4.u32 & 0xFF;
+  std::lock_guard<std::mutex> title_lock(g_title_mutex);
   const bool log = REXCVAR_GET(dp_title_state_log);
   static uint32_t last_state = 0xFFFFFFFFu, last_next = 0xFFFFFFFFu, last_sub = 0xFFFFFFFFu;
   if (phase == dp::kTitlePhaseInit) {
@@ -391,7 +398,13 @@ void DPTitleModeHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
                 DPLoadF32(block + 48), DPSecondsSinceStart());
     last_state = state; last_next = next; last_sub = sub;
   }
-  const dp::TitleSkipAction a = dp::TitleSkipOnUpdate(g_title, DPSkipIntroLevel(), state, next, sub);
+  // [new_fix_25092026_glitch] the logs name the parsed level, never the cvar
+  // string itself: hot reload writes that string from another thread.
+  const dp::SkipIntro level = DPSkipIntroLevel();
+  const char* const level_name = level == dp::SkipIntro::kMenu    ? "menu"
+                                 : level == dp::SkipIntro::kLogos ? "logos"
+                                                                  : "off";
+  const dp::TitleSkipAction a = dp::TitleSkipOnUpdate(g_title, level, state, next, sub);
   if (a.log_block_mismatch) {
     REXLOG_WARN("title block 0x{:08X}: state {} does not match start state {}; intro skip disabled "
                 "for this title entry (dp_title_block)",
@@ -402,17 +415,23 @@ void DPTitleModeHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
     DPStoreU32(block + 8, dp::kTitleStateTitleFadeIn);
     DPStoreF32(block + kTitleTimerOffset, 0.0f);
     REXLOG_INFO("Intro skipped: title state 80 -> 97 (dp_skip_intro = {}, t={:.2f}s)",
-                REXCVAR_GET(dp_skip_intro), DPSecondsSinceStart());
+                level_name, DPSecondsSinceStart());
   }
   if (a.log_started_pulsing) {
     REXLOG_INFO("Intro skipped: pressing Start on the title screen (dp_skip_intro = menu, t={:.2f}s)",
                 DPSecondsSinceStart());
   }
-  if (a.inject_start) {
-    rex::input::InjectButtons(0, static_cast<uint16_t>(rex::input::X_INPUT_GAMEPAD_START),
-                              dp::kTitleStartPulsePolls);
+  if (a.log_movie_pulsing) {  // [new_fix_25092026_glitch]
+    REXLOG_INFO("Intro skipped: pressing Start over the opening movie (dp_skip_intro = {}, t={:.2f}s)",
+                level_name, DPSecondsSinceStart());
   }
-  if (a.cancel_injection) rex::input::InjectButtons(0, 0, 0);
+  dp::ApplyTitleSkipPad(  // [new_fix_25092026_glitch] cancel first, then the press
+      a,
+      [] {
+        rex::input::InjectButtons(0, static_cast<uint16_t>(rex::input::X_INPUT_GAMEPAD_START),
+                                  dp::kTitleStartPulsePolls);
+      },
+      [] { rex::input::InjectButtons(0, 0, 0); });
   if (a.log_start_left) {
     if (a.left_state == dp::kTitleStateStartAccepted) {
       REXLOG_INFO("Intro skipped: Start accepted after {} frames", a.pulse_frames);
@@ -424,6 +443,13 @@ void DPTitleModeHook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
   if (a.log_gave_up) {
     REXLOG_WARN("Intro skipped: the title screen ignored Start for {} frames; giving up",
                 dp::kTitleStartPulseMaxFrames);
+  }
+  if (a.log_movie_left) {  // [new_fix_25092026_glitch]
+    REXLOG_INFO("Intro skipped: opening movie over (state {}) after {} frames of Start, t={:.2f}s",
+                static_cast<int32_t>(a.left_state), a.movie_frames, DPSecondsSinceStart());
+  }
+  if (a.log_movie_gave_up) {
+    REXLOG_WARN("Intro skipped: the opening movie ignored Start for {} frames; giving up", a.movie_frames);
   }
 }
 
@@ -447,6 +473,11 @@ bool DPInVehicle();  // deadlyprem_camera_hook.cpp
 REXCVAR_DEFINE_BOOL(dp_pad_layout_log, false, "DP1",
                     "Log every change of A / LT / RT on a physical pad as raw -> remapped (first 400 lines); "
                     "for DPRecomp #19 reports")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// [new_fix_25092026_glitch] see src/deadlyprem_keyboard_driving.h
+REXCVAR_DEFINE_BOOL(dp_keyboard_driving, true, "DP1",
+                    "Keyboard in the car: W accelerates and S brakes / reverses (the pad's RT / LT), so "
+                    "Space no longer has to be held and the mouse stays on the camera")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
@@ -482,6 +513,20 @@ void DPInstallPadLayoutFilter() {
       if (in_vehicle != was && logged_vehicle.compare_exchange_strong(was, in_vehicle)) {
         REXLOG_INFO("Controller layout: York {} driving, Director's Cut remap {}", in_vehicle ? "is" : "stopped",
                     in_vehicle ? "paused (car on RT/LT)" : "active");
+      }
+    }
+    // [new_fix_25092026_glitch] keyboard in the car: stick Y -> RT / LT.
+    if (synthetic && REXCVAR_GET(dp_keyboard_driving)) {
+      int16_t ly = static_cast<int16_t>(pad.thumb_ly);
+      uint8_t klt = pad.left_trigger, krt = pad.right_trigger;
+      if (dp::ApplyKeyboardDriving(in_vehicle, ly, klt, krt)) {
+        pad.thumb_ly = ly;
+        pad.left_trigger = klt;
+        pad.right_trigger = krt;
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+          REXLOG_INFO("Keyboard driving: W / S drive the car's accelerator / brake (dp_keyboard_driving)");
+        }
       }
     }
     // Keyboard/mouse emulation already binds keys to the game's own buttons

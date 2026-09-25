@@ -21,6 +21,7 @@
 #include "native/native_graphics_system.h"
 
 void DPInstallPadLayoutFilter();  // src/deadlyprem_hooks.cpp
+void DPEnableGpuValidation();     // src/native/native_hooks.cpp [new_fix_25092026_glitch] #37
 
 class DeadlypremApp : public rex::ReXApp {
  public:
@@ -62,9 +63,9 @@ class DeadlypremApp : public rex::ReXApp {
     // stamp>" in SetupPresentation; this hook runs right after it.
     // F3 debug overlay watermark (ASCII only: the overlay font has no special glyphs).
     rex::ui::SetDebugOverlayBuildStamp(
-        "Deadly Premonition Recompilation 2.0.4 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+        "Deadly Premonition Recompilation 2.0.5 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
     if (window()) {
-      window()->SetTitle("Deadly Premonition Recompilation (USA) 2.0.4 | «Little Bit»");
+      window()->SetTitle("Deadly Premonition Recompilation (USA) 2.0.5 | «Little Bit»");
     }
     rex::PathConfig runtime_paths = defaults;
     const auto& game_root = runtime_paths.game_data_root;
@@ -173,8 +174,9 @@ class DeadlypremApp : public rex::ReXApp {
   // Other virtual hooks available for customization:
   void OnPostInitLogging() override {
     DPInstallPadLayoutFilter();  // #19 controller layout (deadlyprem_hooks.cpp)
+    DPEnableGpuValidation();     // [new_fix_25092026_glitch] #37, before the D3D12 device exists
     // DP1 diagnostics: build stamp as the first application line of every log.
-    REXLOG_INFO("Deadly Premonition Recompilation 2.0.4 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
+    REXLOG_INFO("Deadly Premonition Recompilation 2.0.5 USA (build " __DATE__ ") - ReXGlue 0.10 nightly - by «Little Bit»");
   }
 
   // Other virtual hooks (unused here):

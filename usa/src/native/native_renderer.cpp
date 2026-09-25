@@ -615,6 +615,15 @@ inline int64_t Qpc() {
   QueryPerformanceCounter(&li);
   return li.QuadPart;
 }
+// [new_fix_25092026_glitch] A perf window is emptied by PerfSummaryAndReset;
+// with dp_native_stats_frames = 0 that never runs again after frame 0, so each
+// vector would grow by a float per frame forever. Past kPerfWindowMax samples
+// (10 min at 60 fps) the window restarts from the newest sample instead.
+constexpr size_t kPerfWindowMax = 36000;
+inline void PerfPush(std::vector<float>& v, double ms) {
+  if (v.size() >= kPerfWindowMax) v.clear();
+  v.push_back(float(ms));
+}
 inline double QpcToMs(int64_t ticks) {
   static const double k = [] {
     LARGE_INTEGER f;
@@ -626,6 +635,7 @@ inline double QpcToMs(int64_t ticks) {
 struct PerfWindow {
   std::vector<float> frame_ms, cpu_ms, wait_ms, gpu_ms;
   std::vector<float> thread_ms;      // [new_fix_24092026] main thread CPU per frame
+  std::vector<float> present_ms;     // [new_fix_25092026_glitch] OnSwap's PresentFromRenderer per frame
   uint64_t last_thread_cycles = 0;   // [new_fix_24092026]
   int64_t last_swap = 0;
   int64_t cpu_ticks = 0;   // native path CPU time this frame
@@ -1069,7 +1079,7 @@ bool BeginFrame() {
   if (g.ts_mapped && g.ts_pending[g.frame_index]) {
     g.ts_pending[g.frame_index] = false;
     const uint64_t t0 = g.ts_mapped[g.frame_index * 2], t1 = g.ts_mapped[g.frame_index * 2 + 1];
-    if (t1 > t0 && g.ts_frequency) g_perf.gpu_ms.push_back(float(double(t1 - t0) * 1000.0 / double(g.ts_frequency)));
+    if (t1 > t0 && g.ts_frequency) PerfPush(g_perf.gpu_ms, double(t1 - t0) * 1000.0 / double(g.ts_frequency));
   }
   DestroyReleasedObjects();  // [new_fix_24092026] 2.0.3
   ReleaseRetired();          // [new_fix_24092026] 2.0.3: by fence, not by frame slot (native_retire.h)
@@ -4104,7 +4114,9 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
       // Present: the presenter callback records the blit and submits the frame.
       Barrier(front->resource.Get(), front->state,
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      const int64_t present_t0 = Qpc();  // [new_fix_25092026_glitch] issue #36
       system->PresentFromRenderer(front->srv_index, front->hw(), front->hh());  // [NEW FABLE VERSION] host size
+      PerfPush(g_perf.present_ms, QpcToMs(Qpc() - present_t0));
     }
     if (g.recording) SubmitFrame();
     if (dump) WriteDumps(g.frame_number);
@@ -4133,17 +4145,17 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
   {
     const int64_t now = Qpc();
     g_perf.cpu_ticks += now - swap_t0;
-    if (g_perf.last_swap) g_perf.frame_ms.push_back(float(QpcToMs(now - g_perf.last_swap)));
+    if (g_perf.last_swap) PerfPush(g_perf.frame_ms, QpcToMs(now - g_perf.last_swap));
     g_perf.last_swap = now;
-    g_perf.cpu_ms.push_back(float(QpcToMs(g_perf.cpu_ticks)));
-    g_perf.wait_ms.push_back(float(QpcToMs(g_perf.wait_ticks)));
+    PerfPush(g_perf.cpu_ms, QpcToMs(g_perf.cpu_ticks));
+    PerfPush(g_perf.wait_ms, QpcToMs(g_perf.wait_ticks));
     // [new_fix_24092026] CPU the Swap thread (the game's main thread) really
     // used since the previous Swap: game code + XDK + native, waits excluded.
     ULONG64 cycles = 0;
     if (QueryThreadCycleTime(GetCurrentThread(), &cycles)) {
       const double per_ms = TscPerMs();
       if (g_perf.last_thread_cycles && per_ms > 0.0 && cycles >= g_perf.last_thread_cycles) {
-        g_perf.thread_ms.push_back(float(double(cycles - g_perf.last_thread_cycles) / per_ms));
+        PerfPush(g_perf.thread_ms, double(cycles - g_perf.last_thread_cycles) / per_ms);
       }
       g_perf.last_thread_cycles = cycles;
     }
@@ -4167,13 +4179,16 @@ std::string PerfSummaryAndReset() {
     return {at(0.5), at(0.9), at(0.99)};
   };
   const size_t frames = g_perf.frame_ms.size(), gpu_frames = g_perf.gpu_ms.size();
+  const size_t presents = g_perf.present_ms.size();  // [new_fix_25092026_glitch] frames without a present add none
   const auto f = pct(g_perf.frame_ms), c = pct(g_perf.cpu_ms), w = pct(g_perf.wait_ms), gpu = pct(g_perf.gpu_ms);
   const auto m = pct(g_perf.thread_ms);  // [new_fix_24092026]
+  const auto pr = pct(g_perf.present_ms);  // [new_fix_25092026_glitch]
   std::string s = fmt::format(
       "frame ms p50/p90/p99 {:.1f}/{:.1f}/{:.1f} ({} frames), main thread cpu ms {:.2f}/{:.2f}/{:.2f}, native cpu ms "
-      "{:.2f}/{:.2f}/{:.2f}, fence wait ms {:.2f}/{:.2f}/{:.2f}, gpu ms {:.2f}/{:.2f}/{:.2f} ({} frames)",
+      "{:.2f}/{:.2f}/{:.2f}, fence wait ms {:.2f}/{:.2f}/{:.2f}, gpu ms {:.2f}/{:.2f}/{:.2f} ({} frames), present ms "
+      "{:.2f}/{:.2f}/{:.2f} ({} presents, part of native cpu)",
       f[0], f[1], f[2], frames, m[0], m[1], m[2], c[0], c[1], c[2], w[0], w[1], w[2], gpu[0], gpu[1], gpu[2],
-      gpu_frames);
+      gpu_frames, pr[0], pr[1], pr[2], presents);  // [new_fix_25092026_glitch] present ms: see g_perf.present_ms
   if (REXCVAR_GET(dp_native_perf_threads)) s += "; " + ThreadCpuReport();  // [new_fix_24092026]
   // [new_fix_24092026] 2.0.3: host object lifetime (native_retire.h), shader
   // view heap use, and the recording-path turn check (RecordScope).
@@ -4184,6 +4199,7 @@ std::string PerfSummaryAndReset() {
                    kRtvHeapSize, g.dsvs.InUse(), kDsvHeapSize,
                    g_record_overlaps.load(std::memory_order_relaxed));
   g_perf.thread_ms.clear();
+  g_perf.present_ms.clear();  // [new_fix_25092026_glitch]
   g_perf.frame_ms.clear();
   g_perf.cpu_ms.clear();
   g_perf.wait_ms.clear();

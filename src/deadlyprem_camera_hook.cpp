@@ -128,6 +128,11 @@ void DPCameraAimHook() { rex::input::mnk::NoteMouseAimFrame(); }
 // used by 1.4.0 read "on foot" while driving on a pad (#28), so the
 // Director's Cut layout remapped the car's triggers; this signal comes from
 // the driving code itself. false until the first driving frame.
+// [new_fix_25092026_glitch] The hook sits on the update's trigger read (PAL
+// 0x82357B18 / USA 0x823578C8), not its entry: the parked car keeps running
+// the update after York gets out (user test 25.09, log 018), so the entry
+// kept this true on foot and keyboard driving turned W / S into RT / LT.
+// The read runs only while the byte car+4917 is non-zero.
 REXCVAR_DEFINE_INT32(dp_pad_layout_vehicle_ms, 150, "DP1",
                      "How long after the last driving frame the controller layout still treats "
                      "York as driving (ms); covers a dropped frame, ends the moment he steps out")
@@ -148,7 +153,7 @@ void DPVehicleFrameHook() {
   // One line per driving streak (first frame after >= 1 s without the car
   // update), so a log shows when the game considered York at the wheel.
   if (last == 0 || now - last > 1000000000LL) {
-    REXLOG_INFO("Vehicle: player-driven car update running (York is at the wheel)");
+    REXLOG_INFO("Vehicle: the car reads the pad triggers (York is at the wheel)");
   }
 }
 

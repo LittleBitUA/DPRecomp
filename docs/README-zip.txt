@@ -1,4 +1,4 @@
-Deadly Premonition Recompilation 2.0.4  -  by the <<Little Bit>> team  -  MADE IN UKRAINE
+Deadly Premonition Recompilation 2.0.5  -  by the <<Little Bit>> team  -  MADE IN UKRAINE
 https://github.com/LittleBitUA/DPRecomp
 
 WHAT IS THIS
@@ -33,6 +33,7 @@ DEFAULT CONTROLS (full table and rebinding: launcher -> Settings -> Controls)
   WASD move, mouse look, wheel = weapon, E interact, R cancel/reload,
   F flashlight, C observe, Space (hold) aim, Space+LMB fire, Ctrl lock-on,
   Z/X strafe, Enter pause, M map. A controller works at the same time.
+  In a car: W accelerate, S brake / reverse, A D steer (Space / Ctrl still work).
 
 BUTTON PROMPTS / TEXTURE MODS
   Launcher -> Settings -> Controls -> Button Prompts: Keyboard (your keys),

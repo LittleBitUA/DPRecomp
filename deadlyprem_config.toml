@@ -468,7 +468,10 @@ after_instruction = false
 # layout - entry of the player-driven car update sub_82356948
 # (reads the pad triggers as throttle/brake; src/deadlyprem_camera_hook.cpp DPInVehicle).
 [[midasm_hook]]
-address = 0x82356948
+# [new_fix_25092026_glitch] moved from the entry of sub_82356948 to its trigger read
+# (lfs f30,208(r3) after sub_8252A700(pad, -1); reached only while byte car+4917 != 0):
+# the parked car keeps running the update after York gets out (user test 25.09).
+address = 0x82357B18
 name = "DPVehicleFrameHook"
 after_instruction = false
 
