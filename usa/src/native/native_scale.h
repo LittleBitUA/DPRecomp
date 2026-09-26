@@ -38,6 +38,22 @@ inline uint32_t ScaleForTarget(uint32_t width, uint32_t height, uint32_t scale) 
   return (width >= kScaleMinExtent && height >= kScaleMinExtent) ? scale : 1u;
 }
 
+// [new_fix_27092026_i38] #38: a 3D texture (volume or stacked, e.g. the sun
+// shadow cascades 1024x1024 x5) may not exceed 2048 texels per side in D3D12.
+// At 3x/4x the renderer asked for 3072/4096, creation failed, the 1x retry
+// did not match the wanted scale and every resolve recreated the texture:
+// the cascades lost all but the last slice (a hard lighting line that moves
+// with York). The largest multiplier that fits is used instead; the resolve
+// blit's bilinear filter downsamples the larger source, like any small target.
+inline constexpr uint32_t kMaxTexture3DExtent = 2048;  // D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION
+inline uint32_t ScaleForTexture(uint32_t width, uint32_t height, uint32_t scale, bool is_3d) {
+  uint32_t s = ScaleForTarget(width, height, scale);
+  if (!is_3d) return s;
+  const uint32_t extent = width > height ? width : height;
+  while (s > 1 && extent * s > kMaxTexture3DExtent) --s;
+  return s;
+}
+
 // The multiplier the rasterizer works in when a colour and a depth target are
 // bound together. They normally match; if one of them fell back to 1x (out of
 // video memory) the smaller one decides, so nothing is ever rasterized outside

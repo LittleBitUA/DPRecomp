@@ -159,6 +159,24 @@ void TestResolveAlias() {
   CHECK(!ResolveIsNewestWriter(0, 5, false));  // another size or format views that memory differently
 }
 
+// [new_fix_27092026_i38] #38: 3D textures stay within 2048 per side.
+static void TestTexture3DCap() {
+  using dp::native::ScaleForTexture;
+  CHECK(ScaleForTexture(1024, 1024, 1, true) == 1);
+  CHECK(ScaleForTexture(1024, 1024, 2, true) == 2);   // exactly 2048: fits
+  CHECK(ScaleForTexture(1024, 1024, 3, true) == 2);   // 3072 would fail
+  CHECK(ScaleForTexture(1024, 1024, 4, true) == 2);
+  CHECK(ScaleForTexture(512, 512, 4, true) == 4);     // 2048
+  CHECK(ScaleForTexture(32, 32, 4, true) == 1);       // below the scale threshold
+  CHECK(ScaleForTexture(1024, 1024, 4, false) == 4);  // 2D textures are unchanged
+  CHECK(ScaleForTexture(1024, 576, 3, false) == 3);
+  for (uint32_t w = 128; w <= 4096; w += 64)
+    for (uint32_t sc = 1; sc <= 4; ++sc) {
+      const uint32_t s = ScaleForTexture(w, w, sc, true);
+      CHECK(s >= 1 && s <= sc && (w * s <= 2048 || s == 1));
+    }
+}
+
 int main() {
   TestClamp();
   TestTargetSizes();
@@ -169,6 +187,7 @@ int main() {
   TestSurfaceFormats();
   TestEdram();
   TestResolveAlias();
+  TestTexture3DCap();  // [new_fix_27092026_i38]
   if (g_failures == 0) std::printf("dp_native_scale_test: all checks passed\n");
   return g_failures == 0 ? 0 : 1;
 }

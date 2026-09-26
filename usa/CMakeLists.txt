@@ -96,3 +96,6 @@ set_target_properties(dp_native_retire_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # [new_fix_24092026] 2.0.4, issue #35: guest vertex/index buffer header decoding
 add_executable(dp_native_buffer_header_test tests/native_buffer_header_test.cpp)
 set_target_properties(dp_native_buffer_header_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [new_fix_27092026_health] graphics health log helpers
+add_executable(dp_native_health_test tests/native_health_test.cpp)
+set_target_properties(dp_native_health_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

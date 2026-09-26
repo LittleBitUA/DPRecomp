@@ -1,4 +1,4 @@
-Deadly Premonition Recompilation 2.0.5  -  by the <<Little Bit>> team  -  MADE IN UKRAINE
+Deadly Premonition Recompilation 2.0.6  -  by the <<Little Bit>> team  -  MADE IN UKRAINE
 https://github.com/LittleBitUA/DPRecomp
 
 WHAT IS THIS

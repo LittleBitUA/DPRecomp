@@ -46,6 +46,8 @@
 
 #include "native_graphics_system.h"
 #include "native_scale.h"  // [NEW FABLE VERSION] internal resolution rules (tested in tests/native_scale_test.cpp)
+#include "native_health.h"  // [new_fix_27092026_health] graphics health log (tests/native_health_test.cpp)
+#include <dxgi1_4.h>        // [new_fix_27092026_health] driver version
 #include "native_texrep.h"  // [NEW FABLE VERSION] textures\<hash>.png replacement (tested in tests/native_texrep_test.cpp)
 
 #pragma comment(lib, "d3dcompiler.lib")
@@ -1134,6 +1136,70 @@ void SubmitFrame() {
 extern void* g_watch_handle;
 std::pair<uint32_t, uint32_t> WatchCallback(void*, uint32_t phys_start, uint32_t length, bool exact_range);
 
+// [new_fix_27092026_health] graphics health: counters for the stats line and
+// once-per-resource warnings (native_health.h). Creation can run on the render
+// thread and on loading threads, hence the lock.
+std::mutex g_health_mutex;
+HealthCounters g_health;
+LogLimiter g_health_log(2, 256);
+ChurnDetector g_churn;
+
+void HealthCreateFailed(const char* kind, uint32_t guest, bool is_3d, uint32_t w, uint32_t h, uint32_t depth,
+                        uint32_t hw, uint32_t hh, uint32_t format, HRESULT hr, bool will_retry_1x) {
+  std::lock_guard<std::mutex> lock(g_health_mutex);
+  ++g_health.create_failures;
+  if (will_retry_1x) ++g_health.fallbacks_1x;
+  bool last = false;
+  if (!g_health_log.Allow(uint64_t(guest) | (uint64_t(kind[0]) << 32), &last)) return;
+  REXLOG_ERROR("Native renderer health: {} {:08X} {}x{}{} (host {}x{}) format {} not created: HRESULT {:08X}, {}{}{}",
+               kind, guest, w, h, is_3d ? fmt::format(" x{} (3D)", depth) : std::string(), hw, hh, format,
+               uint32_t(hr), CreateFailureHint(is_3d, hw, hh, depth, int32_t(hr)),
+               will_retry_1x ? "; retrying at 1x" : "", last ? " (further messages for it suppressed)" : "");
+}
+
+void HealthRecreated(uint32_t guest, uint32_t w, uint32_t h, uint32_t scale_had, uint32_t scale_wanted, uint32_t frame) {
+  std::lock_guard<std::mutex> lock(g_health_mutex);
+  ++g_health.recreated;
+  if (g_churn.Note(guest, frame)) {
+    REXLOG_WARN("Native renderer health: resolve destination {:08X} {}x{} recreated {} times in one frame / {} in 60 "
+                "frames (had scale {}x, wants {}x): its content is lost every time - a bug, please attach this log",
+                guest, w, h, g_churn.last_in_frame(), g_churn.last_in_window(), scale_had, scale_wanted);
+  }
+}
+
+void HealthScaleCapped(uint32_t guest, uint32_t w, uint32_t h, uint32_t depth, uint32_t got, uint32_t asked) {
+  std::lock_guard<std::mutex> lock(g_health_mutex);
+  ++g_health.scale_capped;
+  if (g_health_log.Allow(uint64_t(guest) | (uint64_t('C') << 32))) {
+    REXLOG_INFO("Native renderer health: 3D texture {:08X} {}x{} x{} kept at {}x instead of {}x (D3D12 allows 2048 per "
+                "side for 3D textures)", guest, w, h, depth, got, asked);
+  }
+}
+
+// Driver version and the limits that matter, once at start: the first thing a
+// graphics report needs, and the one the player usually does not know.
+void LogGpuDriver(ID3D12Device* device) {
+  const LUID luid = device->GetAdapterLuid();
+  HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
+  if (!dxgi) dxgi = LoadLibraryW(L"dxgi.dll");
+  using CreateFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+  auto create = dxgi ? reinterpret_cast<CreateFactoryFn>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+  ComPtr<IDXGIFactory4> factory;
+  ComPtr<IDXGIAdapter1> adapter;
+  LARGE_INTEGER umd = {};
+  DXGI_ADAPTER_DESC1 desc = {};
+  if (create && SUCCEEDED(create(IID_PPV_ARGS(&factory))) &&
+      SUCCEEDED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))) && SUCCEEDED(adapter->GetDesc1(&desc)) &&
+      SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) {
+    const uint64_t v = uint64_t(umd.QuadPart);
+    REXLOG_INFO("Native renderer health: GPU vendor {:04X} device {:04X}, driver {}.{}.{}.{}, VRAM {} MB; limits: 2D "
+                "textures 16384, 3D textures 2048 per side", desc.VendorId, desc.DeviceId, (v >> 48) & 0xFFFF,
+                (v >> 32) & 0xFFFF, (v >> 16) & 0xFFFF, v & 0xFFFF, desc.DedicatedVideoMemory >> 20);
+  } else {
+    REXLOG_WARN("Native renderer health: could not read the GPU driver version");
+  }
+}
+
 bool InitContext() {
   if (g.ready || g.failed) return g.ready;
   auto* system = NativeGraphicsSystem::instance();
@@ -1198,6 +1264,7 @@ bool InitContext() {
   if (g_scale != 1) REXLOG_INFO("Native renderer: internal resolution scale {}x (dp_native_scale)", g_scale);
   g_watch_handle = Mem()->RegisterPhysicalMemoryInvalidationCallback(WatchCallback, nullptr);
   REXLOG_INFO("Native renderer: page watch {}", g_watch_handle ? "registered" : "UNAVAILABLE (textures re-upload on Unlock only)");
+  LogGpuDriver(g.device);  // [new_fix_27092026_health]
   g.ready = true;
   REXLOG_INFO("Native renderer: D3D12 context ready (views {}, samplers {}, upload ring {} MB x {})", kViewHeapSize,
               kSamplerHeapSize, kUploadRingBytes >> 20, kFramesInFlight);
@@ -1379,14 +1446,15 @@ bool EnsureSurfaceResource(GuestSurface& s) {
   clear.Format = s.format;
   if (s.depth) clear.DepthStencil.Depth = 1.0f;
   const D3D12_RESOURCE_STATES initial = s.depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
-  if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &desc,
-                                               initial, &clear, IID_PPV_ARGS(&s.resource)))) {
-    REXLOG_ERROR("Native renderer: surface {:08X} {}x{} (host {}x{}) format {:08X} host creation failed", s.guest, s.width,
-                 s.height, s.hw(), s.hh(), s.guest_format);
+  if (const HRESULT hr = g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault,
+                                                          D3D12_HEAP_FLAG_NONE, &desc, initial, &clear,
+                                                          IID_PPV_ARGS(&s.resource));
+      FAILED(hr)) {
+    // [new_fix_27092026_health] once per surface, with the HRESULT and the likely reason
+    HealthCreateFailed("surface", s.guest, false, s.width, s.height, 1, s.hw(), s.hh(), s.guest_format, hr, s.scale != 1);
     // [NEW FABLE VERSION] out of video memory at this scale: fall back to 1x
     // rather than losing the target (a missing surface is a black frame).
     if (s.scale == 1) return false;
-    REXLOG_WARN("Native renderer: retrying surface {:08X} at 1x (dp_native_scale {} did not fit)", s.guest, s.scale);
     s.scale = 1;
     desc.Width = s.width;
     desc.Height = s.height;
@@ -1489,7 +1557,10 @@ bool EnsureTextureResource(GuestTexture& t) {
   // (a CPU-uploaded texture has to keep the guest's size and tiling), and they
   // hold exactly what the blit writes: one level, no mip chain.
   if (t.is_resolve_target) {
-    t.scale = ScaleFor(t.width, t.height);
+    t.scale = ScaleForTexture(t.width, t.height, g_scale, t.is_3d);  // [new_fix_27092026_i38]
+    if (t.scale < ScaleFor(t.width, t.height)) {  // [new_fix_27092026_health]
+      HealthScaleCapped(t.guest, t.width, t.height, t.depth, t.scale, ScaleFor(t.width, t.height));
+    }
     t.mip_levels = 1;
   } else {
     t.scale = 1;
@@ -1506,16 +1577,18 @@ bool EnsureTextureResource(GuestTexture& t) {
   const bool renderable = t.format != DXGI_FORMAT_BC1_UNORM && t.format != DXGI_FORMAT_BC2_UNORM &&
                           t.format != DXGI_FORMAT_BC3_UNORM;
   if (renderable) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-  if (FAILED(g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &desc,
-                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&t.resource)))) {
-    REXLOG_ERROR("Native renderer: texture {:08X} {}x{} (host {}x{}) format {} host creation failed", t.guest, t.width,
-                 t.height, t.hw(), t.hh(), uint32_t(t.format));
+  if (const HRESULT hr = g.device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesDefault,
+                                                          D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                          nullptr, IID_PPV_ARGS(&t.resource));
+      FAILED(hr)) {
+    // [new_fix_27092026_health] once per texture, with the HRESULT and the likely reason
+    HealthCreateFailed("texture", t.guest, t.is_3d, t.width, t.height, desc.DepthOrArraySize, t.hw(), t.hh(),
+                       uint32_t(t.format), hr, t.scale != 1);
     // [NEW FABLE VERSION] same 1x fallback as the surfaces.
     if (t.scale == 1) {
       g.views.Free(srv_index);  // [new_fix_24092026] 2.0.3: never written
       return false;
     }
-    REXLOG_WARN("Native renderer: retrying texture {:08X} at 1x (dp_native_scale {} did not fit)", t.guest, t.scale);
     t.scale = 1;
     desc.Width = t.width;
     desc.Height = t.height;
@@ -2923,6 +2996,7 @@ void ExecuteDraw(const DrawArgs& a) {
     for (int i = 0; i < 6; ++i) fetch_dwords[i] = Dev(kDevFetchConstants + slot * 24 + i * 4);
     GuestTexture* t = TextureForFetch(fetch_dwords, st.textures[slot]);
     if (!t) {
+      ++g_health.null_binds;  // [new_fix_27092026_health] (render thread only)
       if (g_dump_active) {
         REXLOG_INFO("Native texbind: s{} object {:08X} is a typed fetch constant (base {:08X}) but not a registered texture: sampled as zeros (draw #{})",
                     slot, st.textures[slot], Dev(kDevFetchConstants + slot * 24 + 4) & ~0xFFFu, g_dump_seq);
@@ -2970,7 +3044,10 @@ void ExecuteDraw(const DrawArgs& a) {
       }
     }
     if (t->dirty && !t->is_resolve_target) {
-      if (!UploadTexture(*t)) continue;
+      if (!UploadTexture(*t)) {
+        ++g_health.upload_failures;  // [new_fix_27092026_health]
+        continue;
+      }
     } else if (!t->resource) {
       continue;
     }
@@ -4002,7 +4079,9 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   // resource carries the guest size and a mip chain) and is now a resolve
   // destination is recreated: the blit writes one level at the host scale, and
   // the mips below it would otherwise keep stale CPU content forever.
-  if (t->resource && (t->mip_levels > 1 || t->scale != ScaleFor(t->width, t->height))) {
+  if (t->resource && (t->mip_levels > 1 || t->scale != ScaleForTexture(t->width, t->height, g_scale, t->is_3d))) {  // [new_fix_27092026_i38] a 3D texture keeps its capped scale
+    HealthRecreated(t->guest, t->width, t->height, t->scale, ScaleForTexture(t->width, t->height, g_scale, t->is_3d),
+                    g.frame_number);  // [new_fix_27092026_health]
     ForgetWatch(t);
     RetireDescriptor(g.views, t->srv_index);  // [new_fix_24092026] 2.0.3
     g.rtvs.Free(t->rtv_index);
@@ -4198,6 +4277,14 @@ std::string PerfSummaryAndReset() {
                    g_recreated_count.load(std::memory_order_relaxed), g.views.InUse(), kViewHeapSize, g.rtvs.InUse(),
                    kRtvHeapSize, g.dsvs.InUse(), kDsvHeapSize,
                    g_record_overlaps.load(std::memory_order_relaxed));
+  {  // [new_fix_27092026_health] graphics health since the previous line
+    std::lock_guard<std::mutex> lock(g_health_mutex);
+    s += fmt::format("; health: create failures {} (1x fallbacks {}), 3D scale capped {}, recreated {}, zero-texture "
+                     "binds {}, upload failures {}, messages suppressed {}",
+                     g_health.create_failures, g_health.fallbacks_1x, g_health.scale_capped, g_health.recreated,
+                     g_health.null_binds, g_health.upload_failures, g_health_log.suppressed());
+    g_health = HealthCounters{};
+  }
   g_perf.thread_ms.clear();
   g_perf.present_ms.clear();  // [new_fix_25092026_glitch]
   g_perf.frame_ms.clear();
