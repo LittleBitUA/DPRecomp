@@ -48,6 +48,7 @@
 #include "deadlyprem_pad_layout.h"
 #include "deadlyprem_title_skip.h"
 #include "deadlyprem_keyboard_driving.h"  // [new_fix_25092026_glitch]
+#include "deadlyprem_frame_pacing.h"  // [new_fix_27092026_i36]
 
 #include "deadlyprem_pch.h"  // PPCRegister / PPCContext (generated/default is on the include path)
 
@@ -104,6 +105,39 @@ bool DP60FpsVblankGateHook() {
 // in 60 FPS mode; DP60FpsTickHook has already applied [tick_min, tick_max].
 bool DP60FpsTickClampHook() {
   return REXCVAR_GET(dp_60fps);
+}
+
+// [new_fix_27092026_i36] Even frame pacing (issue #36, deadlyprem_frame_pacing.h).
+// PAL 0x8252269C (USA 0x8252A2C4), right after the limiter stored
+// last = QPC() at r31+512 following the present (r31+504 = QPC frequency):
+// move `last` onto an exact 1/60 s timeline so the limiter's waits do not
+// add up to a 16.72 ms average frame and a double tick every few seconds.
+REXCVAR_DEFINE_BOOL(dp_60fps_even_pacing, true, "DP1",
+                    "60 FPS: time frames from exact 1/60 s deadlines instead of from the end of "
+                    "the previous present, so frames average 16.667 ms and the game never "
+                    "catches up with a double step (the jerk while moving, #36); resyncs to "
+                    "real time after a hitch")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+static dp::FramePacer g_frame_pacer;  // game thread only (the limiter routine)
+
+void DP60FpsPacingHook(PPCRegister& r31) {
+  if (!REXCVAR_GET(dp_60fps) || !REXCVAR_GET(dp_60fps_even_pacing)) {
+    dp::ResetFramePacer(g_frame_pacer);
+    return;
+  }
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory) {
+    return;
+  }
+  uint8_t* last_ptr = memory->TranslateVirtual<uint8_t*>(r31.u32 + 512);
+  uint8_t* freq_ptr = memory->TranslateVirtual<uint8_t*>(r31.u32 + 504);
+  const uint64_t now = rex::memory::load_and_swap<uint64_t>(last_ptr);
+  const uint64_t freq = rex::memory::load_and_swap<uint64_t>(freq_ptr);
+  const uint64_t paced = dp::PaceFrameStamp(g_frame_pacer, now, freq);
+  if (paced != now) {
+    rex::memory::store_and_swap<uint64_t>(last_ptr, paced);
+  }
 }
 
 // PAL 0x82522704, before `stfs f0,-11344(r24)`: f0 holds the vblank delta as
@@ -166,9 +200,11 @@ void DP60FpsTickHook(PPCRegister& f0) {
     if (n >= 600) {
       REXLOG_INFO(
           "DP60 stats: {} frames avg {:.3f} ms (min {:.2f} max {:.2f}), tick<1 on {} frames, "
-          "tick>=2 on {} frames, accumulator {:+.3f}; game/real {:.4f}",
+          "tick>=2 on {} frames, accumulator {:+.3f}; game/real {:.4f}; even pacing {} "
+          "(resyncs total {})",
           n, sum_ms / n, min_ms, max_ms, sub_one, multi, accumulator,
-          sum_tick * (1000.0 / 60.0) / sum_ms);
+          sum_tick * (1000.0 / 60.0) / sum_ms, REXCVAR_GET(dp_60fps_even_pacing),
+          g_frame_pacer.resyncs);
       n = 0;
       sum_ms = 0.0;
       min_ms = 1e9;

@@ -293,6 +293,12 @@ address = 0x8252A344          # bge cr6,0x8252A350 -> b 0x8252A350: skip the gam
 name = "DP60FpsTickClampHook"
 jump_address_on_true = 0x8252A350
 
+[[midasm_hook]]
+address = 0x8252A2C4          # stw r27,92(r1), right after last = QPC() (r31+512) following the present: exact 1/60 s timeline (#36)
+name = "DP60FpsPacingHook"
+registers = ["r31"]
+after_instruction = false
+
 # Jump tables (sp00nznet/360tools extract_switch_tables.py on the USA image, 2026-09-06): 9 tables.
 [[switch_tables]]
 address = 0x824DEB00

@@ -102,3 +102,6 @@ set_target_properties(dp_native_health_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # [new_fix_27092026_i39] guest thread stack sizes
 add_executable(dp_thread_stack_test tests/thread_stack_test.cpp)
 set_target_properties(dp_thread_stack_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [new_fix_27092026_i36] even 60 FPS frame pacing
+add_executable(dp_frame_pacing_test tests/frame_pacing_test.cpp)
+set_target_properties(dp_frame_pacing_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
