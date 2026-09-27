@@ -21,7 +21,12 @@ class PsoCompileIndicatorDialog : public ImGuiDialog {
  protected:
   void OnDraw(ImGuiIO& io) override;
 
+ public:
+  // [new_fix_27092026_i36] Repaint continuously only while the badge is shown.
+  bool WantsContinuousRepaint() const override { return visible_; }
+
  private:
+  bool visible_ = false;
   bool was_ever_active_ = false;
   std::chrono::steady_clock::time_point became_idle_at_{};
 };

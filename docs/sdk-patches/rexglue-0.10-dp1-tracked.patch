@@ -561,6 +561,58 @@ index 35035a4..b3e64b9 100644
    ID3D12Device* device_ = nullptr;
    ID3D12CommandQueue* direct_queue_ = nullptr;
    IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index a7ab6b3..5c946e1 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -52,6 +52,14 @@ class ImGuiDialog {
+   virtual void OnClose() {}
+   virtual void OnDraw(ImGuiIO& io) { (void)io; }
+ 
++ public:
++  // [new_fix_27092026_i36] Whether the drawer should keep repainting on every
++  // monitor refresh for this dialog (animation, input). A dialog that is
++  // currently drawing nothing returns false; while no dialog wants it, the UI
++  // is only drawn with the guest's own frames (one present per game frame,
++  // DPRecomp #36). Declared last so existing vtable slots keep their order.
++  virtual bool WantsContinuousRepaint() const { return true; }
++
+  private:
+   ImGuiDrawer* imgui_drawer_ = nullptr;
+   bool has_close_pending_ = false;
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..c31baa7 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -11,6 +11,7 @@
+  */
+ #pragma once
+ 
++#include <atomic>
+ #include <chrono>
+ #include <deque>
+ #include <mutex>
+@@ -35,6 +36,12 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+   // Thread-safe: safe to call from any thread, including guest threads.
+   void Push(const rex::system::AchievementEvent& event) override;
+ 
++  // [new_fix_27092026_i36] Repaint continuously only while a toast is queued
++  // or on screen; an idle toast dialog kept the UI presenting every refresh.
++  bool WantsContinuousRepaint() const override {
++    return has_toast_.load(std::memory_order_relaxed);
++  }
++
+  protected:
+   void OnDraw(ImGuiIO& io) override;
+ 
+@@ -49,6 +56,7 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+ 
+   std::mutex mutex_;
+   std::deque<PendingToast> queue_;
++  std::atomic<bool> has_toast_{false};  // [new_fix_27092026_i36] !queue_.empty()
+   AchievementIconCache icon_cache_;
+ };
+ 
 diff --git a/include/rex/ui/overlay/debug_overlay.h b/include/rex/ui/overlay/debug_overlay.h
 index e15e410..c548be1 100644
 --- a/include/rex/ui/overlay/debug_overlay.h
@@ -29550,6 +29602,34 @@ index bf8252b..aaa73cb 100644
 +}
 +
  }  // namespace rex::ui::d3d12
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..f7b3894 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cfloat>
+ #include <cstring>
+ #include <filesystem>
+@@ -436,7 +437,14 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   // it now if needed.
+   DetachIfLastDialogRemoved();
+ 
+-  if (!dialogs_.empty()) {
++  // [new_fix_27092026_i36] Only while some dialog wants it: an always-present
++  // but invisible dialog (the PSO compile indicator) made the UI thread present
++  // on every monitor refresh on top of the guest's frames (PresentMon: 60 game
++  // frames -> 239 presents/s at 180 Hz, "119 FPS" on a 60 Hz monitor).
++  const bool wants_repaint =
++      std::any_of(dialogs_.cbegin(), dialogs_.cend(),
++                  [](const ImGuiDialog* dialog) { return dialog->WantsContinuousRepaint(); });
++  if (wants_repaint) {
+     // Repaint (and handle input) continuously if still active. In detached mode
+     // there is no presenter; the app drives repaint via its own present loop.
+     if (presenter_) {
 diff --git a/src/ui/keybinds.cpp b/src/ui/keybinds.cpp
 index 9822f3b..6f7bf7c 100644
 --- a/src/ui/keybinds.cpp
@@ -29565,6 +29645,26 @@ index 9822f3b..6f7bf7c 100644
  };
  
  VirtualKey ParseVirtualKey(std::string_view name) {
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index 53b8c0b..4212bdf 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -27,6 +27,7 @@ AchievementToastDialog::~AchievementToastDialog() {}
+ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
+   std::lock_guard<std::mutex> lock(mutex_);
+   queue_.push_back({event, std::chrono::steady_clock::now()});
++  has_toast_.store(true, std::memory_order_relaxed);  // [new_fix_27092026_i36]
+ }
+ 
+ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+@@ -47,6 +48,7 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+         break;
+       }
+     }
++    has_toast_.store(!queue_.empty(), std::memory_order_relaxed);  // [new_fix_27092026_i36]
+     if (queue_.empty()) {
+       return;
+     }
 diff --git a/src/ui/overlay/debug_overlay.cpp b/src/ui/overlay/debug_overlay.cpp
 index 43d6c06..35646a5 100644
 --- a/src/ui/overlay/debug_overlay.cpp

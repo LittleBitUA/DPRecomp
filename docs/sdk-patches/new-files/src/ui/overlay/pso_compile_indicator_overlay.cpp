@@ -68,6 +68,7 @@ ImVec2 ChoosePivot(const std::string& corner_value) {
 }  // namespace
 
 void PsoCompileIndicatorDialog::OnDraw(ImGuiIO& io) {
+  visible_ = false;  // [new_fix_27092026_i36] set again below if the badge is drawn
   if (!REXCVAR_GET(show_shader_compile_indicator)) {
     return;
   }
@@ -110,6 +111,7 @@ void PsoCompileIndicatorDialog::OnDraw(ImGuiIO& io) {
   if (!visible) {
     return;
   }
+  visible_ = true;
 
   const std::string corner = REXCVAR_GET(shader_compile_indicator_corner);
   ImGui::SetNextWindowPos(ChooseAnchor(io, corner), ImGuiCond_Always, ChoosePivot(corner));
