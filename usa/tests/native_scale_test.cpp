@@ -177,6 +177,17 @@ static void TestTexture3DCap() {
     }
 }
 
+// [new_fix_27092026_shadows] slope bias follows the render scale.
+static void TestSlopeBias() {
+  using dp::native::SlopeScaledDepthBias;
+  CHECK(SlopeScaledDepthBias(2.0f, 1) == 0.125f);   // the caster pass: slope 2.0 at 1x
+  CHECK(SlopeScaledDepthBias(2.0f, 2) == 0.25f);
+  CHECK(SlopeScaledDepthBias(2.0f, 3) == 0.375f);
+  CHECK(SlopeScaledDepthBias(2.0f, 0) == 0.125f);   // never zeroed by a bad scale
+  CHECK(SlopeScaledDepthBias(0.0f, 4) == 0.0f);
+  CHECK(SlopeScaledDepthBias(-1.0f, 2) == -0.125f);
+}
+
 int main() {
   TestClamp();
   TestTargetSizes();
@@ -188,6 +199,7 @@ int main() {
   TestEdram();
   TestResolveAlias();
   TestTexture3DCap();  // [new_fix_27092026_i38]
+  TestSlopeBias();  // [new_fix_27092026_shadows]
   if (g_failures == 0) std::printf("dp_native_scale_test: all checks passed\n");
   return g_failures == 0 ? 0 : 1;
 }

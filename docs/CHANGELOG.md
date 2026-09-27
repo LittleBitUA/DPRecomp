@@ -1,6 +1,16 @@
 # Changelog
 
-Release notes for each version: [2.0.6](RELEASE-NOTES-2.0.6.md) · [2.0.5](RELEASE-NOTES-2.0.5.md) · [2.0.4](RELEASE-NOTES-2.0.4.md) · [2.0.3](RELEASE-NOTES-2.0.3.md) · [2.0.2](RELEASE-NOTES-2.0.2.md) · [2.0.1](RELEASE-NOTES-2.0.1.md) · [2.0](RELEASE-NOTES-2.0.md) · [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+Release notes for each version: [2.0.7](RELEASE-NOTES-2.0.7.md) · [2.0.6](RELEASE-NOTES-2.0.6.md) · [2.0.5](RELEASE-NOTES-2.0.5.md) · [2.0.4](RELEASE-NOTES-2.0.4.md) · [2.0.3](RELEASE-NOTES-2.0.3.md) · [2.0.2](RELEASE-NOTES-2.0.2.md) · [2.0.1](RELEASE-NOTES-2.0.1.md) · [2.0](RELEASE-NOTES-2.0.md) · [1.4.7](RELEASE-NOTES-1.4.7.md) · [1.4.6](RELEASE-NOTES-1.4.6.md) · [1.4.5](RELEASE-NOTES-1.4.5.md) · [1.4.4](RELEASE-NOTES-1.4.4.md) · [1.4.3](RELEASE-NOTES-1.4.3.md) · [1.4.2](RELEASE-NOTES-1.4.2.md) · [1.4.1](RELEASE-NOTES-1.4.1.md) · [1.4.0](RELEASE-NOTES-1.4.0.md) · [1.3.7](RELEASE-NOTES-1.3.7.md) · [1.3.6](RELEASE-NOTES-1.3.6.md) · [1.3.5](RELEASE-NOTES-1.3.5.md) · [1.3.4](RELEASE-NOTES-1.3.4.md) · [1.3.3](RELEASE-NOTES-1.3.3.md) · [1.3.2](RELEASE-NOTES-1.3.2.md) · [1.3.1](RELEASE-NOTES-1.3.1.md) · [1.3.0](RELEASE-NOTES-1.3.0.md) · [1.2.1](RELEASE-NOTES-1.2.1.md) · [1.2.0](RELEASE-NOTES-1.2.0.md) · [1.1.0](RELEASE-NOTES-1.1.0.md) · [1.0.0](RELEASE-NOTES-1.0.0.md)
+
+## 2.0.7 (September 2026)
+
+Native renderer, from a frame-by-frame comparison with the emulated GPU (RenderDoc captures; the sun shadow chain itself matched the emulator numerically):
+- **Slope-scaled depth bias x render scale.** The caster pass used the console's slope bias (PA_SU_POLY_OFFSET scale / 16) unscaled; the SDK multiplies it by the draw resolution scale. At 2x the casters got half the bias: dark stair-stepped self-shadow bands (a door frame 53% shadowed vs 0% emulated). `SlopeScaledDepthBias` in `src/native/native_scale.h`, tested.
+- **Depth resolves use nearest sampling** (blit mode 8): the 3D shadow cascades kept at 2048 while the scene renders at 3x/4x were downsampled bilinearly, averaging caster and background depth along every silhouette.
+- **User clip plane 0 and depth clip only while PA_CL_CLIP_CNTL.clip_disable is clear**, as the SDK does: the floor reflection's pre-transformed fog quad was cut by the plane.
+- **Anisotropy** 1 << (aniso - 1) (Xenos 1..5 = 1:1..16:1).
+- **Sun ring:** a 2-bit quantization of the 7e3 scene alpha tried in this cycle (never released) drew a dark jagged ring around the sun through the tone map blend; the alpha is only saturated, as before.
+- Note: the lens flare's alternating 1.0 / 0.8 alpha is the game's own twinkle (a flag toggled each update in `sub_82478930`, same in the PC port); at the 60 FPS tick it flickers twice as fast as at 30.
 
 ## 2.0.6 (September 2026)
 

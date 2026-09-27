@@ -539,6 +539,7 @@ struct PipelineKey {
   uint32_t slope_bias_bits = 0;  // float bits
   uint32_t strides[2] = {0, 0};
   uint32_t instanced = 0;  // per-instance input layout (index-scaled vertex fetch shaders)
+  uint32_t no_depth_clip = 0;  // [new_fix_27092026_shadows] PA_CL_CLIP_CNTL.clip_disable
   bool operator==(const PipelineKey& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
 };
 struct PipelineKeyHash {
@@ -769,12 +770,23 @@ float To7e3(float v) {
 }
 float4 PSMain(VSOut i) : SV_Target0 {
   float4 c = t0.SampleLevel(s0, i.uv, 0);
+  // [new_fix_27092026_shadows] depth: nearest sample. A bilinear downsample (the
+  // 3D shadow cascades kept at 2048 while the scene renders at 3x/4x) averaged
+  // caster and background depths across every silhouette edge.
+  if (g_mode & 8u) {
+    uint sw, sh;
+    t0.GetDimensions(sw, sh);
+    c = t0.Load(int3(min(uint2(i.uv * float2(sw, sh)), uint2(sw - 1u, sh - 1u)), 0));
+  }
   if (g_mode & 1u) {
     c.rgb = float3(To7e3(c.r), To7e3(c.g), To7e3(c.b));
   }
   // [NEW FABLE VERSION] 2026-09-23: fixed-point alpha of a 7e3 target, see
   // dp_native_7e3_alpha.
   if (g_mode & 2u) {
+    // [new_fix_27092026_shadows] NOT quantized to the 7e3 target's 2 bits: the tone map
+    // blends with this alpha, and a smooth sun glow (0.41..0.68) turned into 1/3 / 2/3 steps
+    // drew a dark jagged ring around the sun (RenderDoc 27.09, sun_tie_frame19902/20056).
     c.a = saturate(c.a);
   }
   // [new_fix_24092026] the console's display gamma ramp: the 8-bit front buffer
@@ -2254,7 +2266,7 @@ uint32_t SamplerIndex(const xenos::xe_gpu_texture_fetch_t& fetch) {
                                        D3D12_FILTER_REDUCTION_TYPE_STANDARD);
   if (uint32_t(fetch.aniso_filter) >= 1 && uint32_t(fetch.aniso_filter) <= 5) {
     d.Filter = D3D12_FILTER_ANISOTROPIC;
-    d.MaxAnisotropy = 1u << uint32_t(fetch.aniso_filter);
+    d.MaxAnisotropy = 1u << (uint32_t(fetch.aniso_filter) - 1u);  // [new_fix_27092026_shadows] 1..5 = 1:1..16:1
   }
   d.AddressU = address(fetch.clamp_x);
   d.AddressV = address(fetch.clamp_y);
@@ -2373,7 +2385,7 @@ ID3D12PipelineState* GetPipeline(const PipelineKey& key, const GuestShader& vs, 
                                : cull_back            ? D3D12_CULL_MODE_BACK
                                                       : D3D12_CULL_MODE_NONE;
   d.RasterizerState.FrontCounterClockwise = (key.cull & 4) == 0;
-  d.RasterizerState.DepthClipEnable = TRUE;
+  d.RasterizerState.DepthClipEnable = key.no_depth_clip ? FALSE : TRUE;  // [new_fix_27092026_shadows]
   d.RasterizerState.DepthBias = key.depth_bias;
   d.RasterizerState.DepthBiasClamp = 0.0f;
   std::memcpy(&d.RasterizerState.SlopeScaledDepthBias, &key.slope_bias_bits, 4);
@@ -3130,7 +3142,10 @@ void ExecuteDraw(const DrawArgs& a) {
     }
     // User clip plane 0 (the mirrored floor-reflection pass clips everything
     // below the floor): plane in c47, enable in c46.z; the VS writes SV_ClipDistance0.
-    if (Dev(kDevPaClClipCntl) & 1) {
+    // [new_fix_27092026_shadows] only while clip_disable (bit 16) is clear, as the
+    // SDK does: the reflection's pre-transformed fog quad (clip_disable set) was
+    // cut by the plane evaluated on its pixel coordinates.
+    if ((Dev(kDevPaClClipCntl) & 1) && !(Dev(kDevPaClClipCntl) & (1u << 16))) {
       zso[2] = 1.0f;
       for (int i = 0; i < 4; ++i) shared[188 + i] = Dev(kDevPaClUcp0 + i * 4);
     }
@@ -3228,7 +3243,9 @@ void ExecuteDraw(const DrawArgs& a) {
     int32_t bias = int32_t(std::ceil(std::abs(offset) * (float24 ? float(1u << 24) * (1.0f / 8.0f) : float((1u << 24) - 1))));
     if (float24) bias <<= 3;
     key.depth_bias = ds ? (offset < 0 ? -bias : bias) : 0;
-    const float slope = ds ? scale * (1.0f / 16.0f) : 0.0f;
+    // [new_fix_27092026_shadows] x the render scale, like the SDK (native_scale.h).
+    const float slope = ds ? SlopeScaledDepthBias(scale, BindScale(rt != nullptr, rt ? rt->scale : 1u, true, ds->scale))
+                           : 0.0f;
     std::memcpy(&key.slope_bias_bits, &slope, 4);
   }
   key.topology = topo_type;
@@ -3236,6 +3253,7 @@ void ExecuteDraw(const DrawArgs& a) {
   key.strides[0] = strides[0];
   key.strides[1] = strides[1];
   key.instanced = instanced ? 1u : 0u;
+  key.no_depth_clip = (Dev(kDevPaClClipCntl) >> 16) & 1u;  // [new_fix_27092026_shadows]
   ID3D12PipelineState* pso = GetPipeline(key, *vs, *ps, *decl);
   if (!pso) return SkipLog("pipeline unavailable");
 
@@ -4119,7 +4137,8 @@ void OnResolve(uint32_t flags, uint32_t rect_ptr, uint32_t dest_texture, uint32_
   // bilinear filter downsamples, which is what the console's resolve did.
   Blit(src->srv_index, g.rtvs.Cpu(rtv), t->format, t->hw(), t->hh(),
        ((src_7e3 && REXCVAR_GET(dp_native_7e3_resolve)) ? 1u : 0u) |
-           ((src_7e3 && REXCVAR_GET(dp_native_7e3_alpha)) ? 2u : 0u));  // [NEW FABLE VERSION] fixed-point alpha
+           ((src_7e3 && REXCVAR_GET(dp_native_7e3_alpha)) ? 2u : 0u) |  // [NEW FABLE VERSION] fixed-point alpha
+           (src->depth ? 8u : 0u));  // [new_fix_27092026_shadows] depth: nearest, never averaged
   Barrier(t->resource.Get(), t->state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   // [NEW FABLE VERSION] 2026-09-24: this resolve is now the newest write of its memory.

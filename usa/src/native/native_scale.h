@@ -54,6 +54,16 @@ inline uint32_t ScaleForTexture(uint32_t width, uint32_t height, uint32_t scale,
   return s;
 }
 
+// [new_fix_27092026_shadows] Slope-scaled depth bias for D3D12 from the guest's
+// PA_SU_POLY_OFFSET_*_SCALE: the console's unit is 1/16 of a pixel, and a pixel
+// of a target rendered at `bind_scale` x covers `bind_scale` host pixels, so the
+// slope bias grows with the scale (the SDK: polygon_offset_scale * 1/16 *
+// max(draw_resolution_scale)). Unscaled, 2x gave the shadow casters half the
+// console's bias: self-shadowing bands (53% of a door frame vs 0% emulated).
+inline float SlopeScaledDepthBias(float guest_scale, uint32_t bind_scale) {
+  return guest_scale * (1.0f / 16.0f) * float(bind_scale ? bind_scale : 1u);
+}
+
 // The multiplier the rasterizer works in when a colour and a depth target are
 // bound together. They normally match; if one of them fell back to 1x (out of
 // video memory) the smaller one decides, so nothing is ever rasterized outside
