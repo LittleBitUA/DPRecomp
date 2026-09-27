@@ -94,3 +94,6 @@ set_target_properties(dp_native_buffer_header_test PROPERTIES EXCLUDE_FROM_ALL T
 # [new_fix_27092026_health] graphics health log helpers
 add_executable(dp_native_health_test tests/native_health_test.cpp)
 set_target_properties(dp_native_health_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+# [new_fix_27092026_i39] guest thread stack sizes
+add_executable(dp_thread_stack_test tests/thread_stack_test.cpp)
+set_target_properties(dp_thread_stack_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

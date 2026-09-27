@@ -737,3 +737,61 @@ REX_HOOK_RAW(DP_XAM_CONTENT_CREATE_WRAPPER) {
               flags);
   ctx.r3.u64 = 1167;
 }
+
+// ---------------------------------------------------------------------------
+// [new_fix_27092026_i39] More stack for the game's threads (issue #39).
+// Every guest thread is created through this XAPI wrapper (r4 = requested
+// stack size, r5 = start address), which passes the size to ExCreateThread
+// unchanged. GameThread's 256 KB overflowed in the collision code's stack
+// arrays (see deadlyprem_thread_stack.h); the threads now get
+// dp_guest_stack_scale times what they ask for. If the larger stack cannot be
+// allocated, the thread is created again with the console's size.
+// ---------------------------------------------------------------------------
+#include "deadlyprem_thread_stack.h"
+#if defined(DP_REGION_USA)
+#define DP_CREATE_THREAD_WRAPPER sub_824EBFD0
+#else
+#define DP_CREATE_THREAD_WRAPPER sub_825C9A20
+#endif
+#define DP_CREATE_THREAD_IMP DP_CONCAT(__imp__, DP_CREATE_THREAD_WRAPPER)
+REX_EXTERN(DP_CREATE_THREAD_IMP);
+
+REXCVAR_DEFINE_INT32(dp_guest_stack_scale, 4, "DP1",
+                     "Guest threads get this many times the stack they ask for (capped at 4 MB "
+                     "per thread); 1 = the console's sizes. Applies to threads created after "
+                     "the change, so set it before starting the game (#39)")
+    .range(1, dp::kMaxGuestStackScale);
+
+REX_HOOK_RAW(DP_CREATE_THREAD_WRAPPER) {
+  const uint32_t requested = ctx.r4.u32;
+  const uint32_t start = ctx.r5.u32;
+  const uint32_t caller = static_cast<uint32_t>(ctx.lr);
+  const uint32_t scaled = dp::ScaledGuestStackSize(requested, REXCVAR_GET(dp_guest_stack_scale));
+  if (scaled == requested) {
+    DP_CREATE_THREAD_IMP(ctx, base);
+    return;
+  }
+  const uint64_t args[7] = {ctx.r3.u64, ctx.r4.u64, ctx.r5.u64, ctx.r6.u64,
+                            ctx.r7.u64, ctx.r8.u64, ctx.r9.u64};
+  ctx.r4.u64 = scaled;
+  DP_CREATE_THREAD_IMP(ctx, base);
+  if (ctx.r3.u32 != 0) {
+    REXLOG_INFO("Guest thread stack: start {:08X} (caller {:08X}) {} KB -> {} KB "
+                "(dp_guest_stack_scale {}, #39)",
+                start, caller, requested / 1024, scaled / 1024,
+                REXCVAR_GET(dp_guest_stack_scale));
+    return;
+  }
+  REXLOG_WARN("Guest thread stack: {} KB for start {:08X} could not be created; retrying with "
+              "the requested {} KB",
+              scaled / 1024, start, requested / 1024);
+  ctx.r3.u64 = args[0];
+  ctx.r4.u64 = args[1];
+  ctx.r5.u64 = args[2];
+  ctx.r6.u64 = args[3];
+  ctx.r7.u64 = args[4];
+  ctx.r8.u64 = args[5];
+  ctx.r9.u64 = args[6];
+  ctx.lr = caller;
+  DP_CREATE_THREAD_IMP(ctx, base);
+}
