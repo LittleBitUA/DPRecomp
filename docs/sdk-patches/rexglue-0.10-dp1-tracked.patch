@@ -298,6 +298,46 @@ index 4d85a2b..df951d7 100644
   protected:
    SharedMemory(memory::Memory& memory);
    // Call in implementation-specific initialization.
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..150f6ff 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -10,10 +10,13 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
+ #include <memory>
++#include <mutex>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
++#include <rex/input/guest_input_gate.h>  // [new_fix_28092026_upstream]
+ #include <rex/input/input.h>
+ #include <rex/input/input_driver.h>
+ #include <rex/input/state_merge.h>
+@@ -47,7 +50,21 @@ class InputSystem : public system::IInputSystem {
+   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
+   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
+ 
++  // [new_fix_28092026_upstream] While any blocker is held (a XAM dialog is on
++  // screen) the guest reads a neutral pad; buttons still held when the last
++  // blocker drops stay masked until released.
++  void AddUIInputBlocker();
++  void RemoveUIInputBlocker();
++
+  private:
++  // [new_fix_28092026_upstream] The merged state of a user's devices, before
++  // the dialog gate; GetState applies the gate and announces connection changes.
++  X_RESULT ReadMergedState(uint32_t user_index, X_INPUT_STATE* out_state);
++  void NoteConnection(uint32_t user_index, bool connected);
++  std::mutex gate_mutex_;
++  GuestInputGate gate_;
++  std::atomic<int> ui_input_blockers_{0};
++
+   /// Re-enumerates every driver and notifies the assignment when the set
+   /// changed.
+   void RefreshDevices();
 diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
 index c8751b7..d5a4e75 100644
 --- a/include/rex/input/mnk/mnk_input_driver.h
@@ -1028,19 +1068,20 @@ index 1ddafd0..e45404d 100644
 +    target_link_libraries(rexcore PRIVATE dbghelp psapi)
 +endif()
 diff --git a/src/core/logging.cpp b/src/core/logging.cpp
-index 1645848..1aa49f7 100644
+index 1645848..5bebecd 100644
 --- a/src/core/logging.cpp
 +++ b/src/core/logging.cpp
-@@ -18,6 +18,8 @@
+@@ -18,6 +18,9 @@
  #include <vector>
  
  #include <spdlog/sinks/rotating_file_sink.h>
++#include <rex/logging/log_dir_budget.h>  // [new_fix_28092026_upstream]
 +#include <spdlog/pattern_formatter.h>
 +#include <atomic>
  #include <spdlog/sinks/stdout_color_sinks.h>
  
  #include <toml++/toml.hpp>
-@@ -44,7 +46,7 @@ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets lev
+@@ -44,7 +47,7 @@ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets lev
  
  REXCVAR_DEFINE_BOOL(log_noisy, false, "Log", "Enable noisy/high-frequency log macros");
  
@@ -1049,7 +1090,21 @@ index 1645848..1aa49f7 100644
      .range(0, 60)
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
  
-@@ -131,6 +133,48 @@ spdlog::level::level_enum ResolveCategoryLevel(const std::string& name) {
+@@ -52,6 +55,13 @@ REXCVAR_DEFINE_INT32(log_max_file_size_mb, 5, "Log", "Max log file size in MB be
+     .range(1, 100)
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
++// [new_fix_28092026_upstream] port of upstream b971840: bound the logs directory.
++REXCVAR_DEFINE_INT32(log_dir_budget_mb, 256, "Log",
++                     "Size limit of the logs directory in MB: at start the oldest runs (a log and "
++                     "its rotated parts) are removed until the rest fits (0 = unlimited)")
++    .range(0, 100000)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
+ REXCVAR_DEFINE_INT32(log_max_files, 20, "Log", "Max number of rotated log files to keep")
+     .range(1, 100)
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+@@ -131,6 +141,48 @@ spdlog::level::level_enum ResolveCategoryLevel(const std::string& name) {
    return g_config.default_level;
  }
  
@@ -1098,7 +1153,16 @@ index 1645848..1aa49f7 100644
  // Create a logger and register it
  std::shared_ptr<spdlog::logger> CreateCategoryLogger(const std::string& name) {
    auto sinks = BuildCategorySinks(name);
-@@ -212,7 +256,7 @@ void InitLogging(const LogConfig& config) {
+@@ -176,7 +228,7 @@ void InitLoggingEarly() {
+ }
+ 
+ void InitLogging(const LogConfig& config) {
+-  std::lock_guard lock(g_mutex);
++  std::unique_lock lock(g_mutex);  // [new_fix_28092026_upstream] released before the prune line
+ 
+   if (g_initialized) {
+     g_config = config;
+@@ -212,17 +264,23 @@ void InitLogging(const LogConfig& config) {
    if (config.log_to_console) {
      auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
      sink->set_level(spdlog::level::trace);
@@ -1107,7 +1171,23 @@ index 1645848..1aa49f7 100644
      g_console_sink = sink;
    }
  
-@@ -230,7 +274,7 @@ void InitLogging(const LogConfig& config) {
+   // File sink (rotating) with sequential naming fallback
+   std::string resolved_path;
++  rex::logging::PruneResult prune_result;  // [new_fix_28092026_upstream]
+   if (config.log_file) {
+     resolved_path = config.log_file;
+   } else if (!config.app_name.empty()) {
+     auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
+                                           : std::filesystem::path(config.log_dir);
++    // [new_fix_28092026_upstream] before the new run's file exists
++    std::error_code prune_ec;
++    std::filesystem::create_directories(log_dir, prune_ec);
++    prune_result = rex::logging::PruneLogDirectory(
++        log_dir, config.app_name, uint64_t(REXCVAR_GET(log_dir_budget_mb)) * 1024 * 1024);
+     resolved_path = NextSequentialLogPath(log_dir, config.app_name).string();
+   }
+   if (!resolved_path.empty()) {
+@@ -230,7 +288,7 @@ void InitLogging(const LogConfig& config) {
          resolved_path, static_cast<size_t>(REXCVAR_GET(log_max_file_size_mb)) * 1024 * 1024,
          static_cast<size_t>(REXCVAR_GET(log_max_files)), false);
      sink->set_level(spdlog::level::trace);
@@ -1116,7 +1196,23 @@ index 1645848..1aa49f7 100644
      g_file_sink = sink;
    }
  
-@@ -561,4 +605,10 @@ std::map<std::string, std::string> ParseCategoryLevelsFromConfig(
+@@ -260,6 +318,15 @@ void InitLogging(const LogConfig& config) {
+   int flush_interval = REXCVAR_GET(log_flush_interval);
+   if (flush_interval > 0)
+     spdlog::flush_every(std::chrono::seconds(flush_interval));
++
++  // [new_fix_28092026_upstream] the logger lookups take g_mutex
++  lock.unlock();
++  if (prune_result.removed_files > 0) {
++    REXLOG_INFO("Log directory over {} MB: removed the {} oldest run(s), {} file(s), {:.1f} MB; {:.1f} MB kept",
++                REXCVAR_GET(log_dir_budget_mb), prune_result.removed_runs, prune_result.removed_files,
++                double(prune_result.removed_bytes) / (1024.0 * 1024.0),
++                double(prune_result.kept_bytes) / (1024.0 * 1024.0));
++  }
+ }
+ 
+ void InitLogging(const char* log_file, spdlog::level::level_enum level) {
+@@ -561,4 +628,10 @@ std::map<std::string, std::string> ParseCategoryLevelsFromConfig(
    return result;
  }
  
@@ -27769,10 +27865,10 @@ index 3ea3535..1829423 100644
      nop/nop_input_driver.cpp
  )
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
-index 813bb1c..88660fc 100644
+index 813bb1c..b11f040 100644
 --- a/src/input/input_system.cpp
 +++ b/src/input/input_system.cpp
-@@ -17,6 +17,7 @@
+@@ -17,12 +17,14 @@
  #include <rex/input/flags.h>
  #include <rex/input/input_driver.h>
  #include <rex/input/input_system.h>
@@ -27780,7 +27876,81 @@ index 813bb1c..88660fc 100644
  #include <rex/input/mnk/mnk_input_driver.h>
  #include <rex/input/nop/nop_input_driver.h>
  #include <rex/input/sdl/sdl_input_driver.h>
-@@ -234,6 +235,9 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+ #include <rex/input/state_merge.h>
+ #include <rex/input/xinput/xinput_input_driver.h>
+ #include <rex/logging.h>
++#include <rex/system/kernel_state.h>  // [new_fix_28092026_upstream]
+ 
+ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
+     .allowed({"sdl", "xinput"});
+@@ -212,8 +214,66 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+   return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+ }
+ 
++// [new_fix_28092026_upstream] port of upstream 3cd7243 (the parts DP needs).
++// XN_SYS_INPUTDEVICESCHANGED: titles re-check their pads on it, so a pad
++// plugged in or woken up mid-game is noticed.
++constexpr uint32_t kXNotificationSystemInputDevicesChanged = 0x00000012;
++
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
++  X_INPUT_STATE state = {};
++  const X_RESULT result = ReadMergedState(user_index, &state);
++  NoteConnection(user_index, result == X_ERROR_SUCCESS);
++  if (result != X_ERROR_SUCCESS) {
++    return result;
++  }
++  if (ui_input_blockers_.load(std::memory_order_acquire) > 0) {
++    state.gamepad = X_INPUT_GAMEPAD{};  // a dialog owns the input
++  } else {
++    std::lock_guard<std::mutex> lock(gate_mutex_);
++    state.gamepad.buttons = gate_.Mask(user_index, uint16_t(state.gamepad.buttons));
++  }
++  if (out_state) {
++    *out_state = state;
++  }
++  return X_ERROR_SUCCESS;
++}
++
++void InputSystem::NoteConnection(uint32_t user_index, bool connected) {
++  GuestInputGate::Change change;
++  {
++    std::lock_guard<std::mutex> lock(gate_mutex_);
++    change = gate_.Observe(user_index, connected);
++  }
++  if (change == GuestInputGate::Change::kNone) {
++    return;
++  }
++  REXLOG_INFO("Input: controller {} guest user {}; notifying the game (XN_SYS_INPUTDEVICESCHANGED)",
++              change == GuestInputGate::Change::kConnected ? "connected to" : "disconnected from",
++              user_index);
++  if (auto* kernel_state = REX_KERNEL_STATE()) {
++    kernel_state->BroadcastNotification(kXNotificationSystemInputDevicesChanged, 0);
++  }
++}
++
++void InputSystem::AddUIInputBlocker() {
++  ui_input_blockers_.fetch_add(1, std::memory_order_acq_rel);
++}
++
++void InputSystem::RemoveUIInputBlocker() {
++  // Whatever is held now (the press that closed the dialog) stays hidden from
++  // the game until released.
++  for (uint32_t user_index = 0; user_index < kMaxGuestUsers; ++user_index) {
++    X_INPUT_STATE state = {};
++    if (ReadMergedState(user_index, &state) == X_ERROR_SUCCESS) {
++      std::lock_guard<std::mutex> lock(gate_mutex_);
++      gate_.Consume(user_index, uint16_t(state.gamepad.buttons));
++    }
++  }
++  ui_input_blockers_.fetch_sub(1, std::memory_order_acq_rel);
++}
++
++X_RESULT InputSystem::ReadMergedState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -234,6 +294,9 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
        continue;
      }
      active_devices_.Observe(user_index, id, state.gamepad);
@@ -27790,7 +27960,7 @@ index 813bb1c..88660fc 100644
      if (!any) {
        merged = state;
        any = true;
-@@ -245,6 +249,8 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+@@ -245,6 +308,8 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
    if (!any) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
@@ -28753,6 +28923,72 @@ index 1fda053..68f0281 100644
  }
  
  u32 XamGetCurrentTitleId_entry() {
+diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
+index 5a572ce..0410c27 100644
+--- a/src/kernel/xam/xam_ui.cpp
++++ b/src/kernel/xam/xam_ui.cpp
+@@ -21,6 +21,8 @@ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
+                     "Don't display any UI, using defaults for prompts as needed");
+ #include <rex/kernel/xam/private.h>
+ #include <rex/hook.h>
++#include <rex/input/input_system.h>  // [new_fix_28092026_upstream]
++#include <rex/runtime.h>
+ #include <rex/types.h>
+ #include <rex/system/xtypes.h>
+ #include <rex/thread.h>
+@@ -54,6 +56,36 @@ using namespace rex::system;
+ 
+ extern std::atomic<int> xam_dialogs_shown_;
+ 
++namespace {
++
++// [new_fix_28092026_upstream] port of upstream 3cd7243: holds guest input for
++// as long as a dialog is on screen, so the title does not act on the presses
++// driving it (the keyboard is also a pad for the game), including the one that
++// dismisses it.
++class ScopedGuestInputBlock {
++ public:
++  ScopedGuestInputBlock() {
++    auto* runtime = REX_KERNEL_STATE() ? REX_KERNEL_STATE()->emulator() : nullptr;
++    input_system_ =
++        runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
++    if (input_system_) {
++      input_system_->AddUIInputBlocker();
++    }
++  }
++  ~ScopedGuestInputBlock() {
++    if (input_system_) {
++      input_system_->RemoveUIInputBlocker();
++    }
++  }
++  ScopedGuestInputBlock(const ScopedGuestInputBlock&) = delete;
++  ScopedGuestInputBlock& operator=(const ScopedGuestInputBlock&) = delete;
++
++ private:
++  rex::input::InputSystem* input_system_ = nullptr;
++};
++
++}  // namespace
++
+ class XamDialog : public rex::ui::ImGuiDialog {
+  public:
+   void set_close_callback(std::function<void()> close_callback) {
+@@ -81,6 +113,7 @@ X_RESULT xeXamDispatchDialog(T* dialog, std::function<X_RESULT(T*)> close_callba
+     REX_KERNEL_STATE()->BroadcastNotification(0x9, true);
+   };
+   auto run = [dialog, close_callback]() -> X_RESULT {
++    ScopedGuestInputBlock input_block;  // [new_fix_28092026_upstream]
+     X_RESULT result;
+     dialog->set_close_callback(
+         [&dialog, &result, &close_callback]() { result = close_callback(dialog); });
+@@ -122,6 +155,7 @@ X_RESULT xeXamDispatchDialogEx(T* dialog,
+     REX_KERNEL_STATE()->BroadcastNotification(0x9, true);
+   };
+   auto run = [dialog, close_callback](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
++    ScopedGuestInputBlock input_block;  // [new_fix_28092026_upstream]
+     rex::ui::WindowedAppContext* app_context = REX_KERNEL_STATE()->emulator()->app_context();
+     X_RESULT result;
+     dialog->set_close_callback([&dialog, &result, &extended_error, &length, &close_callback]() {
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
 index 86e7888..f2002be 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
@@ -29881,15 +30117,16 @@ index 2251429..cee7285 100644
        break;
      case SDL_EVENT_WINDOW_EXPOSED:
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bda2ad..3506992 100644
+index 7bda2ad..8d43891 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
-@@ -11,12 +11,18 @@ add_executable(unit_tests
+@@ -11,12 +11,20 @@ add_executable(unit_tests
      core/hash_test.cpp
      core/stream_test.cpp
      core/chrono_test.cpp
 +    core/stats_test.cpp
 +    core/texture_copy_clamp_test.cpp
++    core/log_dir_budget_test.cpp
      ppc/import_function_test.cpp
      ppc/stack_test.cpp
      system/guest_path_test.cpp
@@ -29899,11 +30136,12 @@ index 7bda2ad..3506992 100644
      input/input_assignment_test.cpp
 +    input/state_filter_test.cpp
 +    input/stick_mapping_test.cpp
++    input/guest_input_gate_test.cpp
 +    audio/output_layout_test.cpp
      codegen/codegen_writer_test.cpp
      codegen/output_partition_test.cpp
      codegen/output_stamp_test.cpp
-@@ -36,6 +42,7 @@ target_include_directories(unit_tests PRIVATE
+@@ -36,6 +44,7 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime

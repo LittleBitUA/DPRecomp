@@ -23,8 +23,15 @@
 #include <filesystem>
 
 #include <rex/logging.h>
+#include <rex/logging/log_dir_budget.h>  // [new_fix_28092026_upstream]
 
 #pragma comment(lib, "dbghelp.lib")
+
+// [new_fix_28092026_upstream] minidumps are ~40 MB each and were never removed.
+REXCVAR_DEFINE_INT32(crash_dump_keep, 5, "Log",
+                     "How many of the newest crash minidumps to keep in the logs folder (older "
+                     "ones are removed at start; -1 = keep all)")
+    .range(-1, 1000);
 
 REXCVAR_DEFINE_BOOL(crash_handler_test, false, "Log",
                     "Raise an access violation right after the crash handler is installed "
@@ -255,6 +262,11 @@ void Install(const std::string& dump_dir, const std::string& app_name) {
   _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
   std::set_terminate(TerminateHandler);
   REXLOG_INFO("Crash handler installed (minidumps in {})", dump_dir);
+  if (const uint32_t removed = rex::logging::PruneMinidumps(dump_dir, app_name.empty() ? "crash" : app_name,
+                                                             REXCVAR_GET(crash_dump_keep))) {
+    REXLOG_INFO("Crash handler: removed {} old minidump(s), keeping the newest {}", removed,
+                REXCVAR_GET(crash_dump_keep));
+  }
   if (REXCVAR_GET(crash_handler_test)) {
     REXLOG_WARN("crash_handler_test: raising an access violation on purpose");
     volatile int* null_pointer = nullptr;
