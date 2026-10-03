@@ -49,6 +49,7 @@
 #include "native_scale.h"  // [NEW FABLE VERSION] internal resolution rules (tested in tests/native_scale_test.cpp)
 #include "native_health.h"  // [new_fix_27092026_health] graphics health log (tests/native_health_test.cpp)
 #include "native_evict.h"  // [new_fix_03102026_evict] host texture eviction (tests/native_evict_test.cpp)
+#include "native_clip_plane.h"  // [new_fix_03102026_clipplane] user clip plane location (tests/native_clip_plane_test.cpp)
 #include <dxgi1_4.h>        // [new_fix_27092026_health] driver version
 #include "native_texrep.h"  // [NEW FABLE VERSION] textures\<hash>.png replacement (tested in tests/native_texrep_test.cpp)
 
@@ -231,7 +232,9 @@ constexpr uint32_t kDevPaClVteCntl = 10572;  // viewport transform enable bits 0
 constexpr uint32_t kDevPaScWindowScissorTl = 10436;  // PA_SC_WINDOW_SCISSOR_TL: x bits 0-14, y bits 16-30
 constexpr uint32_t kDevPaScWindowScissorBr = 10440;  // PA_SC_WINDOW_SCISSOR_BR
 constexpr uint32_t kDevPaClClipCntl = 10564;  // PA_CL_CLIP_CNTL: bit 0 ucp_ena_0 (the floor reflection pass)
-constexpr uint32_t kDevPaClUcp0 = 8528;       // PA_CL_UCP_0 X,Y,Z,W (clip-space plane; dev-block scan, shadow is not linear here)
+// [new_fix_03102026_clipplane] PA_CL_UCP_0 X,Y,Z,W as D3DDevice_SetClipPlane stores it (dev + 10272,
+// native_clip_plane.h); up to 2.0.12 this read dev + 8528 = PS constant c157 (#46, #41).
+constexpr uint32_t kDevPaClUcp0 = dp::native::DevClipPlaneOffset(0);
 constexpr uint32_t kDevBlendFactors = 12024;    // game-level packed D3DRS blend states (diagnostics only)
 constexpr uint32_t kDevBlendEnable = 12028;     // game-level ALPHABLENDENABLE (bit 31) / SEPARATEALPHA (bit 30) flags (diagnostics only)
 constexpr uint32_t kDevRbBlendControl0 = 10552; // 0x2201 RB_BLENDCONTROL0: what the GPU actually gets (XDK writes 0x00010001 when blending is off)
