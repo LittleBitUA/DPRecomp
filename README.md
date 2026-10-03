@@ -7,19 +7,19 @@
 **A native Windows port of *Deadly Premonition* (Xbox 360, 2010) by static recompilation. No emulator.**<br>
 60 FPS on the console's own time base · real mouse look · keyboard and PlayStation button prompts · FSR 3 and 2× supersampling · a launcher that updates itself · PAL and USA discs
 
-[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.13/DPRecomp-2.0.13-win64.zip)
+[![Latest release](https://img.shields.io/github/v/release/LittleBitUA/DPRecomp?style=for-the-badge&label=Download&color=blue)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.14/DPRecomp-2.0.14-win64.zip)
 [![Total downloads](https://img.shields.io/github/downloads/LittleBitUA/DPRecomp/total?style=for-the-badge&color=brightgreen)](https://github.com/LittleBitUA/DPRecomp/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.13/DPRecomp-2.0.13-win64.zip)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=for-the-badge&logo=windows)](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.14/DPRecomp-2.0.14-win64.zip)
 [![Issues](https://img.shields.io/github/issues/LittleBitUA/DPRecomp?style=for-the-badge&color=orange)](https://github.com/LittleBitUA/DPRecomp/issues)
 [![Stars](https://img.shields.io/github/stars/LittleBitUA/DPRecomp?style=for-the-badge&color=yellow)](https://github.com/LittleBitUA/DPRecomp/stargazers)
 
 ![York in the rain — Deadly Premonition Recompilation](docs/screenshots/york.jpg)
 
-## [⬇ &nbsp;Download 2.0.13 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.13/DPRecomp-2.0.13-win64.zip)
+## [⬇ &nbsp;Download 2.0.14 for Windows](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.14/DPRecomp-2.0.14-win64.zip)
 
-`DPRecomp-2.0.13-win64.zip` · 47 MB · Windows 10 / 11 64-bit
+`DPRecomp-2.0.14-win64.zip` · 47 MB · Windows 10 / 11 64-bit
 
-[Release notes](docs/RELEASE-NOTES-2.0.13.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
+[Release notes](docs/RELEASE-NOTES-2.0.14.md) · [Steam artwork pack](https://github.com/LittleBitUA/DPRecomp/releases/download/v1.3.0/DPRecomp-Steam-artwork.zip) · [Report a bug](https://github.com/LittleBitUA/DPRecomp/issues/new) · [Changelog](docs/CHANGELOG.md)
 
 **by the «Little Bit» team &nbsp;·&nbsp; 🇺🇦 MADE IN UKRAINE**
 
@@ -46,7 +46,7 @@
 
 **You need:** Windows 10 / 11 64-bit · a Direct3D 12 GPU with rasterizer-ordered views (NVIDIA GTX 900+, AMD RX 400+, Intel Arc; recent integrated graphics at 1×) · ~6 GB free for the game data · your *Deadly Premonition* Xbox 360 disc image or extracted files.
 
-1. **Download** [`DPRecomp-2.0.13-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.13/DPRecomp-2.0.13-win64.zip) and unzip it anywhere outside *Program Files*.
+1. **Download** [`DPRecomp-2.0.14-win64.zip`](https://github.com/LittleBitUA/DPRecomp/releases/download/v2.0.14/DPRecomp-2.0.14-win64.zip) and unzip it anywhere outside *Program Files*.
 2. **Game data:** either start the launcher and let the built-in installer extract your `.iso` into `assets\` (a few minutes, resumable), or copy the extracted disc contents so that `default.xex` ends up at `assets\default.xex`.
 3. **Play:** run `PlayDeadlyPremonition.exe` and press **PLAY**. The first launch compiles shaders for a minute; later launches are instant. Saves live in `userdata\` next to the game.
 
@@ -55,6 +55,8 @@ Updating: the launcher shows an *Update available* banner and installs the new v
 ---
 
 ## What's new
+
+**2.0.14:** mouse look: looking up no longer shakes the camera against the ground, and in the car the camera stays where you turn it instead of swinging straight back ([#45](https://github.com/LittleBitUA/DPRecomp/issues/45)). [Notes](docs/RELEASE-NOTES-2.0.14.md).
 
 **2.0.13:** reflections in the native renderer show the right thing: the mirror in Emily's house ([#46](https://github.com/LittleBitUA/DPRecomp/issues/46)), the lake ([#41](https://github.com/LittleBitUA/DPRecomp/issues/41)) and the station's mirror floor. [Notes](docs/RELEASE-NOTES-2.0.13.md).
 

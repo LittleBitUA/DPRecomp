@@ -406,10 +406,29 @@ labels = [
 # The whole camera family sits at PAL - 0x250 in the USA executable; merge points
 # after each routine's stick-X step, verified against the generated code.
 # "Walk" = pitch -= stick_y (fnmsubs), plain = pitch += stick_y (fmadds).
+# [new_fix_03102026_mouselook] #45 car camera (USA sub_823387E8, mode 9): views 1-2 after the
+# yaw target (r27 = car camera table, r28 = 3 * camera set, view record at r27 + (view + r28) * 36).
 [[midasm_hook]]
-address = 0x82338A58          # sub_823387E8 (PAL 82338A38, fmadds)
-name = "DPCameraMouseHook"
-registers = ["r31"]
+address = 0x82338A58
+name = "DPCarCameraViewHook"
+registers = ["r27", "r28", "r31"]
+after_instruction = false
+
+# [new_fix_03102026_mouselook] #45 car chase camera (view 0, never hooked before): the yaw
+# target is final and f13 carries it into the smoothing (r28 = the view record).
+[[midasm_hook]]
+address = 0x82338F0C
+name = "DPCarCameraYawHook"
+registers = ["r28", "r31", "f13"]
+after_instruction = false
+
+# [new_fix_03102026_mouselook] #45 car chase camera (view 0): the pitch target is final
+# and f0 carries it into the smoothing.
+[[midasm_hook]]
+address = 0x8233905C
+name = "DPCarCameraPitchHook"
+registers = ["r31", "f0"]
+after_instruction = false
 
 # DP1 v1.1 (#11): aim camera sub_8233B3C0 (left-stick driven): mark the frame so the
 # MnK driver maps the mouse onto the left stick (see deadlyprem_camera_hook.cpp).

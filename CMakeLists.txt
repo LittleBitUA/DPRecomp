@@ -105,6 +105,8 @@ add_executable(dp_native_evict_test tests/native_evict_test.cpp)
 set_target_properties(dp_native_evict_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 add_executable(dp_native_clip_plane_test tests/native_clip_plane_test.cpp)  # [new_fix_03102026_clipplane]
 set_target_properties(dp_native_clip_plane_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
+add_executable(dp_mouse_camera_test tests/mouse_camera_test.cpp)  # [new_fix_03102026_mouselook]
+set_target_properties(dp_mouse_camera_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # [new_fix_03102026_effects] fixed-step effects at 60 FPS
 add_executable(dp_effect_step_test tests/effect_step_test.cpp)
 set_target_properties(dp_effect_step_test PROPERTIES EXCLUDE_FROM_ALL TRUE)

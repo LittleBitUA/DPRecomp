@@ -329,10 +329,28 @@ after_instruction = false
 # DP1 2026-09-06: direct mouse camera control (src/deadlyprem_camera_hook.cpp).
 # Merge point in the camera update (PAL sub_82338A38) after the right-stick X
 # contribution; the hook adds the mouse deltas to the per-frame yaw/pitch.
+# [new_fix_03102026_mouselook] #45 car camera (PAL sub_82338A38, mode 9): views 1-2 after the
+# yaw target (r27 = car camera table, r28 = 3 * camera set, view record at r27 + (view + r28) * 36).
 [[midasm_hook]]
 address = 0x82338CA8
-name = "DPCameraMouseHook"
-registers = ["r31"]
+name = "DPCarCameraViewHook"
+registers = ["r27", "r28", "r31"]
+after_instruction = false
+
+# [new_fix_03102026_mouselook] #45 car chase camera (view 0, never hooked before): the yaw
+# target is final and f13 carries it into the smoothing (r28 = the view record).
+[[midasm_hook]]
+address = 0x8233915C
+name = "DPCarCameraYawHook"
+registers = ["r28", "r31", "f13"]
+after_instruction = false
+
+# [new_fix_03102026_mouselook] #45 car chase camera (view 0): the pitch target is final
+# and f0 carries it into the smoothing.
+[[midasm_hook]]
+address = 0x823392AC
+name = "DPCarCameraPitchHook"
+registers = ["r31", "f0"]
 after_instruction = false
 
 # DP1 2026-09-06: walking gameplay camera (sub_8233AB28), merge point after RX.

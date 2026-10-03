@@ -62,6 +62,8 @@ dp_mouse_camera_invert_y = false
 dp_mouse_camera_direct = true
 dp_mouse_camera_catchup = true
 dp_mouse_camera_hold_ms = 120
+# In the car: how long the camera stays where the mouse turned it before it glides back (ms).
+dp_mouse_camera_car_hold_ms = 1000
 mnk_sensitivity = 1.0
 mnk_stick_scale = 300.0
 mnk_deadzone_floor = 8689

@@ -46,6 +46,7 @@
 #include <rex/system/kernel_state.h>
 
 #include "deadlyprem_pch.h"
+#include "deadlyprem_mouse_camera.h"  // [new_fix_03102026_mouselook]
 
 REXCVAR_DEFINE_BOOL(dp_mouse_camera, true, "DP1",
                     "Mouse controls the camera directly (game camera hook) instead of "
@@ -70,6 +71,21 @@ REXCVAR_DEFINE_INT32(dp_mouse_camera_hold_ms, 120, "DP1",
                      "Idle mouse time after which the pending camera angle is released and "
                      "the game's own camera behaviour (auto-centering) resumes")
     .range(0, 2000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// [new_fix_03102026_mouselook] #45: the car's look-around (mode 9).
+REXCVAR_DEFINE_BOOL(dp_mouse_camera_car_look, true, "DP1",
+                    "In the car the mouse holds the camera turned (as far as the right stick can) "
+                    "while it moves and for dp_mouse_camera_car_hold_ms after, instead of the "
+                    "camera swinging back behind the car at once")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(dp_mouse_camera_car_hold_ms, 1000, "DP1",
+                     "In the car: how long the look-around angle stays after the mouse stops before "
+                     "the camera swings back behind the car")
+    .range(0, 10000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(dp_mouse_camera_trace, false, "DP1",
+                    "Log every camera hook call (mode, angles, pending, anchor fields) for "
+                    "diagnostics (#45); capped at 20000 lines")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(dp_mouse_camera_log, false, "DP1",
                     "Log the camera hook (first calls and every 300th) for diagnostics")
@@ -199,6 +215,8 @@ static void ApplyMouseToCamera(PPCRegister& r31, float pitch_sign, const char* t
   if (!active) {
     return;
   }
+  // [new_fix_03102026_mouselook] the camera mode (controller + 324), see deadlyprem_mouse_camera.h.
+  const uint32_t mode = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(r31.u32 + dp::kCameraModeOffset));
   const float k = float(REXCVAR_GET(dp_mouse_camera_sensitivity));
   const float yaw_step = -dx * k;
   // Mouse up (dy < 0) must act like stick up.
@@ -206,6 +224,22 @@ static void ApplyMouseToCamera(PPCRegister& r31, float pitch_sign, const char* t
   const float pitch_step = pitch_sign * stick_up * k;
   const bool absolute = pitch_sign < 0.0f;
   const bool has_mouse = dx != 0.0f || dy != 0.0f;
+
+  if (REXCVAR_GET(dp_mouse_camera_trace)) {
+    static uint32_t trace_lines = 0;
+    if (trace_lines < 20000) {
+      ++trace_lines;
+      const uint32_t anchor = g_anchor.load();
+      float af[8] = {};
+      if (absolute && anchor) {
+        for (int i = 0; i < 8; ++i) af[i] = LoadF32(memory->TranslateVirtual<uint8_t*>(anchor + 116 + i * 4));
+      }
+      REXLOG_INFO("DPCameraTrace {} mode={} dx={} dy={} pitch={:.4f} yaw={:.4f} pend=({:.4f},{:.4f}) anchor={:08X} "
+                  "a116..a144=[{:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}]",
+                  tag, mode, dx, dy, base_pitch, base_yaw, g_catchup.pending_yaw, g_catchup.pending_pitch, anchor,
+                  af[0], af[1], af[2], af[3], af[4], af[5], af[6], af[7]);
+    }
+  }
 
   if (!absolute || !REXCVAR_GET(dp_mouse_camera_catchup)) {
     // Delta family (or catch-up disabled): plain one-frame nudge (1.0 behaviour).
@@ -239,7 +273,9 @@ static void ApplyMouseToCamera(PPCRegister& r31, float pitch_sign, const char* t
       if (std::fabs(s.pending_pitch) < 1e-4f) s.pending_pitch = 0.0f;
     }
     s.pending_yaw = std::clamp(s.pending_yaw, -kMaxPendingYaw, kMaxPendingYaw);
-    s.pending_pitch = std::clamp(s.pending_pitch, -kMaxPendingPitch, kMaxPendingPitch);
+    // [new_fix_03102026_mouselook] #45: no further than the stick reaches (walking: 30 degrees).
+    const float pitch_limit = dp::PendingPitchLimit(mode, kMaxPendingPitch);
+    s.pending_pitch = std::clamp(s.pending_pitch, -pitch_limit, pitch_limit);
     s.prev_yaw = base_yaw;
     s.prev_pitch = base_pitch;
     s.have_prev = true;
@@ -272,3 +308,89 @@ void DPCameraMouseHook(PPCRegister& r31) { ApplyMouseToCamera(r31, +1.0f, "delta
 // driven). +112 = yaw, +108 = pitch (clamped by the game right after the stick
 // Y step); the anchor object holds the yaw state at +128.
 void DPCameraMouseHookWalk(PPCRegister& r31) { ApplyMouseToCamera(r31, -1.0f, "absolute"); }
+
+// ---------------------------------------------------------------------------
+// [new_fix_03102026_mouselook] Car camera (mode 9, deadlyprem_mouse_camera.h).
+// The mouse holds a yaw / pitch offset within the right stick's reach of the
+// current view while it moves and for dp_mouse_camera_car_hold_ms after.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct CarLookState {
+  float yaw = 0.0f;    // held offset, radians
+  float pitch = 0.0f;
+  std::chrono::steady_clock::time_point last_mouse{};
+  std::chrono::steady_clock::time_point last_frame{};
+};
+CarLookState g_car;
+
+// One frame of the car camera: drain the mouse and update both held angles
+// from the view record `view` (guest address of its 36-byte record).
+void UpdateCarLook(uint32_t view) {
+  using clock = std::chrono::steady_clock;
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory || !REXCVAR_GET(dp_mouse_camera) || !REXCVAR_GET(dp_mouse_camera_car_look)) {
+    g_car = {};
+    return;
+  }
+  if (!rex::input::mnk::IsMouseCameraHookActive()) rex::input::mnk::SetMouseCameraHookActive(true);
+  float dx = 0.0f, dy = 0.0f;
+  rex::input::mnk::TakeMouseCameraDelta(dx, dy);
+  const clock::time_point now = clock::now();
+  if (now - g_car.last_frame > std::chrono::milliseconds(250)) g_car = {};  // a new drive starts centred
+  g_car.last_frame = now;
+  const bool has_mouse = dx != 0.0f || dy != 0.0f;
+  if (has_mouse) g_car.last_mouse = now;
+  const bool holding =
+      g_car.last_mouse != clock::time_point{} &&
+      (now - g_car.last_mouse) <= std::chrono::milliseconds(REXCVAR_GET(dp_mouse_camera_car_hold_ms));
+  const float k = float(REXCVAR_GET(dp_mouse_camera_sensitivity));
+  const float stick_up = REXCVAR_GET(dp_mouse_camera_invert_y) ? dy : -dy;
+  const float yaw_reach = LoadF32(memory->TranslateVirtual<uint8_t*>(view + dp::kCarViewYaw)) * dp::kRadiansPerDegree;
+  const float up_reach = LoadF32(memory->TranslateVirtual<uint8_t*>(view + dp::kCarViewPitchUp)) * dp::kRadiansPerDegree;
+  const float down_reach = LoadF32(memory->TranslateVirtual<uint8_t*>(view + dp::kCarViewPitchDown)) * dp::kRadiansPerDegree;
+  // Same directions as the stick in this routine: right = yaw down, up = pitch up.
+  g_car.yaw = dp::CarHeldAngle(g_car.yaw, -dx * k, -std::fabs(yaw_reach), std::fabs(yaw_reach), holding);
+  g_car.pitch = dp::CarHeldAngle(g_car.pitch, stick_up * k, -std::fabs(down_reach), std::fabs(up_reach), holding);
+  if (REXCVAR_GET(dp_mouse_camera_trace) && (has_mouse || g_car.yaw != 0.0f || g_car.pitch != 0.0f)) {
+    REXLOG_INFO("DPCameraTrace car view={:08X} reach yaw {:.1f} up {:.1f} down {:.1f} deg: dx={} dy={} held yaw {:.4f} pitch {:.4f} holding={}",
+                view, yaw_reach / dp::kRadiansPerDegree, up_reach / dp::kRadiansPerDegree,
+                down_reach / dp::kRadiansPerDegree, dx, dy, g_car.yaw, g_car.pitch, holding);
+  }
+}
+
+}  // namespace
+
+// Chase camera (view 0), after the yaw target is final (PAL 0x8233915C,
+// USA 0x82338F0C): f13 carries +112 into the smoothing that follows.
+void DPCarCameraYawHook(PPCRegister& r28, PPCRegister& r31, PPCRegister& f13) {
+  UpdateCarLook(r28.u32);
+  if (g_car.yaw == 0.0f) return;
+  f13.f64 = double(float(f13.f64 + g_car.yaw));
+  StoreF32(REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(r31.u32 + 112), float(f13.f64));
+}
+
+// Chase camera (view 0), after the pitch target is final (PAL 0x823392AC,
+// USA 0x8233905C): f0 carries +108 into the smoothing that follows.
+void DPCarCameraPitchHook(PPCRegister& r31, PPCRegister& f0) {
+  if (g_car.pitch == 0.0f) return;
+  f0.f64 = double(float(f0.f64 + g_car.pitch));
+  StoreF32(REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(r31.u32 + 108), float(f0.f64));
+}
+
+// Views 1-2, after the yaw target (PAL 0x82338CA8, USA 0x82338A58): both
+// targets are re-read from memory afterwards (the pitch stick step loads +108).
+void DPCarCameraViewHook(PPCRegister& r27, PPCRegister& r28, PPCRegister& r31) {
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory) return;
+  const uint32_t view_index = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(r31.u32 + dp::kCameraViewOffset));
+  UpdateCarLook(dp::CarViewRecord(r27.u32, r28.u32, view_index));
+  if (g_car.yaw != 0.0f) {
+    uint8_t* yaw = memory->TranslateVirtual<uint8_t*>(r31.u32 + 112);
+    StoreF32(yaw, LoadF32(yaw) + g_car.yaw);
+  }
+  if (g_car.pitch != 0.0f) {
+    uint8_t* pitch = memory->TranslateVirtual<uint8_t*>(r31.u32 + 108);
+    StoreF32(pitch, LoadF32(pitch) + g_car.pitch);
+  }
+}
