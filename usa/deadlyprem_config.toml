@@ -299,6 +299,12 @@ name = "DP60FpsPacingHook"
 registers = ["r31"]
 after_instruction = false
 
+[[midasm_hook]]
+address = 0x8254FE74          # lwz r11,592(r31) after the effect update picked its delta in f31 (tick, or 1.0 for fixed-step effects): half the tick at 60 FPS
+name = "DP60FpsEffectStepHook"
+registers = ["f31", "r31"]
+after_instruction = false
+
 # Jump tables (sp00nznet/360tools extract_switch_tables.py on the USA image, 2026-09-06): 9 tables.
 [[switch_tables]]
 address = 0x824DEB00

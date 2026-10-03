@@ -49,6 +49,7 @@
 #include "deadlyprem_title_skip.h"
 #include "deadlyprem_keyboard_driving.h"  // [new_fix_25092026_glitch]
 #include "deadlyprem_frame_pacing.h"  // [new_fix_27092026_i36]
+#include "deadlyprem_effect_step.h"  // [new_fix_03102026_effects]
 
 #include "deadlyprem_pch.h"  // PPCRegister / PPCContext (generated/default is on the include path)
 
@@ -138,6 +139,41 @@ void DP60FpsPacingHook(PPCRegister& r31) {
   if (paced != now) {
     rex::memory::store_and_swap<uint64_t>(last_ptr, paced);
   }
+}
+
+// [new_fix_03102026_effects] Fixed-step effects at 60 FPS (deadlyprem_effect_step.h).
+// PAL 0x8254824C (USA 0x8254FE74), the merge point after the effect update
+// chose its delta in f31: the logic tick, or a constant 1.0 for effects with
+// bit 1 of +604. At 60 FPS that 1.0 per frame made them twice as fast as on
+// the console; give them half the tick (exactly 1.0 at 30 FPS).
+REXCVAR_DEFINE_BOOL(dp_60fps_effect_step, true, "DP1",
+                    "60 FPS: effects the game advances by a fixed step (muzzle flashes, splashes, "
+                    "hits) get half the frame's tick, so they play at the console's speed instead "
+                    "of twice as fast")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+void DP60FpsEffectStepHook(PPCRegister& f31, PPCRegister& r31) {
+  if (!REXCVAR_GET(dp_60fps) || !REXCVAR_GET(dp_60fps_effect_step)) {
+    return;
+  }
+  auto* memory = REX_KERNEL_MEMORY();
+  if (!memory) {
+    return;
+  }
+  const uint32_t flags =
+      rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(r31.u32 + dp::kEffectFlagsOffset));
+  if (!dp::IsFixedStepEffect(flags)) {
+    return;
+  }
+  const float tick =
+      rex::memory::load_and_swap<float>(memory->TranslateVirtual<uint8_t*>(dp::kGameTickAddress));
+  const double delta = dp::FixedStepEffectDelta(tick);
+  static std::atomic<uint32_t> logged{0};
+  if (logged.fetch_add(1, std::memory_order_relaxed) < 3) {
+    REXLOG_INFO("60 FPS: fixed-step effect {:08X} (flags {:08X}) advances by {} instead of {} (tick {})",
+                r31.u32, flags, delta, f31.f64, tick);
+  }
+  f31.f64 = delta;
 }
 
 // PAL 0x82522704, before `stfs f0,-11344(r24)`: f0 holds the vblank delta as

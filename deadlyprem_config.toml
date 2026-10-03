@@ -320,6 +320,12 @@ name = "DP60FpsPacingHook"
 registers = ["r31"]
 after_instruction = false
 
+[[midasm_hook]]
+address = 0x8254824C          # lwz r11,592(r31) after the effect update picked its delta in f31 (tick, or 1.0 for fixed-step effects): half the tick at 60 FPS
+name = "DP60FpsEffectStepHook"
+registers = ["f31", "r31"]
+after_instruction = false
+
 # DP1 2026-09-06: direct mouse camera control (src/deadlyprem_camera_hook.cpp).
 # Merge point in the camera update (PAL sub_82338A38) after the right-stick X
 # contribution; the hook adds the mouse deltas to the per-frame yaw/pitch.

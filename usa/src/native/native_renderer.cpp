@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_set>  // [new_fix_03102026_evict]
 #include <unordered_map>
 #include <vector>
 
@@ -47,6 +48,7 @@
 #include "native_graphics_system.h"
 #include "native_scale.h"  // [NEW FABLE VERSION] internal resolution rules (tested in tests/native_scale_test.cpp)
 #include "native_health.h"  // [new_fix_27092026_health] graphics health log (tests/native_health_test.cpp)
+#include "native_evict.h"  // [new_fix_03102026_evict] host texture eviction (tests/native_evict_test.cpp)
 #include <dxgi1_4.h>        // [new_fix_27092026_health] driver version
 #include "native_texrep.h"  // [NEW FABLE VERSION] textures\<hash>.png replacement (tested in tests/native_texrep_test.cpp)
 
@@ -91,6 +93,19 @@ REXCVAR_DEFINE_BOOL(dp_native_7e3_alpha, true, "DP1",
 // other fetch key) would sample that stale resolve forever, because an aliased
 // view is never uploaded and so never page-watched. Zero hits in the 2.0 test
 // session; turn on only to experiment.
+// [new_fix_03102026_evict] #37/#43: host textures were never destroyed (shader
+// view heap full after ~75 min of play, VRAM growing with it). See native_evict.h.
+REXCVAR_DEFINE_BOOL(dp_native_texture_evict, true, "DP1",
+                    "Native renderer: drop the host copy of textures that have not been drawn for a "
+                    "while (and the least recently used ones when the shader view heap gets full); "
+                    "they are uploaded again from guest memory when drawn next")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(dp_native_texture_idle_seconds, 60, "DP1",
+                     "Native renderer: textures not drawn for this long (at 60 FPS) lose their host "
+                     "copy (0 = only when the shader view heap gets full)")
+    .range(0, 3600)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(dp_native_resolve_alias, false, "DP1",
                     "Native renderer: a texture view of memory a resolve wrote last samples that resolve's "
                     "result (the emulator's texture cache is keyed by memory)")
@@ -335,6 +350,8 @@ struct GuestTexture {
   // texture's guest memory we know of (a resolve into it, or a CPU write the
   // page watch or the rehash saw); 0 = only its initial upload.
   uint64_t mem_seq = 0;
+  // [new_fix_03102026_evict] g.frame_number of the last draw that sampled it.
+  uint64_t last_used_frame = 0;
 };
 
 struct GuestSurface {
@@ -443,7 +460,7 @@ namespace {
 
 constexpr uint32_t kFramesInFlight = 2;
 constexpr size_t kUploadRingBytes = 96u << 20;
-constexpr uint32_t kViewHeapSize = 8192;
+constexpr uint32_t kViewHeapSize = 32768;  // [new_fix_03102026_evict] was 8192 (#37/#43); 32 B per view
 constexpr uint32_t kSamplerHeapSize = 256;
 constexpr uint32_t kRtvHeapSize = 512;
 constexpr uint32_t kDsvHeapSize = 128;
@@ -1078,6 +1095,52 @@ void Barrier(ID3D12Resource* r, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STA
   state = to;
 }
 
+// [new_fix_03102026_evict] Frame start, after the retired objects went: every
+// 30 frames drop the host copy of the textures native_evict.h picks (never a
+// resolve destination). The record stays in g_textures_by_key, so the raw
+// pointers other maps hold stay valid; dirty makes the next draw upload it again.
+void DropHostTexture(GuestTexture& t, bool forget_watch = true);  // defined with the page watch
+void ForgetWatches(const std::vector<GuestTexture*>& textures);  // one pass over the watch table
+std::atomic<uint32_t> g_evicted_count{0};
+std::atomic<uint32_t> g_resident_textures{0};  // host copies alive after the last pass
+void EvictHostTextures() {
+  if (!REXCVAR_GET(dp_native_texture_evict) || (g.frame_number % 30) != 0) return;
+  dp::native::EvictParams p;
+  p.heap_size = kViewHeapSize;
+  p.idle_frames = uint64_t(REXCVAR_GET(dp_native_texture_idle_seconds)) * 60;
+  std::lock_guard<std::mutex> lock(g_registry_mutex);
+  std::vector<dp::native::EvictCandidate> candidates;
+  std::vector<GuestTexture*> textures;
+  candidates.reserve(g_textures_by_key.size());
+  textures.reserve(g_textures_by_key.size());
+  for (auto& [key, t] : g_textures_by_key) {
+    if (!t->resource) continue;
+    dp::native::EvictCandidate c;
+    c.id = uint32_t(textures.size());
+    c.last_used = t->last_used_frame;
+    c.resident = true;
+    c.pinned = t->is_resolve_target;
+    candidates.push_back(c);
+    textures.push_back(t.get());
+  }
+  const std::vector<uint32_t> chosen = dp::native::ChooseEvictions(candidates, g.frame_number, g.views.InUse(), p);
+  if (chosen.empty()) {
+    g_resident_textures.store(uint32_t(candidates.size()), std::memory_order_relaxed);
+    return;
+  }
+  // Critic pass: one pass over the watch table for the whole batch, not one per texture.
+  std::vector<GuestTexture*> dropped;
+  dropped.reserve(chosen.size());
+  for (uint32_t id : chosen) dropped.push_back(textures[id]);
+  ForgetWatches(dropped);
+  for (GuestTexture* t : dropped) {
+    DropHostTexture(*t, false);
+    t->dirty = true;
+  }
+  if (!chosen.empty()) g_evicted_count.fetch_add(uint32_t(chosen.size()), std::memory_order_relaxed);
+  g_resident_textures.store(uint32_t(candidates.size() - chosen.size()), std::memory_order_relaxed);
+}
+
 bool BeginFrame() {
   if (!g.ready) return false;
   if (g.recording) return true;
@@ -1097,6 +1160,7 @@ bool BeginFrame() {
   }
   DestroyReleasedObjects();  // [new_fix_24092026] 2.0.3
   ReleaseRetired();          // [new_fix_24092026] 2.0.3: by fence, not by frame slot (native_retire.h)
+  EvictHostTextures();       // [new_fix_03102026_evict] #37/#43
   g.allocators[g.frame_index]->Reset();
   g.list->Reset(g.allocators[g.frame_index].Get(), nullptr);
   g.upload[g.frame_index].head = 0;
@@ -1716,6 +1780,21 @@ void ForgetWatch(GuestTexture* t) {
   }
 }
 
+// [new_fix_03102026_evict] ForgetWatch for a batch (eviction): one pass.
+void ForgetWatches(const std::vector<GuestTexture*>& textures) {
+  if (textures.empty()) return;
+  std::unordered_set<const GuestTexture*> set(textures.begin(), textures.end());
+  std::lock_guard<std::mutex> lock(g_watch_mutex);
+  for (size_t i = 0; i < g_watches.size();) {
+    if (g_watches[i].texture && set.count(g_watches[i].texture)) {
+      g_watches[i] = g_watches.back();
+      g_watches.pop_back();
+    } else {
+      ++i;
+    }
+  }
+}
+
 void ForgetWatch(GuestBuffer* b) {
   std::lock_guard<std::mutex> lock(g_watch_mutex);
   for (size_t i = 0; i < g_watches.size();) {
@@ -1774,8 +1853,8 @@ void WatchTexture(GuestTexture& t) {
 // plugin (the launcher's keyboard key caps over the button prompt atlas); the
 // native renderer does not load that plugin, so the prompts showed the pad
 // buttons. Same hash, same files, same overlay rules: see native_texrep.h.
-void DropHostTexture(GuestTexture& t) {
-  ForgetWatch(&t);
+void DropHostTexture(GuestTexture& t, bool forget_watch) {
+  if (forget_watch) ForgetWatch(&t);  // [new_fix_03102026_evict] eviction forgets its batch at once
   RetireDescriptor(g.views, t.srv_index);  // [new_fix_24092026] 2.0.3: after the GPU, like the resource
   g.rtvs.Free(t.rtv_index);                 // CPU-only heap: read when a command is recorded
   for (uint32_t r : t.slice_rtvs) g.rtvs.Free(r);
@@ -2080,6 +2159,7 @@ bool UploadTexture(GuestTexture& t) {
   // block offset), the host layout from GetCopyableFootprints. Until now every
   // texture was sampled from its base level only: shimmer and moire at a
   // distance, and a sharper look than the console's trilinear filtering.
+  bool mips_incomplete = false;  // [new_fix_03102026_evict]
   if (t.mip_levels > 1) {
     const D3D12_RESOURCE_DESC rdesc = t.resource->GetDesc();
     bool ring_full = false;
@@ -2103,6 +2183,7 @@ bool UploadTexture(GuestTexture& t) {
         if (moff == SIZE_MAX) {
           REXLOG_WARN("Native renderer: upload ring full while uploading mip {} of texture {:08X}", mip, t.guest);
           ring_full = true;
+          mips_incomplete = true;
           break;
         }
         uint8_t* dst = ring.mapped + moff;
@@ -2146,7 +2227,10 @@ bool UploadTexture(GuestTexture& t) {
   }
   Barrier(t.resource.Get(), t.state,
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  t.dirty = false;
+  // [new_fix_03102026_evict] critic pass: a full upload ring left lower mips
+  // empty; stay dirty so the next draw uploads the texture again (re-uploads
+  // after eviction come in bursts when the player returns to an area).
+  t.dirty = mips_incomplete;
   g.stats.uploads_tex++;
   WatchTexture(t);
   return true;
@@ -3067,6 +3151,7 @@ void ExecuteDraw(const DrawArgs& a) {
       Barrier(t->resource.Get(), t->state,
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
+    t->last_used_frame = g.frame_number;  // [new_fix_03102026_evict]
     if (t->is_cube) texcube[slot] = t->srv_index;
     else if (t->depth > 1) tex3d[slot] = t->srv_index;
     else tex2d[slot] = t->srv_index;
@@ -4166,6 +4251,8 @@ RendererStats OnSwap(uint32_t front_buffer_texture) {
   }
   auto* system = NativeGraphicsSystem::instance();
   GuestTexture* front = TextureForObject(front_buffer_texture);
+  // [new_fix_03102026_evict] critic pass: the frame shown is in use even when no draw sampled it.
+  if (front) front->last_used_frame = g.frame_number;
   if (g.frame_number < 3 || g.frame_number % 600 == 0) {
     REXLOG_INFO("Native renderer: Swap front {:08X}: registered {}, resource {}, srv {}, {}x{} fmt {}, resolve target {}",
                 front_buffer_texture, front != nullptr, front && front->resource, front ? front->srv_index : 0,
@@ -4290,12 +4377,14 @@ std::string PerfSummaryAndReset() {
   if (REXCVAR_GET(dp_native_perf_threads)) s += "; " + ThreadCpuReport();  // [new_fix_24092026]
   // [new_fix_24092026] 2.0.3: host object lifetime (native_retire.h), shader
   // view heap use, and the recording-path turn check (RecordScope).
-  s += fmt::format("; retired {} freed {} waiting {}, re-created without Release {}, views {}/{} rtv {}/{} dsv {}/{}, recording overlaps {}",
+  s += fmt::format("; retired {} freed {} waiting {}, re-created without Release {}, views {}/{} rtv {}/{} dsv {}/{}, recording overlaps {}"
+                   ", textures evicted {} (resident {})",  // [new_fix_03102026_evict]
                    g_retired_count.exchange(0, std::memory_order_relaxed),
                    g_freed_count.exchange(0, std::memory_order_relaxed), Retired().size(),
                    g_recreated_count.load(std::memory_order_relaxed), g.views.InUse(), kViewHeapSize, g.rtvs.InUse(),
                    kRtvHeapSize, g.dsvs.InUse(), kDsvHeapSize,
-                   g_record_overlaps.load(std::memory_order_relaxed));
+                   g_record_overlaps.load(std::memory_order_relaxed),
+                   g_evicted_count.exchange(0, std::memory_order_relaxed), g_resident_textures.load(std::memory_order_relaxed));
   {  // [new_fix_27092026_health] graphics health since the previous line
     std::lock_guard<std::mutex> lock(g_health_mutex);
     s += fmt::format("; health: create failures {} (1x fallbacks {}), 3D scale capped {}, recreated {}, zero-texture "
