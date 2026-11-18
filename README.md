@@ -30,6 +30,10 @@
 > [!IMPORTANT]
 > **You provide your own legally-owned copy of the game** (PAL or USA Xbox 360 disc, as an `.iso` or extracted files). The release contains the host program only: no `default.xex`, no game data. See [Legal](#legal).
 
+> [!TIP]
+> **New from the «Little Bit» team: [UltimateFIXDP](https://github.com/LittleBitUA/UltimateFIXDP)**, an all-in-one fix for the PC version, *Deadly Premonition: The Director's Cut* (Steam). One DLL in the game folder and a settings menu in game (F10): crash and save fixes, the low-FPS fix, real output resolution with supersampling, SSAO, native DualSense with adaptive triggers, the full map with waypoints, photo mode. It was built with what we learned from this recompilation, by comparing the PC port with the Xbox 360 original.
+> <br>**Playing the Steam version? [Get UltimateFIXDP →](https://github.com/LittleBitUA/UltimateFIXDP/releases/latest)**
+
 ## At a glance
 
 | | |
